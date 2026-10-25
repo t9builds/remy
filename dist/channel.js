@@ -6976,7 +6976,8 @@ var require_dist = __commonJS(function(exports, module) {
 });
 
 // src/channel.ts
-import { appendFileSync as appendFileSync2, openSync, readSync, closeSync, statSync as statSync2 } from "fs";
+import { appendFileSync as appendFileSync2, openSync, readSync, closeSync, statSync as statSync2, mkdirSync as mkdirSync2 } from "fs";
+import { join as join2 } from "path";
 
 // node_modules/zod/v4/core/util.js
 function getEnumValues(entries) {
@@ -15331,6 +15332,7 @@ var PATHS = {
   spawned: join(REMY_DIR, "spawned.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
   log: join(REMY_DIR, "channel.log"),
+  taskDir: (id) => join(REMY_DIR, "tasks", id),
   slackState: (workspace) => join(REMY_DIR, `slack-state.${workspace}.json`),
   tokenFile: (workspace, kind) => join(REMY_DIR, `slack-${kind}-token.${workspace}`)
 };
@@ -15341,7 +15343,8 @@ var DEFAULTS = {
   spawnPermissionMode: "auto",
   spawnWorktree: true,
   digestMinutes: 15,
-  coordinatorName: "remy"
+  coordinatorName: "remy",
+  triggerEmoji: "mouse"
 };
 function ensureDir() {
   if (!existsSync(REMY_DIR))
@@ -15453,6 +15456,59 @@ class Slack {
   async replies(channel, ts, oldest) {
     const r = await this.call("conversations.replies", { channel, ts, oldest, inclusive: false, limit: 50 });
     return r.messages.filter((m) => m.ts !== ts);
+  }
+  async recent(channel, limit = 100) {
+    const r = await this.call("conversations.history", { channel, limit });
+    return r.messages.reverse();
+  }
+  async thread(channel, ts) {
+    const r = await this.call("conversations.replies", { channel, ts, limit: 100 });
+    return { messages: r.messages, truncated: !!r.has_more };
+  }
+  async memberChannels() {
+    const out = [];
+    let cursor;
+    do {
+      const r = await this.call("users.conversations", { types: "public_channel,private_channel", exclude_archived: true, limit: 200, cursor });
+      out.push(...r.channels.map((c) => ({ id: c.id, name: c.name })));
+      cursor = r.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+    return out;
+  }
+  async reactedBy(user, limit = 20) {
+    const r = await this.call("reactions.list", { user, limit, full: true });
+    return r.items.filter((i) => i.type === "message" && i.message).map((i) => ({ channel: i.channel, message: i.message }));
+  }
+  async react(channel, ts, name) {
+    await this.call("reactions.add", { channel, timestamp: ts, name });
+  }
+  async permalink(channel, ts) {
+    return (await this.call("chat.getPermalink", { channel, message_ts: ts })).permalink;
+  }
+  names = new Map;
+  async userName(id) {
+    if (!this.names.has(id)) {
+      try {
+        const u = (await this.call("users.info", { user: id })).user;
+        this.names.set(id, u.profile?.display_name || u.real_name || u.name || id);
+      } catch {
+        this.names.set(id, id);
+      }
+    }
+    return this.names.get(id);
+  }
+  async download(url, path) {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${this.token}` } });
+    if (!res.ok)
+      throw new Error(`download ${res.status}`);
+    await Bun.write(path, res);
+  }
+  async whoami() {
+    const res = await fetch("https://slack.com/api/auth.test", { method: "POST", headers: { Authorization: `Bearer ${this.token}` } });
+    const body = await res.json();
+    if (!body.ok)
+      throw new SlackError("auth.test", body.error);
+    return { userId: body.user_id, scopes: (res.headers.get("x-oauth-scopes") ?? "").split(",").map((s) => s.trim()).filter(Boolean) };
   }
 }
 function socketMode(appToken, onMessage, log) {
@@ -15682,6 +15738,147 @@ function formatTable(s) {
 `);
 }
 
+// src/task.ts
+var taskId = (channel, ts) => `${channel}-${ts.replace(".", "-")}`;
+function cleanText(text, names) {
+  return text.replace(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g, (_, id) => `@${names.get(id) ?? id}`).replace(/<#[A-Z0-9]+\|([^>]*)>/g, "#$1").replace(/<!(here|channel|everyone)>/g, "@$1").replace(/<(https?:[^|>]+)\|([^>]+)>/g, "$2 ($1)").replace(/<(https?:[^>]+)>/g, "$1").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+function requestText(text, botUserId) {
+  return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "").replace(/\s+/g, " ").trim();
+}
+function clock(ts) {
+  const d = new Date(Number(ts) * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function formatTranscript(messages, names, opts) {
+  return messages.map((m) => {
+    const who = m.user ? names.get(m.user) ?? m.user : m.bot_id ? "bot" : "unknown";
+    const body = cleanText(m.text ?? "", names).split(`
+`).join(`
+    `);
+    const lines = [`[${clock(m.ts)}] ${who}: ${body}`];
+    for (const f of opts.files?.get(m.ts) ?? [])
+      lines.push(`    (attachment: ${f})`);
+    if (m.ts === opts.triggerTs)
+      lines.push(`    \u2190 ${opts.triggerNote}`);
+    return lines.join(`
+`);
+  }).join(`
+`);
+}
+function taskEvent(t) {
+  const how = t.trigger === "mention" ? `${t.requester} mentioned you in #${t.channelName}: "${t.request || "(no text)"}"` : `${t.requester} reacted with the trigger emoji to a message in #${t.channelName} (marked below).`;
+  return [
+    how,
+    `Default repo for #${t.channelName}: ${t.defaultRepo ?? "none set"}`,
+    `Thread: ${t.permalink}${t.truncated ? " (longer than shown)" : ""}`,
+    "",
+    "<slack-thread>",
+    t.transcript,
+    "</slack-thread>"
+  ].join(`
+`);
+}
+
+// src/watch.ts
+class ChannelWatcher {
+  slack;
+  opts;
+  channels = [];
+  channelsAt = 0;
+  reactionsOff = false;
+  constructor(slack, opts) {
+    this.slack = slack;
+    this.opts = opts;
+  }
+  async scan() {
+    const { state } = this.opts;
+    if (Date.now() - this.channelsAt > 10 * 60000) {
+      this.channels = await this.slack.memberChannels();
+      this.channelsAt = Date.now();
+    }
+    for (const ch of this.channels)
+      await this.scanChannel(ch);
+    if (!this.reactionsOff)
+      await this.scanReactions();
+    const old = Date.now() - 14 * 24 * 3600000;
+    for (const [k, at] of Object.entries(state.handled))
+      if (at < old)
+        delete state.handled[k];
+  }
+  async scanChannel(ch) {
+    const msgs = await this.slack.recent(ch.id, 100);
+    const prev = this.opts.state.channels[ch.id];
+    const cs = prev ?? { since: "0", threads: {} };
+    const threads = {};
+    for (const m of msgs) {
+      if (!prev) {
+        if (m.latest_reply)
+          threads[m.ts] = m.latest_reply;
+        if (this.hasMyEmoji(m))
+          this.opts.state.handled[`${ch.id}:${m.ts}`] = Date.now();
+        continue;
+      }
+      if (m.ts > cs.since)
+        await this.consider(ch, m, m.thread_ts ?? m.ts);
+      if (this.hasMyEmoji(m))
+        await this.fire(ch, m, m.thread_ts ?? m.ts, "reaction");
+      const seen = cs.threads[m.ts] ?? m.ts;
+      threads[m.ts] = seen;
+      if (m.latest_reply && m.latest_reply > seen && !this.opts.isTracked(ch.id, m.ts)) {
+        for (const r of await this.slack.replies(ch.id, m.ts, seen)) {
+          threads[m.ts] = r.ts;
+          await this.consider(ch, r, m.ts);
+        }
+      }
+    }
+    const newest = msgs.at(-1)?.ts;
+    this.opts.state.channels[ch.id] = { since: newest && newest > cs.since ? newest : cs.since === "0" ? (Date.now() / 1000).toFixed(6) : cs.since, threads };
+  }
+  async scanReactions() {
+    let items;
+    try {
+      items = await this.slack.reactedBy(this.opts.me, 20);
+    } catch (e) {
+      this.reactionsOff = true;
+      this.opts.log("reactions.list unavailable; the emoji trigger works on top-level messages only:", e?.message ?? e);
+      return;
+    }
+    const baseline = !this.opts.state.reactionsBaseline;
+    for (const { channel, message } of items) {
+      const ch = this.channels.find((c) => c.id === channel);
+      if (!ch || !this.hasMyEmoji(message))
+        continue;
+      if (baseline)
+        this.opts.state.handled[`${channel}:${message.ts}`] = Date.now();
+      else
+        await this.fire(ch, message, message.thread_ts ?? message.ts, "reaction");
+    }
+    this.opts.state.reactionsBaseline = true;
+  }
+  async consider(ch, m, root) {
+    if (m.user !== this.opts.me || m.bot_id)
+      return;
+    if (this.opts.isTracked(ch.id, root))
+      return;
+    if (m.text?.includes(`<@${this.opts.bot}`))
+      await this.fire(ch, m, root, "mention");
+  }
+  async fire(ch, message, root, kind) {
+    const key = `${ch.id}:${message.ts}`;
+    if (this.opts.state.handled[key])
+      return;
+    this.opts.state.handled[key] = Date.now();
+    if (kind === "reaction" && this.opts.isTracked(ch.id, root))
+      return;
+    await this.opts.onTrigger({ channel: ch.id, channelName: ch.name, message, root, kind });
+  }
+  hasMyEmoji(m) {
+    return !!m.reactions?.some((r) => r.name === this.opts.emoji && r.users?.includes(this.opts.me));
+  }
+}
+
 // src/channel.ts
 var config2 = loadConfig();
 var log = (...a) => {
@@ -15691,13 +15888,14 @@ var log = (...a) => {
   } catch {}
 };
 var INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel source="remy-slack" kind="..." workspace="...">:
-- kind="user_message": the user wrote to you in Slack. Answer with slack_post, passing the same workspace. If the tag has thread_ts, pass it as thread_ts. If it has session, the user is replying in that agent's thread.
+- kind="user_message": the user wrote to you in Slack. Answer with slack_post, passing the same workspace, and channel and thread_ts when the tag has them. If it has session, the user is replying in that agent's thread.
+- kind="task_request": the user mentioned you, or reacted with the trigger emoji, in a channel thread. Follow "Tasks from Slack threads" in your instructions.
 - kind="agent_needs_input": a session is blocked waiting for the user. Post it with slack_post(workspace, session=<name>, expect_reply=true).
 - kind="agent_finished": a background agent ended its turn. Report it (name, PR link, status) with slack_post(workspace, session=<name>).
 - kind="digest": sessions or PRs changed since the last digest. Post one compact summary to that workspace.
 - kind="system": a note from the remy-slack server itself.
 Always pass the event's workspace to slack_post. Slack text uses mrkdwn: *bold*, _italic_, \`code\`, <https://url|label>. Keep messages short.`;
-var mcp = new Server({ name: "remy-slack", version: "0.2.0" }, {
+var mcp = new Server({ name: "remy-slack", version: "0.3.0" }, {
   capabilities: {
     experimental: { "claude/channel": {}, "claude/channel/permission": {} },
     tools: {}
@@ -15732,19 +15930,22 @@ class Bridge {
     return this.dm;
   }
   async post(text, opts = {}) {
-    const ts = await this.slack.post(await this.ensureDm(), text, opts.thread_ts || undefined);
+    const channel = opts.channel || undefined;
+    const ts = await this.slack.post(channel ?? await this.ensureDm(), text, opts.thread_ts || undefined);
     const root = opts.thread_ts || ts;
-    if (opts.session || opts.expect_reply) {
-      const prev = this.state.threads[root];
+    const prev = this.state.threads[root];
+    if (opts.session || opts.expect_reply || prev) {
       this.state.threads[root] = {
+        ...prev,
+        channel: channel ?? prev?.channel,
         session: opts.session ?? prev?.session,
         expectReply: !!opts.expect_reply || !!prev?.expectReply,
         postedAt: Date.now(),
         lastSeen: prev?.lastSeen ?? ts
       };
-      const dayAgo = Date.now() - 24 * 3600000;
+      const now = Date.now();
       for (const [k, t] of Object.entries(this.state.threads))
-        if (t.postedAt < dayAgo)
+        if (t.postedAt < now - (t.channel ? 7 : 1) * 24 * 3600000)
           delete this.state.threads[k];
       this.save();
     }
@@ -15752,10 +15953,10 @@ class Bridge {
       this.lastInboundAt = Date.now();
     return ts;
   }
-  async update(ts, text) {
-    await this.slack.update(await this.ensureDm(), ts, text);
+  async update(ts, text, channel) {
+    await this.slack.update(channel || await this.ensureDm(), ts, text);
   }
-  async handleInbound(m, threadRoot) {
+  async handleInbound(m, threadRoot, channel) {
     if (m.user !== this.ws.slackUserId || m.bot_id)
       return;
     if (m.subtype && m.subtype !== "thread_broadcast")
@@ -15770,9 +15971,11 @@ class Bridge {
       return;
     }
     const root = threadRoot ?? (m.thread_ts && m.thread_ts !== m.ts ? m.thread_ts : undefined);
-    await push("user_message", m.text, {
+    const text = this.botUserId ? requestText(m.text, this.botUserId) : m.text;
+    await push("user_message", text, {
       workspace: this.ws.name,
       ts: m.ts,
+      channel: channel ?? "",
       thread_ts: root ?? "",
       session: root ? this.state.threads[root]?.session ?? "" : ""
     });
@@ -15807,7 +16010,7 @@ class Bridge {
       await this.handleInbound(m);
     }
     if (this.tick++ % 2 === 0) {
-      const waiting = Object.entries(this.state.threads).filter(([, t]) => t.expectReply).sort(([, a], [, b]) => b.postedAt - a.postedAt).slice(0, 5);
+      const waiting = Object.entries(this.state.threads).filter(([, t]) => t.expectReply && !t.channel).sort(([, a], [, b]) => b.postedAt - a.postedAt).slice(0, 5);
       for (const [root, t] of waiting) {
         for (const m of await this.slack.replies(channel, root, t.lastSeen)) {
           t.lastSeen = m.ts;
@@ -15816,6 +16019,121 @@ class Bridge {
       }
     }
     this.save();
+  }
+  botUserId = "";
+  watcher;
+  async startWatching() {
+    let me;
+    try {
+      me = await this.slack.whoami();
+    } catch (e) {
+      log(`[${this.ws.name}] auth.test failed`, e?.message ?? e);
+      return;
+    }
+    this.botUserId = me.userId;
+    const missing = ["channels:read", "groups:read", "channels:history", "groups:history"].filter((s) => !me.scopes.includes(s));
+    if (missing.length === 4)
+      return log(`[${this.ws.name}] no channel scopes; channel tasks off`);
+    if (missing.length)
+      log(`[${this.ws.name}] missing ${missing.join(", ")}; some channels may not be readable`);
+    this.state.watch ??= { channels: {}, handled: {} };
+    this.watcher = new ChannelWatcher(this.slack, {
+      me: this.ws.slackUserId,
+      bot: this.botUserId,
+      emoji: config2.triggerEmoji,
+      state: this.state.watch,
+      isTracked: (channel, root) => this.state.threads[root]?.channel === channel,
+      onTrigger: (t) => this.startTask(t),
+      log: (...a) => log(`[${this.ws.name}]`, ...a)
+    });
+    let tick = 0;
+    let failures = 0;
+    for (;; ) {
+      const full = tick++ % 3 === 0;
+      try {
+        if (full)
+          await this.watcher.scan();
+        await this.pollChannelThreads(full);
+        failures = 0;
+      } catch (e) {
+        log(`[${this.ws.name}] watch error`, e?.message ?? e);
+        if (++failures === 5)
+          await push("system", `Watching Slack channels in workspace "${this.ws.name}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal.`);
+        if (e?.retryAfter)
+          await Bun.sleep(e.retryAfter * 1000);
+      }
+      this.save();
+      await Bun.sleep(15000);
+    }
+  }
+  async pollChannelThreads(all) {
+    const due = Object.entries(this.state.threads).filter(([, t]) => t.channel && (all || t.expectReply && Date.now() - t.postedAt < 30 * 60000)).sort(([, a], [, b]) => b.postedAt - a.postedAt).slice(0, 10);
+    for (const [root, t] of due) {
+      for (const m of await this.slack.replies(t.channel, root, t.lastSeen)) {
+        t.lastSeen = m.ts;
+        await this.handleInbound(m, root, t.channel);
+      }
+    }
+  }
+  async startTask(t) {
+    const id = taskId(t.channel, t.root);
+    const dir = PATHS.taskDir(id);
+    mkdirSync2(dir, { recursive: true, mode: 448 });
+    const { messages, truncated } = await this.slack.thread(t.channel, t.root);
+    const thread = messages.length ? messages : [t.message];
+    const names = new Map;
+    for (const m of thread)
+      for (const uid of [m.user, ...(m.text?.match(/<@([A-Z0-9]+)/g) ?? []).map((x) => x.slice(2))]) {
+        if (uid && !names.has(uid))
+          names.set(uid, await this.slack.userName(uid));
+      }
+    const files = new Map;
+    let saved = 0;
+    for (const m of thread)
+      for (const f of m.files ?? []) {
+        if (!f.url_private_download || (f.size ?? 0) > 20000000 || saved >= 10)
+          continue;
+        const path = join2(dir, `${++saved}-${(f.name ?? "file").replace(/[^\w.-]+/g, "_")}`);
+        try {
+          await this.slack.download(f.url_private_download, path);
+          files.set(m.ts, [...files.get(m.ts) ?? [], path]);
+        } catch (e) {
+          log(`[${this.ws.name}] file download failed`, e?.message ?? e);
+        }
+      }
+    const requester = await this.slack.userName(this.ws.slackUserId);
+    const task = {
+      id,
+      workspace: this.ws.name,
+      channel: t.channel,
+      channelName: t.channelName,
+      threadTs: t.root,
+      triggerTs: t.message.ts,
+      trigger: t.kind,
+      permalink: await this.slack.permalink(t.channel, t.root).catch(() => ""),
+      requester,
+      request: t.kind === "mention" ? requestText(t.message.text, this.botUserId) : "",
+      defaultRepo: this.ws.channelRepos?.[t.channelName],
+      transcript: formatTranscript(thread, names, {
+        triggerTs: t.message.ts,
+        triggerNote: t.kind === "mention" ? `${requester} asked you here` : `${requester} reacted :${config2.triggerEmoji}: here`,
+        files
+      }),
+      truncated,
+      filesDir: saved ? dir : undefined,
+      createdAt: Date.now()
+    };
+    writeJson(join2(dir, "task.json"), task);
+    await this.slack.react(t.channel, t.message.ts, "eyes").catch(() => {});
+    this.state.threads[t.root] = { channel: t.channel, task: id, expectReply: false, postedAt: Date.now(), lastSeen: thread.at(-1).ts };
+    this.save();
+    await push("task_request", taskEvent(task), {
+      workspace: this.ws.name,
+      task: id,
+      channel: t.channel,
+      thread_ts: t.root,
+      default_repo: task.defaultRepo ?? ""
+    });
   }
   pollDelay() {
     const recentThread = Object.values(this.state.threads).some((t) => t.expectReply && Date.now() - t.postedAt < 30 * 60000);
@@ -15845,14 +16163,18 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "slack_post",
-      description: "Post a message to the user's Slack DM with the bot. Returns the message ts.",
+      description: "Post a message to the user's Slack DM with the bot, or in a channel thread. Returns the message ts.",
       inputSchema: {
         type: "object",
         properties: {
           text: { type: "string", description: "Slack mrkdwn text" },
           workspace: { type: "string", description: `Workspace from the event tag. Configured: ${[...bridges.keys()].join(", ") || "none"}` },
+          channel: { type: "string", description: "Channel ID from the event tag, to answer in a channel thread. Leave out for the DM." },
           thread_ts: { type: "string", description: "Reply in this thread" },
-          session: { type: "string", description: "Agent session this message is about; replies in its thread come back tagged with it" },
+          session: {
+            type: "string",
+            description: "Agent session this message is about; replies in its thread come back tagged with it. For an agent started from a channel thread, leave channel and thread_ts out: the message goes to that thread."
+          },
           expect_reply: { type: "boolean", description: "Watch this message's thread for the user's reply (use for questions)" }
         },
         required: ["text"]
@@ -15863,7 +16185,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: "Edit a message the bot posted earlier.",
       inputSchema: {
         type: "object",
-        properties: { ts: { type: "string" }, text: { type: "string" }, workspace: { type: "string" } },
+        properties: { ts: { type: "string" }, text: { type: "string" }, workspace: { type: "string" }, channel: { type: "string" } },
         required: ["ts", "text"]
       }
     }
@@ -15871,13 +16193,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 }));
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const a = req.params.arguments ?? {};
+  const origin = a.session && !a.channel && !a.thread_ts ? readJson(PATHS.spawned, {})[a.session]?.slack : undefined;
+  if (origin)
+    Object.assign(a, { workspace: origin.workspace, channel: origin.channel, thread_ts: origin.threadTs });
   const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
   if (req.params.name === "slack_post") {
-    const ts = await bridge.post(String(a.text), { thread_ts: a.thread_ts, session: a.session, expect_reply: a.expect_reply });
-    return { content: [{ type: "text", text: `posted to ${bridge.ws.name} ts=${ts}` }] };
+    const ts = await bridge.post(String(a.text), { channel: a.channel, thread_ts: a.thread_ts, session: a.session, expect_reply: a.expect_reply });
+    return { content: [{ type: "text", text: `posted to ${bridge.ws.name}${a.channel ? ` ${a.channel}` : ""} ts=${ts}` }] };
   }
   if (req.params.name === "slack_update") {
-    await bridge.update(String(a.ts), String(a.text));
+    await bridge.update(String(a.ts), String(a.text), a.channel);
     return { content: [{ type: "text", text: "updated" }] };
   }
   throw new Error(`unknown tool: ${req.params.name}`);
@@ -16025,6 +16350,7 @@ for (const b of bridges.values()) {
     b.startSocket(app);
   else
     b.startPolling();
+  b.startWatching();
 }
 tailEvents();
 await digest();

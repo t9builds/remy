@@ -23,6 +23,8 @@ At api.slack.com/apps → the app → **OAuth & Permissions** → **Bot Token Sc
 - `im:read`
 - `im:write`
 
+For tasks started from channel threads (a mention of the bot, or the trigger emoji), also add `channels:read`, `groups:read`, `channels:history`, `groups:history`, `reactions:read`, `reactions:write`, `users:read` and `files:read`, and `/invite` the bot to those channels. `remy doctor` lists any that are missing.
+
 Then **Reinstall to Workspace** and copy the **Bot User OAuth Token** (`xoxb-…`). In **App Home**, turn on the **Messages Tab** and tick "Allow users to send messages", or the user can't DM the bot.
 
 For `socket`, also: enable **Socket Mode**; create an **App-Level Token** with `connections:write` under Basic Information (`xapp-…`); under **Event Subscriptions**, enable events and subscribe to the bot event `message.im`.

@@ -16,6 +16,7 @@ description: Start a new background Claude Code agent on a task in one of the us
    - `--name`: a short kebab-case name, e.g. `api-fix-login`. Otherwise one is made from the repo and task.
    - `--no-worktree`: run in the repo checkout itself instead of a new worktree. Only when the user asks.
    - `--mode <mode>`: permission mode. Defaults to the configured one (normally `auto`).
+   - `--slack-task <id>`: the task came from a Slack thread (`task` in a `task_request` event). The task text is then a one-line brief; the agent also gets the thread and its link, and Remy reports in that thread.
 
    The command prints JSON with the session `name`. The task text goes through the user's `spawnTemplate` (for example `/start-feature {task}`).
 4. Tell the user the agent's name and that they can watch it with `claude attach <name>`.

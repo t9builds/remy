@@ -16,8 +16,8 @@ const HELP = `remy — coordinator for your Claude Code sessions
   remy start                 Start the coordinator session with the Slack channel
   remy status [--json]       All sessions with repo, branch, PR and CI
   remy changes               What changed since the last snapshot (updates the snapshot)
-  remy spawn --repo <r> [--name <n>] [--no-worktree] [--mode <m>] <task…>
-                           Start a background agent on a task
+  remy spawn --repo <r> [--name <n>] [--slack-task <id>] [--no-worktree] [--mode <m>] <task…>
+                           Start a background agent on a task (--slack-task: from a Slack thread)
   remy post [--workspace <w>] <text>
                            Send yourself a Slack DM (test)
   remy doctor                Check requirements
@@ -42,7 +42,10 @@ function sh(cmd: string[]) {
   return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
 }
 
-function doctor(): boolean {
+const DM_SCOPES = ["chat:write", "im:history", "im:read", "im:write"];
+const CHANNEL_SCOPES = ["channels:read", "groups:read", "channels:history", "groups:history", "reactions:read", "reactions:write", "users:read", "files:read"];
+
+async function doctor(): Promise<boolean> {
   let ok = true;
   const check = (label: string, pass: boolean, hint: string) => {
     console.log(`${pass ? "✓" : "✗"} ${label}${pass ? "" : ` — ${hint}`}`);
@@ -57,7 +60,19 @@ function doctor(): boolean {
   for (const ws of c.workspaces) {
     const label = `[${ws.name}]`;
     check(`${label} Slack user ID`, /^U[A-Z0-9]+$/.test(ws.slackUserId), `run \`remy setup ${ws.name}\``);
-    check(`${label} bot token`, !!readToken(ws.name, "bot"), `run \`remy setup ${ws.name}\``);
+    const token = readToken(ws.name, "bot");
+    check(`${label} bot token`, !!token, `run \`remy setup ${ws.name}\``);
+    if (token) {
+      const who = await new Slack(token).whoami().catch((e) => ({ error: e?.message ?? String(e) }));
+      if ("error" in who) check(`${label} bot token works`, false, who.error);
+      else {
+        const lacks = (want: string[]) => want.filter((s) => !who.scopes.includes(s));
+        const dm = lacks(DM_SCOPES);
+        check(`${label} Slack scopes for DMs`, !dm.length, `add ${dm.join(", ")} as Bot Token Scopes, reinstall the app, then \`remy setup ${ws.name}\``);
+        const ch = lacks(CHANNEL_SCOPES);
+        console.log(ch.length ? `! ${label} tasks from channel threads need ${ch.join(", ")}` : `✓ ${label} Slack scopes for channel tasks`);
+      }
+    }
     if (ws.transport === "socket") check(`${label} app-level token (Socket Mode)`, !!readToken(ws.name, "app"), `run \`remy setup ${ws.name}\``);
   }
   const catchAll = c.workspaces.filter((w) => !w.repos?.length && !w.paths?.length);
@@ -94,7 +109,7 @@ async function setup(only?: string) {
 
   installShim();
   console.log("");
-  doctor();
+  await doctor();
   console.log("\nNext: run `remy start` in a terminal you can leave open.");
 }
 
@@ -111,6 +126,10 @@ async function setupWorkspace(c: Config, name: string) {
   ws.repos = repos ? repos.split(",").map((r) => r.trim()).filter(Boolean) : undefined;
   const paths = ask("Folders, comma-separated", ws.paths?.join(", "));
   ws.paths = paths ? paths.split(",").map(expandHome) : undefined;
+  console.log("Tasks from Slack threads: invite the bot to a channel, then mention it in a thread (or react with :" + c.triggerEmoji + ":).");
+  const cr = ask('Default repo per channel, e.g. "bugs=api, web-bugs=web" (empty: none)', Object.entries(ws.channelRepos ?? {}).map(([k, v]) => `${k}=${v}`).join(", "));
+  const pairs = cr.split(",").map((p) => p.split("=").map((x) => x.trim().replace(/^#/, ""))).filter(([k, v]) => k && v);
+  ws.channelRepos = pairs.length ? Object.fromEntries(pairs) : undefined;
   if (!existing) c.workspaces.push(ws);
   saveConfig(c);
 
@@ -149,8 +168,8 @@ exec "$root/bin/remy" "$@"
   console.log(`\n✓ Installed ${shim}${(process.env.PATH ?? "").split(":").includes(bin) ? "" : ` (add ${bin} to your PATH)`}`);
 }
 
-function start(extra: string[]) {
-  if (!doctor()) {
+async function start(extra: string[]) {
+  if (!(await doctor())) {
     console.error("\nFix the items above first (`remy setup`).");
     process.exit(1);
   }
@@ -193,10 +212,11 @@ try {
       const repo = flag(args, "--repo");
       const name = flag(args, "--name");
       const mode = flag(args, "--mode");
+      const slackTask = flag(args, "--slack-task");
       const noWt = bool(args, "--no-worktree");
       const task = args.join(" ").trim();
-      if (!repo || !task) throw new Error("usage: remy spawn --repo <repo> [--name <name>] [--no-worktree] [--mode <mode>] <task…>");
-      const r = await spawnAgent({ repo, task, name, worktree: noWt ? false : undefined, permissionMode: mode });
+      if (!repo || !task) throw new Error("usage: remy spawn --repo <repo> [--name <name>] [--slack-task <id>] [--no-worktree] [--mode <mode>] <task…>");
+      const r = await spawnAgent({ repo, task, name, worktree: noWt ? false : undefined, permissionMode: mode, slackTask });
       console.log(JSON.stringify(r, null, 2));
       break;
     }
@@ -214,10 +234,10 @@ try {
       await setup(args[0]);
       break;
     case "start":
-      start(args);
+      await start(args);
       break;
     case "doctor":
-      process.exit(doctor() ? 0 : 1);
+      process.exit((await doctor()) ? 0 : 1);
     case "dir":
       console.log(REMY_DIR);
       break;

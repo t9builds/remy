@@ -10,6 +10,8 @@ export const PATHS = {
   spawned: join(REMY_DIR, "spawned.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
   log: join(REMY_DIR, "channel.log"),
+  /** One folder per Slack task: task.json plus files downloaded from the thread. */
+  taskDir: (id: string) => join(REMY_DIR, "tasks", id),
   slackState: (workspace: string) => join(REMY_DIR, `slack-state.${workspace}.json`),
   tokenFile: (workspace: string, kind: TokenKind) => join(REMY_DIR, `slack-${kind}-token.${workspace}`),
 };
@@ -32,6 +34,8 @@ export type Workspace = {
   repos?: string[];
   /** Sessions whose folder is under one of these report here. */
   paths?: string[];
+  /** Default repo per Slack channel for tasks started from a thread, e.g. { "bugs": "api" }. Repo as for `remy spawn --repo`. */
+  channelRepos?: Record<string, string>;
 };
 
 export type Config = {
@@ -48,6 +52,8 @@ export type Config = {
   digestMinutes: number;
   /** Session name of the coordinator itself. */
   coordinatorName: string;
+  /** Reacting with this emoji (Slack name, no colons) to a message starts a task, like mentioning the bot. */
+  triggerEmoji: string;
 };
 
 export const DEFAULTS: Config = {
@@ -58,6 +64,7 @@ export const DEFAULTS: Config = {
   spawnWorktree: true,
   digestMinutes: 15,
   coordinatorName: "remy",
+  triggerEmoji: "mouse",
 };
 
 export function ensureDir() {

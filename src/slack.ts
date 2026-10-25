@@ -44,6 +44,72 @@ export class Slack {
     const r = await this.call("conversations.replies", { channel, ts, oldest, inclusive: false, limit: 50 });
     return (r.messages as SlackMessage[]).filter((m) => m.ts !== ts);
   }
+
+  /** The latest `limit` top-level messages, oldest first; each carries reply_count, latest_reply and reactions. */
+  async recent(channel: string, limit = 100): Promise<SlackMessage[]> {
+    const r = await this.call("conversations.history", { channel, limit });
+    return (r.messages as SlackMessage[]).reverse();
+  }
+
+  /** A whole thread, parent first. `truncated` when it has more than one page. */
+  async thread(channel: string, ts: string): Promise<{ messages: SlackMessage[]; truncated: boolean }> {
+    const r = await this.call("conversations.replies", { channel, ts, limit: 100 });
+    return { messages: r.messages, truncated: !!r.has_more };
+  }
+
+  /** Public and private channels the bot is a member of. */
+  async memberChannels(): Promise<{ id: string; name: string }[]> {
+    const out: { id: string; name: string }[] = [];
+    let cursor: string | undefined;
+    do {
+      const r = await this.call("users.conversations", { types: "public_channel,private_channel", exclude_archived: true, limit: 200, cursor });
+      out.push(...r.channels.map((c: any) => ({ id: c.id, name: c.name })));
+      cursor = r.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+    return out;
+  }
+
+  /** Messages `user` reacted to recently, newest first. */
+  async reactedBy(user: string, limit = 20): Promise<{ channel: string; message: SlackMessage }[]> {
+    const r = await this.call("reactions.list", { user, limit, full: true });
+    return (r.items as any[]).filter((i) => i.type === "message" && i.message).map((i) => ({ channel: i.channel, message: i.message }));
+  }
+
+  async react(channel: string, ts: string, name: string) {
+    await this.call("reactions.add", { channel, timestamp: ts, name });
+  }
+
+  async permalink(channel: string, ts: string): Promise<string> {
+    return (await this.call("chat.getPermalink", { channel, message_ts: ts })).permalink;
+  }
+
+  private names = new Map<string, string>();
+  async userName(id: string): Promise<string> {
+    if (!this.names.has(id)) {
+      try {
+        const u = (await this.call("users.info", { user: id })).user;
+        this.names.set(id, u.profile?.display_name || u.real_name || u.name || id);
+      } catch {
+        this.names.set(id, id);
+      }
+    }
+    return this.names.get(id)!;
+  }
+
+  /** Download a file the bot can see (needs files:read). */
+  async download(url: string, path: string) {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${this.token}` } });
+    if (!res.ok) throw new Error(`download ${res.status}`);
+    await Bun.write(path, res);
+  }
+
+  /** The bot's own user ID and the scopes its token has. */
+  async whoami(): Promise<{ userId: string; scopes: string[] }> {
+    const res = await fetch("https://slack.com/api/auth.test", { method: "POST", headers: { Authorization: `Bearer ${this.token}` } });
+    const body = (await res.json()) as any;
+    if (!body.ok) throw new SlackError("auth.test", body.error);
+    return { userId: body.user_id, scopes: (res.headers.get("x-oauth-scopes") ?? "").split(",").map((s) => s.trim()).filter(Boolean) };
+  }
 }
 
 /**
@@ -99,7 +165,18 @@ export function socketMode(appToken: string, onMessage: (m: SlackMessage) => Pro
   };
 }
 
-export type SlackMessage ={ ts: string; thread_ts?: string; user?: string; bot_id?: string; subtype?: string; text: string };
+export type SlackMessage = {
+  ts: string;
+  thread_ts?: string;
+  user?: string;
+  bot_id?: string;
+  subtype?: string;
+  text: string;
+  reply_count?: number;
+  latest_reply?: string;
+  reactions?: { name: string; users?: string[] }[];
+  files?: { name?: string; mimetype?: string; size?: number; url_private_download?: string }[];
+};
 
 export class SlackError extends Error {
   constructor(public method: string, public code: string, public retryAfter = 0) {

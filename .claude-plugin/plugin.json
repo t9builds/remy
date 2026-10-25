@@ -1,7 +1,7 @@
 {
   "name": "remy",
   "displayName": "Remy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A coordinator session that tracks all your Claude Code sessions and their PRs and talks to you through Slack.",
   "author": { "name": "Tomas Svatek" },
   "repository": "https://github.com/tomassvatek/remy",

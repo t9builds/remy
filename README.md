@@ -8,6 +8,7 @@ Remy is a coordinator for people who run many Claude Code sessions at once. One 
 - tell you when a background agent finishes, with its PR link and CI status
 - send a digest every 15 minutes when sessions, PRs or CI changed
 - ping you when a session is blocked waiting for input, and forward your Slack reply to that session
+- start an agent from a Slack thread when you mention the bot there or react with 🐭, and report in that thread
 
 Everything runs on your machine under your own Claude Code login. Teammates install it the same way and use their own subscription.
 
@@ -18,6 +19,7 @@ Everything runs on your machine under your own Claude Code login. Teammates inst
 | Plugin hooks (`Stop`, `Notification`, `SessionEnd`) | Every session appends its events to `~/.remy/events.jsonl` |
 | `remy status` | Joins `claude agents --json`, each session's git branch and `gh pr view` |
 | `remy-slack` channel (`src/channel.ts`) | Runs inside the `remy` session only. Reads your Slack DM with the bot in each workspace (polling or Socket Mode), pushes your messages, agent events and digests into the session, and gives Claude `slack_post` / `slack_update` |
+| `src/watch.ts` | Inside the channel: finds your mentions of the bot and your 🐭 reactions in the channels the bot is in |
 | `remy spawn` | `claude --bg -n <name> -w <name> --permission-mode auto "<task>"` in the chosen repo |
 | `coordinator.md` | The coordinator's instructions, appended to its system prompt |
 
@@ -48,7 +50,8 @@ At api.slack.com/apps → your app (an existing app works):
 
 1. **OAuth & Permissions** → **Bot Token Scopes**: `chat:write`, `im:history`, `im:read`, `im:write`. Reinstall the app and copy the bot token (`xoxb-…`).
 2. **App Home** → turn on the **Messages Tab** and allow users to send messages.
-3. For `socket` only:
+3. For tasks from channel threads, also add `channels:read`, `groups:read`, `channels:history`, `groups:history`, `reactions:read`, `reactions:write`, `users:read` and `files:read`, then `/invite` the bot to the channels you want to use it in. `remy doctor` lists what's missing.
+4. For `socket` only:
    - **Socket Mode** → enable.
    - **Basic Information** → **App-Level Tokens** → create one with `connections:write` (`xapp-…`).
    - **Event Subscriptions** → enable → **Subscribe to bot events** → `message.im`.
@@ -82,6 +85,17 @@ DM the bot:
 - "ask api-fix-login whether it's blocked"
 - reply in an agent's thread to answer its question
 
+### Tasks from Slack threads
+
+In any channel the bot is in, mention it in a thread (`@bot fix this, it's in api`) or react to a message with 🐭. Within about 45 seconds Remy reacts 👀, reads the whole thread, and starts an agent:
+
+1. The channel saves the thread to `~/.remy/tasks/<id>/` (names resolved, attachments downloaded) and hands it to the coordinator.
+2. The coordinator picks the repo: one you named, the channel's default (`channelRepos`), or one the thread makes obvious. If it isn't sure, it asks in the thread.
+3. `remy spawn --slack-task <id>` gives the agent a fixed prompt: the coordinator's one-line brief, your own words, the link, and the full thread, marked as information rather than instructions.
+4. The agent's start, questions, PR and finish are posted in that thread. Answer its questions there.
+
+Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
+
 From a terminal: `remy status`, `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`.
 
 ## Config
@@ -97,6 +111,7 @@ From a terminal: `remy status`, `remy spawn --repo <repo> <task>`, `remy changes
 | `spawnWorktree` | `true` | Give each spawned agent its own worktree |
 | `digestMinutes` | `15` | Minutes between change digests |
 | `coordinatorName` | `remy` | Session name of the coordinator |
+| `triggerEmoji` | `mouse` | Reacting with this emoji (Slack name) starts a task, like a mention |
 
 Each workspace:
 
@@ -107,6 +122,7 @@ Each workspace:
 | `transport` | `poll` or `socket` |
 | `repos` | GitHub repos whose sessions report here, e.g. `["acme-corp/*"]`; checked first |
 | `paths` | Folders whose sessions report here |
+| `channelRepos` | Default repo per channel for thread tasks, e.g. `{ "bugs": "api" }` |
 
 Leave out both `repos` and `paths` for the catch-all workspace.
 
@@ -128,6 +144,7 @@ A path covers the folder and everything inside it, not sibling folders that shar
 - With `poll`, Slack replies arrive within about 4 seconds while you're chatting and 15 seconds when idle. Slack allows about 50 reads a minute per app, shared by everyone using it, which is enough for 3–4 active people. `socket` is instant.
 - The coordinator's own permission prompts go to the catch-all workspace.
 - Sessions that aren't in a git checkout (for example started in `~/Repositories` itself) show without a repo or PR.
+- Channel tasks are polled every 45 seconds. A mention is found when its thread's first message is among the channel's latest 100; a 🐭 is found anywhere through `reactions.list`.
 - Custom channels are a Claude Code research preview and may change.
 
 ## Develop

@@ -32,7 +32,10 @@ export type Snapshot = { takenAt: number; sessions: SessionView[] };
 
 export type Change = { session: string; sessionId: string; cwd: string; repo?: string; what: string; detail: string; pr?: string };
 
-export type Spawned = Record<string, { id?: string; repo: string; task: string; startedAt: number }>;
+export type Spawned = Record<
+  string,
+  { id?: string; repo: string; task: string; startedAt: number; slack?: { workspace: string; channel: string; threadTs: string; task: string } }
+>;
 
 type AgentRow = { sessionId: string; name: string; kind: string; status: string; cwd: string; startedAt: number };
 
