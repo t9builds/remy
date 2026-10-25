@@ -3,13 +3,13 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { createMessenger, quietSink } from "./bridges";
-import { loadConfig, messengerLabel, messengersOf, PATHS, readJson, REMY_DIR, workspaceFor, writeJson, type Workspace } from "./config";
+import { compactEnv, compactPct, loadConfig, messengerLabel, messengersOf, PATHS, readJson, REMY_DIR, workspaceFor, writeJson, type Workspace } from "./config";
 import { doctor } from "./doctor";
 import { runHook } from "./hook";
 import { formatMerged } from "./merged";
 import { blocking } from "./messenger";
 import { setup } from "./setup";
-import { formatSession, formatTable, snapshotDiff, takeSnapshot, type Spawned } from "./snapshot";
+import { findSession, formatSession, formatTable, snapshotDiff, takeSnapshot, type Spawned } from "./snapshot";
 import { spawnAgent } from "./spawn";
 import { errorLine, formatChecks, formatHelp, pc, statusPaint } from "./ui";
 
@@ -77,7 +77,9 @@ async function start(extra: string[]) {
     "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention.",
   ];
   // Compact well before the window fills: every event is a turn that rereads the whole context.
-  const compact = c.coordinatorCompactPct ? { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(c.coordinatorCompactPct) } : {};
+  if (c.coordinatorCompactPct && !compactPct(c.coordinatorCompactPct))
+    console.log(pc.yellow(`! coordinatorCompactPct must be a whole number from 1 to 100; using Claude Code's default.`));
+  const compact = compactEnv(c.coordinatorCompactPct);
   const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...compact, REMY_ROLE: "coordinator" } });
   process.exit(r.exitCode ?? 0);
 }
@@ -103,9 +105,8 @@ try {
       const s = await takeSnapshot();
       const name = positionals[0];
       if (name) {
-        const one = s.sessions.find((x) => x.name === name) ?? s.sessions.find((x) => x.name.startsWith(name));
-        if (!one) throw new Error(`no running session "${name}"; \`remy status\` lists them`);
-        console.log(values.json ? JSON.stringify(one, null, 2) : formatSession(one, s.takenAt, statusPaint));
+        const session = findSession(s.sessions, name);
+        console.log(values.json ? JSON.stringify(session, null, 2) : formatSession(session, s.takenAt, statusPaint));
         break;
       }
       console.log(values.json ? JSON.stringify(s, null, 2) : formatTable(s, statusPaint));

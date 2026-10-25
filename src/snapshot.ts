@@ -237,6 +237,19 @@ export function formatTable(s: Snapshot, paint: Paint = PLAIN): string {
     .join("\n");
 }
 
+/** The session called `name`, else the only one whose name starts with it. */
+export function findSession(sessions: SessionView[], name: string): SessionView {
+  const exact = sessions.find((x) => x.name === name);
+  if (exact) return exact;
+  const hits = sessions.filter((x) => x.name.startsWith(name));
+  if (hits.length === 1) return hits[0]!;
+  throw new Error(
+    hits.length
+      ? `"${name}" matches ${hits.map((x) => x.name).join(", ")}; give the full name`
+      : `no running session "${name}"; \`remy status\` lists them`,
+  );
+}
+
 function ago(ms: number) {
   const m = Math.round(ms / 60_000);
   return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 48 * 60 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;

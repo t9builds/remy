@@ -207,6 +207,14 @@ var DEFAULTS = {
   coordinatorCompactPct: 50,
   triggerEmoji: "mouse"
 };
+function compactPct(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= 100 ? n : undefined;
+}
+function compactEnv(value, shell = process.env) {
+  const pct = compactPct(value);
+  return pct && !shell.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE ? { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(pct) } : {};
+}
 function ensureDir() {
   if (!existsSync(REMY_DIR))
     mkdirSync(REMY_DIR, { recursive: true, mode: 448 });
@@ -1846,6 +1854,15 @@ function formatTable(s, paint = PLAIN) {
     return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}${about}`;
   }).join(`
 `);
+}
+function findSession(sessions, name) {
+  const exact = sessions.find((x) => x.name === name);
+  if (exact)
+    return exact;
+  const hits = sessions.filter((x) => x.name.startsWith(name));
+  if (hits.length === 1)
+    return hits[0];
+  throw new Error(hits.length ? `"${name}" matches ${hits.map((x) => x.name).join(", ")}; give the full name` : `no running session "${name}"; \`remy status\` lists them`);
 }
 function ago(ms) {
   const m = Math.round(ms / 60000);
@@ -3778,7 +3795,9 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
     ...extra,
     "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention."
   ];
-  const compact = c.coordinatorCompactPct ? { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(c.coordinatorCompactPct) } : {};
+  if (c.coordinatorCompactPct && !compactPct(c.coordinatorCompactPct))
+    console.log(import_picocolors.default.yellow(`! coordinatorCompactPct must be a whole number from 1 to 100; using Claude Code's default.`));
+  const compact = compactEnv(c.coordinatorCompactPct);
   const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...compact, REMY_ROLE: "coordinator" } });
   process.exit(r.exitCode ?? 0);
 }
@@ -3803,10 +3822,8 @@ try {
       const s = await takeSnapshot();
       const name = positionals[0];
       if (name) {
-        const one = s.sessions.find((x) => x.name === name) ?? s.sessions.find((x) => x.name.startsWith(name));
-        if (!one)
-          throw new Error(`no running session "${name}"; \`remy status\` lists them`);
-        console.log(values.json ? JSON.stringify(one, null, 2) : formatSession(one, s.takenAt, statusPaint));
+        const session = findSession(s.sessions, name);
+        console.log(values.json ? JSON.stringify(session, null, 2) : formatSession(session, s.takenAt, statusPaint));
         break;
       }
       console.log(values.json ? JSON.stringify(s, null, 2) : formatTable(s, statusPaint));

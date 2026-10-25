@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ciOf, diff, formatSession, spawnedEntry, type Snapshot, type SessionView } from "./snapshot";
+import { ciOf, diff, findSession, formatSession, spawnedEntry, type Snapshot, type SessionView } from "./snapshot";
 
 const session = (over: Partial<SessionView> = {}): SessionView => ({
   sessionId: "s1", name: "api-fix", kind: "background", status: "busy", cwd: "/r", startedAt: 1, spawned: true, ...over,
@@ -58,4 +58,12 @@ test("formatSession shows one session with its last message cut short", () => {
   expect(out).toContain("  failing: tests");
   expect(out).toContain("  last: Stop 3m ago — " + "x".repeat(800) + "…");
   expect(out.length).toBeLessThan(1200);
+});
+
+test("findSession takes an exact name, else a unique prefix", () => {
+  const all = [session({ name: "api-ef" }), session({ name: "api-51" }), session({ name: "api" }), session({ name: "basil" })];
+  expect(findSession(all, "api").name).toBe("api");
+  expect(findSession(all, "bas").name).toBe("basil");
+  expect(() => findSession(all, "api-")).toThrow('"api-" matches api-ef, api-51; give the full name');
+  expect(() => findSession(all, "nope")).toThrow('no running session "nope"');
 });
