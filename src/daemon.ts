@@ -2,9 +2,9 @@
  * `remy daemon`: the long-running process that owns the relay, so it stays up when the coordinator restarts.
  * - Reads your messages in each configured workspace and pushes them to the coordinator. A workspace is a Slack
  *   workspace (slack-bridge.ts, which also starts tasks from channel threads) or a Telegram chat (telegram-bridge.ts).
- * - Tails ~/.remy/events.jsonl and pushes "agent needs input" / "background agent finished" right away.
- * - Every `digestMinutes`, diffs the session/PR snapshot and pushes the changes, if any. Spawned agents whose PR
- *   merged are closed then (merged.ts) and reported as merged.
+ * - Tails ~/.remy/events.jsonl and pushes an agent that needs input, or that ended its turn on a question, right away.
+ * - Every `digestMinutes`, diffs the session/PR snapshot and posts a notice of merged PRs and ended sessions, if
+ *   any, itself (notices.ts). Spawned agents whose PR merged are closed then (merged.ts) and reported as merged.
  * - Keeps one pinned "waiting on you" message per workspace (queue.ts), edited in place after each session event.
  * - Answers the coordinator's post / update, and relays the coordinator's own permission prompts.
  * The coordinator's channel (channel.ts) reaches all this over the link (link.ts); what's pushed while no
@@ -18,9 +18,10 @@ import type { RemyEvent } from "./hook";
 import { coordinatorTools, LinkServer, RESTART_EXIT, VERSION, type DaemonStatus, type LinkEvent, type Request } from "./link";
 import { closeMerged } from "./merged";
 import type { Messenger, Sink } from "./messenger";
-import { coalesce, digestWorthy, formatQueue, queueOf, questionOf, showQueue } from "./queue";
+import { formatNotice } from "./notices";
+import { coalesce, formatQueue, queueOf, questionOf, showQueue } from "./queue";
 import { threadRef } from "./slack-bridge";
-import { formatTable, githubRepoOf, listAgents, snapshotDiff, spawnedEntry, takeSnapshot, type Snapshot, type Spawned } from "./snapshot";
+import { githubRepoOf, listAgents, snapshotDiff, spawnedEntry, takeSnapshot, type Snapshot, type Spawned } from "./snapshot";
 
 const log = (...a: unknown[]) => {
   try {
@@ -179,10 +180,10 @@ async function onEvent(e: RemyEvent) {
   }
   if (e.event === "Stop" || e.event === "SessionEnd") {
     const s = await sessionInfo(e.session_id);
-    // A session remy closed because its PR merged is reported in the digest, not as finished.
+    // A session remy closed because its PR merged is reported in the notice, not as finished.
     if (!s.unattended || s.merged) return;
-    // A turn that ended without a question is already on the pinned list; only questions and exits reach the coordinator.
-    if (e.event === "Stop" && !questionOf(e.last)) return;
+    // Only a question needs the coordinator. Otherwise the pinned list shows the turn's end, and the notice an exit.
+    if (!questionOf(e.last)) return;
     if (debounced(`done:${e.session_id}`, 30_000)) return;
     const what = e.event === "Stop" ? "finished its turn" : `ended (${e.type ?? "exit"})`;
     await push("agent_finished", `${s.name} ${what}.\n\nLast message:\n${e.last ?? "(none)"}`, { workspace, session: s.name, cwd: e.cwd ?? "" });
@@ -231,19 +232,12 @@ async function digest() {
     const snapshot = { ...taken, sessions: taken.sessions.filter((s) => !closed.has(s.sessionId)) };
     if (closed.size) writeJson(PATHS.snapshot, snapshot);
     await refreshQueue(snapshot);
-    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged].filter(digestWorthy);
-    if (first || !changes.length) return;
-    // One digest per workspace, each listing only that workspace's sessions.
-    const names = new Set(bridges.keys());
-    if (!names.size) names.add("");
-    for (const name of names) {
-      const mine = changes.filter((c) => workspaceOf(c.cwd, c.repo) === name);
-      if (!mine.length) continue;
-      const sessions = snapshot.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === name);
-      const lines = mine.map((c) => `- ${c.session}: ${c.what} — ${c.detail}${c.pr ? ` (${c.pr})` : ""}`);
-      await push("digest", `Changes since last digest:\n${lines.join("\n")}\n\nSessions in this workspace:\n${formatTable({ ...snapshot, sessions })}`, {
-        workspace: name,
-      });
+    if (first) return;
+    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged];
+    // One notice per workspace, each with only that workspace's sessions.
+    for (const [name, b] of bridges) {
+      const text = formatNotice(changes.filter((c) => workspaceOf(c.cwd, c.repo) === name));
+      if (text) await b.post(text).catch((e: any) => log("notice error", name, e?.message ?? e));
     }
   } catch (e: any) {
     log("digest error", e?.message ?? e);

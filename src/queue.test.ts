@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Messenger } from "./messenger";
-import { coalesce, digestWorthy, formatQueue, queueOf, questionOf, showQueue } from "./queue";
+import { coalesce, formatQueue, queueOf, questionOf, showQueue } from "./queue";
 import type { Pr, SessionView, Snapshot } from "./snapshot";
 
 let n = 0;
@@ -112,18 +112,4 @@ test("coalesce shares one run per delay, and a longer delay still runs after a s
   expect(runs).toBe(1);
   await Bun.sleep(30);
   expect(runs).toBe(2);
-});
-
-test("digests keep only merges and ended sessions", () => {
-  const c = (what: string, detail = "") => ({ session: "s", sessionId: "s", cwd: "/r", what, detail });
-  const all = [
-    c("merged"),
-    c("ended"),
-    c("pr_state", "#7 open, CI pass → #7 merged, CI pass"),
-    c("pr_opened"),
-    c("ci", "CI fail"),
-    c("status"),
-    c("pr_state", "#7 draft, CI pass → #7 open, CI pass"),
-  ];
-  expect(all.filter(digestWorthy).map((x) => x.what)).toEqual(["merged", "ended", "pr_state"]);
 });

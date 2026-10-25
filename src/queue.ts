@@ -4,7 +4,7 @@
  */
 import type { Messenger } from "./messenger";
 import { aboutOf } from "./nickname";
-import type { Change, SessionView, Snapshot } from "./snapshot";
+import type { SessionView, Snapshot } from "./snapshot";
 
 export type QueueItem = {
   session: string;
@@ -118,6 +118,3 @@ export function coalesce(run: () => void) {
   };
 }
 
-/** Changes a digest still reports: merges and ended sessions. The pinned list shows the rest. */
-export const digestWorthy = (c: Change) =>
-  c.what === "merged" || c.what === "ended" || (c.what === "pr_state" && /→ #\d+ merged/.test(c.detail));

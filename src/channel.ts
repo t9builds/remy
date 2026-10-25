@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 /**
  * remy: the coordinator's channel. Runs only inside the coordinator session (loaded by `remy start`).
- * A thin client of the daemon (daemon.ts), which owns Slack, Telegram, session events, the waiting list and digests:
- * it connects over the link (link.ts), pushes the daemon's events into the session, forwards Claude's post / update
- * calls, and relays the coordinator's own permission prompts both ways. When the daemon goes away it reconnects;
+ * A thin client of the daemon (daemon.ts), which owns Slack, Telegram, session events, the waiting list and the
+ * notices it posts itself: it connects over the link (link.ts), pushes the daemon's events into the session, forwards
+ * Claude's post / update calls, and relays the coordinator's own permission prompts both ways. When the daemon goes away it reconnects;
  * what the daemon pushed meanwhile arrives then.
  */
 import { appendFileSync } from "node:fs";
@@ -24,9 +24,9 @@ const INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel so
 - kind="user_message": the user wrote to you. Answer with post, passing the same workspace, and thread when the tag has it. If it has session, the user is replying to that agent. If it has awaiting instead, that agent asked the user a question recently: if the message reads like the answer, treat it as a reply to that agent.
 - kind="task_request": the user mentioned you, or reacted with the trigger emoji, in a Slack channel thread. Follow "Tasks from Slack threads" in your instructions.
 - kind="agent_needs_input": a session is blocked waiting for the user. Post it with post(workspace, session=<name>, expect_reply=true).
-- kind="agent_finished": a background agent ended its turn. Post only if it ended asking something; remy's pinned waiting-on-you list shows the rest.
-- kind="digest": sessions or PRs changed since the last digest. Post only merges and ended sessions; the pinned list shows the rest.
+- kind="agent_finished": a background agent ended its turn, or its session, on a question. Post the question with post(workspace, session=<name>, expect_reply=true).
 - kind="system": a note from the remy daemon itself.
+Remy itself keeps the pinned waiting-on-you list and posts merged PRs and ended sessions; don't post those.
 An event with queued_at waited in the daemon while no coordinator was connected; check \`remy status\` before acting on an old one.
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
 

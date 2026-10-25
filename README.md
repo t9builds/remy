@@ -69,7 +69,14 @@ Waiting on you (3)
 
 🔴 is a question or permission, 🟠 red CI, 🟡 requested changes, 🟢 a PR ready for review, ⚪ an agent that stopped without a PR. Edits don't notify you; only questions do. Telegram pins the message; in Slack it stays where it was first posted. Send `/queue` to the bot to get the list as a fresh message at the bottom of the chat; `remy queue` prints it in a terminal.
 
-Every 15 minutes you get a short note about merged PRs and ended sessions, if there were any. Everything else is on the list.
+Every 15 minutes you get a short note about merged PRs and ended sessions, if there were any. Remy writes it itself, not the coordinator, so it reads the same every time:
+
+```
+✅ saffron · api · PR #212 merged
+⏹️ pesto · docs · ended · session closed
+```
+
+Everything else is on the list.
 
 You review and merge PRs like you always do. Once an agent's PR is merged, Remy closes that agent at the next digest: `claude rm` deletes the session and its worktree, or, if the worktree still has uncommitted or unpushed work, `claude stop` ends the session and the worktree stays. The agent then counts as merged: it's left out of `remy status`, and `remy status --merged` lists it. Remy only does this for agents it started (`remy spawn`), never for sessions you started yourself, and waits while an agent is mid-turn.
 
@@ -92,7 +99,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | Plugin hook (`UserPromptSubmit`) | Names a session that has no name yet after a dish or ingredient (`src/kitchen-names.ts`), on its first prompt, and keeps that prompt in `~/.remy/nicknames.json` as what the session is about |
 | `remy status` | Joins `claude agents --json`, each session's git branch and `gh pr view` |
 | `src/queue.ts` | Ranks what waits on you from that snapshot; the daemon keeps it as one message per workspace (`~/.remy/queue.json`) |
-| `remy daemon` (`src/daemon.ts`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, sends digests, closes merged agents and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
+| `remy daemon` (`src/daemon.ts`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, posts the merged/ended notices itself (`src/notices.ts`), closes merged agents and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
 | `remy` channel (`src/channel.ts`) | Runs inside the coordinator session only. A thin client of the daemon over `~/.remy/daemon.sock` (`src/link.ts`): pushes the daemon's events into the session and gives Claude `post` / `update` |
 | `src/bridges.ts` | Picks the Slack or Telegram bridge for each workspace; both implement `Messenger` (`src/messenger.ts`) |
 | `src/slack-bridge.ts` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in (`src/watch.ts`) |
@@ -175,7 +182,7 @@ remy start
 
 ### The daemon
 
-Slack, Telegram, session events, the waiting list, digests and closing merged agents live in `remy daemon`, a background process that keeps running when the coordinator exits, restarts or compacts. Messages that arrive while the coordinator is down wait in the daemon, across its own restarts too, and reach the coordinator when it's back.
+Slack, Telegram, session events, the waiting list, the merged/ended notices and closing merged agents live in `remy daemon`, a background process that keeps running when the coordinator exits, restarts or compacts. Messages that arrive while the coordinator is down wait in the daemon, across its own restarts too, and reach the coordinator when it's back.
 
 `remy start` starts the daemon in the background when none is running, and restarts it when the plugin was updated or the config changed since it started. `remy setup` stops it while you set up, `remy daemon stop` stops it, and `remy doctor` shows whether it's running. Its log is `~/.remy/daemon.log`.
 
@@ -264,7 +271,7 @@ From a terminal: `remy status` (`remy status <name>` for one session in detail, 
 | `spawnTemplate` | `{task}` | Prompt for spawned agents, e.g. `/start-feature {task}` |
 | `spawnPermissionMode` | `auto` | Permission mode for spawned agents |
 | `spawnWorktree` | `true` | Give each spawned agent its own worktree |
-| `digestMinutes` | `15` | Minutes between change digests |
+| `digestMinutes` | `15` | Minutes between notices of merged PRs and ended sessions |
 | `coordinatorName` | `remy` | Session name of the coordinator |
 | `coordinatorCompactPct` | `50` | Context-window percentage (1–100) at which the coordinator compacts; `0` keeps Claude Code's default, and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` set in your shell wins |
 | `triggerEmoji` | `mouse` | Reacting with this emoji (Slack name) starts a task, like a mention |

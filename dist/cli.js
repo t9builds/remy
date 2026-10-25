@@ -2342,6 +2342,32 @@ function formatMerged(spawned) {
 `);
 }
 
+// src/notices.ts
+var noticeWorthy = (c) => c.what === "merged" || c.what === "ended" || c.what === "pr_state" && /\u2192 #\d+ merged/.test(c.detail);
+var repoName = (repo) => repo?.split("/").pop();
+var link = (url, label) => url ? `<${url}|${label}>` : label;
+function cleanupNote(detail) {
+  const cleanup = detail.replace(/^PR #\d+ merged;\s*/, "");
+  if (cleanup.startsWith("stopped; worktree kept"))
+    return " \xB7 worktree kept: it has uncommitted or unpushed work";
+  if (cleanup.startsWith("not removed"))
+    return ` \xB7 couldn't close the session ${cleanup.replace(/^not removed\s*/, "")}`;
+  return "";
+}
+function line(c) {
+  const who = [`*${c.session}*`, repoName(c.repo)].filter(Boolean).join(" \xB7 ");
+  if (c.what === "ended")
+    return `\u23F9\uFE0F ${who} \xB7 ended \xB7 ${c.pr ? link(c.pr, c.detail) : c.detail}`;
+  const number = /#(\d+)/.exec(c.what === "merged" ? c.detail : c.detail.split("\u2192").pop())?.[1];
+  const merged = `${who} \xB7 ${link(c.pr, number ? `PR #${number}` : "PR")} merged`;
+  return `\u2705 ${merged}${c.what === "merged" ? cleanupNote(c.detail) : ""}`;
+}
+function formatNotice(changes) {
+  const lines = changes.filter(noticeWorthy).map(line);
+  return lines.length ? lines.join(`
+`) : undefined;
+}
+
 // src/queue.ts
 var MARK = ["\uD83D\uDD34", "\uD83D\uDFE0", "\uD83D\uDFE1", "\uD83D\uDFE2", "\u26AA"];
 var short = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}\u2026` : s).replace(/\s+/g, " ").trim();
@@ -2433,7 +2459,6 @@ function coalesce(run) {
     }, ms));
   };
 }
-var digestWorthy = (c) => c.what === "merged" || c.what === "ended" || c.what === "pr_state" && /\u2192 #\d+ merged/.test(c.detail);
 
 // src/daemon.ts
 var log = (...a) => {
@@ -2444,7 +2469,7 @@ var log = (...a) => {
 };
 var config;
 var stamp = 0;
-var link;
+var link2;
 var startedAt = Date.now();
 var supervised = process.env.REMY_DAEMON_SERVICE === "1";
 var lastActive = "";
@@ -2454,12 +2479,12 @@ async function push(kind, content, meta = {}) {
     lastActive = meta.workspace;
   if (kind === "user_message")
     scheduleQueue(QUEUE_AFTER_USER_MS);
-  log("push", kind, meta.workspace ?? "", content.slice(0, 120).replace(/\n/g, " "), link.connected ? "" : "(held)");
-  link.push({ kind, content, meta: { kind, ...clean } });
+  log("push", kind, meta.workspace ?? "", content.slice(0, 120).replace(/\n/g, " "), link2.connected ? "" : "(held)");
+  link2.push({ kind, content, meta: { kind, ...clean } });
 }
 var sink = {
   push,
-  permission: async (request_id, behavior) => link.permission(request_id, behavior),
+  permission: async (request_id, behavior) => link2.permission(request_id, behavior),
   queue: async (workspace) => queueText(await takeSnapshot(), workspace),
   log
 };
@@ -2497,8 +2522,8 @@ function status() {
     startedAt,
     config: stamp,
     supervised,
-    coordinator: link.connected,
-    held: link.heldEvents.length,
+    coordinator: link2.connected,
+    held: link2.heldEvents.length,
     workspaces: [...bridges.keys()]
   };
 }
@@ -2577,7 +2602,7 @@ async function onEvent(e) {
     const s = await sessionInfo(e.session_id);
     if (!s.unattended || s.merged)
       return;
-    if (e.event === "Stop" && !questionOf(e.last))
+    if (!questionOf(e.last))
       return;
     if (debounced(`done:${e.session_id}`, 30000))
       return;
@@ -2631,26 +2656,13 @@ async function digest() {
     if (closed.size)
       writeJson(PATHS.snapshot, snapshot);
     await refreshQueue(snapshot);
-    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged].filter(digestWorthy);
-    if (first || !changes.length)
+    if (first)
       return;
-    const names = new Set(bridges.keys());
-    if (!names.size)
-      names.add("");
-    for (const name of names) {
-      const mine = changes.filter((c) => workspaceOf(c.cwd, c.repo) === name);
-      if (!mine.length)
-        continue;
-      const sessions = snapshot.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === name);
-      const lines = mine.map((c) => `- ${c.session}: ${c.what} \u2014 ${c.detail}${c.pr ? ` (${c.pr})` : ""}`);
-      await push("digest", `Changes since last digest:
-${lines.join(`
-`)}
-
-Sessions in this workspace:
-${formatTable({ ...snapshot, sessions })}`, {
-        workspace: name
-      });
+    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged];
+    for (const [name, b] of bridges) {
+      const text = formatNotice(changes.filter((c) => workspaceOf(c.cwd, c.repo) === name));
+      if (text)
+        await b.post(text).catch((e) => log("notice error", name, e?.message ?? e));
     }
   } catch (e) {
     log("digest error", e?.message ?? e);
@@ -2707,10 +2719,10 @@ function shutdown(code) {
   if (stopping)
     return;
   stopping = true;
-  link?.close();
-  if (link)
-    keepHeld(link.heldEvents);
-  log("stopped", link?.heldEvents.length ? `keeping ${link.heldEvents.length} held` : "");
+  link2?.close();
+  if (link2)
+    keepHeld(link2.heldEvents);
+  log("stopped", link2?.heldEvents.length ? `keeping ${link2.heldEvents.length} held` : "");
   process.exit(code);
 }
 function heldBefore() {
@@ -2730,7 +2742,7 @@ async function runDaemon() {
   stamp = configStamp();
   config = loadConfig();
   active = { ...config, workspaces: [] };
-  link = new LinkServer(PATHS.socket, {
+  link2 = new LinkServer(PATHS.socket, {
     request,
     permissionRequest: async (params) => {
       await ready;
@@ -2740,8 +2752,8 @@ async function runDaemon() {
     held: keepHeld,
     log
   });
-  await link.listen();
-  link.hold(heldBefore());
+  await link2.listen();
+  link2.hold(heldBefore());
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
   console.log(`remy daemon ${VERSION} listening on ${PATHS.socket}; log in ${PATHS.log}`);
