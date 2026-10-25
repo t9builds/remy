@@ -184,7 +184,17 @@ var PATHS = {
   telegramState: (workspace) => join(REMY_DIR, `telegram-state.${workspace}.json`),
   tokenFile: (workspace, kind) => join(REMY_DIR, `${kind}-token.${workspace}`)
 };
-var isTelegram = (w) => w.messenger === "telegram";
+var MESSENGERS = ["slack", "telegram"];
+var messengerLabel = (k) => k === "slack" ? "Slack" : "Telegram";
+var messengersOf = (ws) => MESSENGERS.filter((k) => ws[k]);
+function migrateWorkspace(w) {
+  if (w.slack || w.telegram)
+    return w;
+  const { messenger, slackUserId, transport, channelRepos, telegramUserId, ...routing } = w;
+  if (messenger === "telegram")
+    return { ...routing, telegram: { userId: telegramUserId } };
+  return { ...routing, slack: { userId: slackUserId ?? "", transport: transport ?? "poll", channelRepos } };
+}
 var DEFAULTS = {
   workspaces: [],
   repoRoots: [join(homedir(), "Repositories")],
@@ -220,7 +230,8 @@ function loadConfig() {
   const raw = readJson(PATHS.config, {});
   const config = { ...DEFAULTS, ...raw };
   if (!raw.workspaces && raw.slackUserId)
-    config.workspaces = [{ name: "default", slackUserId: raw.slackUserId, transport: "poll" }];
+    config.workspaces = [{ name: "default", slack: { userId: raw.slackUserId, transport: "poll" } }];
+  config.workspaces = config.workspaces.map(migrateWorkspace);
   delete config.slackUserId;
   return config;
 }
@@ -287,6 +298,118 @@ function storeToken(workspace, kind, token) {
   }
   writeFileSync(PATHS.tokenFile(workspace, kind), token + `
 `, { mode: 384 });
+}
+
+// src/fanout.ts
+var encodeId = (parts) => Object.entries(parts).map(([k, v]) => `${k}:${v}`).join("|");
+function decodeId(id) {
+  const parts = {};
+  for (const piece of id.split("|")) {
+    const i = piece.indexOf(":");
+    const k = piece.slice(0, i);
+    if (k === "slack" || k === "telegram")
+      parts[k] = piece.slice(i + 1);
+  }
+  return parts;
+}
+
+class Fanout {
+  workspace;
+  mode;
+  main;
+  log;
+  members = new Map;
+  lastFrom;
+  constructor(workspace, mode, main, log = () => {}) {
+    this.workspace = workspace;
+    this.mode = mode;
+    this.main = main;
+    this.log = log;
+    this.lastFrom = main;
+  }
+  add(kind, m) {
+    this.members.set(kind, m);
+  }
+  get kinds() {
+    return [...this.members.keys()];
+  }
+  sinkFor(kind, sink) {
+    const prefix = (meta) => {
+      const out = { ...meta, via: kind };
+      for (const key of ["id", "thread"])
+        if (out[key])
+          out[key] = encodeId({ [kind]: out[key] });
+      return out;
+    };
+    return {
+      ...sink,
+      push: async (event, content, meta = {}) => {
+        if (event === "user_message") {
+          this.lastFrom = kind;
+          await this.share(kind, content, meta.session);
+        }
+        await sink.push(event, content, prefix(meta));
+      }
+    };
+  }
+  async share(from, text, session) {
+    for (const [k, m] of this.members) {
+      if (k === from)
+        continue;
+      if (session)
+        m.answered(session);
+      const echo = this.mode === "mirror" || this.mode === "pings" && k === this.main;
+      if (echo)
+        await m.post(`\uD83D\uDCAC _You, in ${messengerLabel(from)}:_ ${text}`, { session: session || undefined }).catch((e) => this.log("echo failed", k, e?.message ?? e));
+    }
+  }
+  targets(opts, parts) {
+    const live = this.kinds;
+    const inThread = live.filter((k) => parts[k]);
+    if (this.mode === "mirror")
+      return live;
+    if (this.mode === "follow") {
+      if (inThread.length)
+        return inThread;
+      return [live.includes(this.lastFrom) ? this.lastFrom : live[0]];
+    }
+    if (!live.includes(this.main))
+      return live;
+    return live.filter((k) => k === this.main || opts.expect_reply || parts[k]);
+  }
+  async post(text, opts = {}) {
+    const parts = opts.thread ? decodeId(opts.thread) : {};
+    const out = {};
+    let error;
+    for (const k of this.targets(opts, parts)) {
+      try {
+        out[k] = await this.members.get(k).post(text, { ...opts, thread: parts[k] });
+      } catch (e) {
+        error ??= e;
+        this.log("post failed", k, e?.message ?? e);
+      }
+    }
+    if (!Object.keys(out).length)
+      throw error ?? new Error(`no app of workspace "${this.workspace}" took the message`);
+    return encodeId(out);
+  }
+  async update(id, text) {
+    for (const [k, part] of Object.entries(decodeId(id)))
+      await this.members.get(k)?.update(part, text);
+  }
+  async askPermission(p) {
+    const to = this.mode === "follow" ? this.targets({}, {}) : this.kinds;
+    for (const k of to)
+      await this.members.get(k).askPermission(p);
+  }
+  answered(session) {
+    for (const m of this.members.values())
+      m.answered(session);
+  }
+  async start() {
+    for (const m of this.members.values())
+      await m.start();
+  }
 }
 
 // src/messenger.ts
@@ -637,7 +760,8 @@ var parseRef = (ref) => {
 };
 
 class SlackBridge {
-  ws;
+  workspace;
+  settings;
   tokens;
   sink;
   triggerEmoji;
@@ -646,27 +770,36 @@ class SlackBridge {
   state;
   lastInboundAt = 0;
   tick = 0;
-  constructor(ws, tokens, sink, triggerEmoji) {
-    this.ws = ws;
+  constructor(workspace, settings, tokens, sink, triggerEmoji) {
+    this.workspace = workspace;
+    this.settings = settings;
     this.tokens = tokens;
     this.sink = sink;
     this.triggerEmoji = triggerEmoji;
     this.slack = new Slack(tokens.bot);
-    this.state = readJson(PATHS.slackState(ws.name), { threads: {} });
+    this.state = readJson(PATHS.slackState(workspace), { threads: {} });
   }
   save() {
-    writeJson(PATHS.slackState(this.ws.name), this.state);
+    writeJson(PATHS.slackState(this.workspace), this.state);
   }
   log(...a) {
-    this.sink.log(`[${this.ws.name}]`, ...a);
+    this.sink.log(`[${this.workspace}]`, ...a);
   }
   async ensureDm() {
     if (!this.dm)
-      this.dm = await this.slack.openDm(this.ws.slackUserId);
+      this.dm = await this.slack.openDm(this.settings.userId);
     return this.dm;
   }
+  threadOf(session) {
+    let best;
+    for (const [root, t] of Object.entries(this.state.threads))
+      if (t.session === session && !t.channel && Date.now() - t.postedAt < 24 * 3600000 && (!best || t.postedAt > best[1]))
+        best = [root, t.postedAt];
+    return best?.[0];
+  }
   async post(text, opts = {}) {
-    const thread = opts.thread ? parseRef(opts.thread) : undefined;
+    const ref = opts.thread || (opts.session ? this.threadOf(opts.session) : undefined);
+    const thread = ref ? parseRef(ref) : undefined;
     const channel = thread?.channel;
     const ts = await this.slack.post(channel ?? await this.ensureDm(), text, thread?.ts);
     const root = thread?.ts ?? ts;
@@ -695,14 +828,20 @@ class SlackBridge {
     const { channel, ts } = parseRef(id);
     await this.slack.update(channel ?? await this.ensureDm(), ts, text);
   }
+  answered(session) {
+    for (const t of Object.values(this.state.threads))
+      if (t.session === session)
+        t.answered = true;
+    this.save();
+  }
   async askPermission(p) {
     await this.post(`${permissionText(p)}
 Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true });
   }
   async start() {
-    if (this.ws.transport === "socket" && !this.tokens.app)
-      await this.sink.push("system", `Workspace "${this.ws.name}" is set to Socket Mode but has no app-level token (xapp-\u2026); reading it by polling instead.`);
-    if (this.tokens.app && this.ws.transport === "socket")
+    if (this.settings.transport === "socket" && !this.tokens.app)
+      await this.sink.push("system", `Slack in workspace "${this.workspace}" is set to Socket Mode but has no app-level token (xapp-\u2026); reading it by polling instead.`);
+    if (this.tokens.app && this.settings.transport === "socket")
       this.startSocket(this.tokens.app);
     else
       this.startPolling();
@@ -713,7 +852,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
     return open[0]?.session;
   }
   async handleInbound(m, threadRoot, channel) {
-    if (m.user !== this.ws.slackUserId || m.bot_id)
+    if (m.user !== this.settings.userId || m.bot_id)
       return;
     if (m.subtype && m.subtype !== "thread_broadcast")
       return;
@@ -729,7 +868,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
     }
     const text = this.botUserId ? requestText(m.text, this.botUserId) : m.text;
     await this.sink.push("user_message", text, {
-      workspace: this.ws.name,
+      workspace: this.workspace,
       id: threadRef(channel, m.ts),
       thread: root ? threadRef(channel, root) : "",
       session: info?.session ?? "",
@@ -753,7 +892,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
           this.log("poll error", e?.message ?? e);
           delay = Math.max(delay, (e?.retryAfter || 30) * 1000);
           if (++failures === 3)
-            await this.sink.push("system", `Reading Slack workspace "${this.ws.name}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; check the bot scopes and that the app's Messages tab is on.`);
+            await this.sink.push("system", `Reading Slack workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; check the bot scopes and that the app's Messages tab is on.`);
         }
         await Bun.sleep(delay);
       }
@@ -798,7 +937,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
       this.log(`missing ${missing.join(", ")}; some channels may not be readable`);
     this.state.watch ??= { channels: {}, handled: {} };
     this.watcher = new ChannelWatcher(this.slack, {
-      me: this.ws.slackUserId,
+      me: this.settings.userId,
       bot: this.botUserId,
       emoji: this.triggerEmoji,
       state: this.state.watch,
@@ -818,7 +957,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
       } catch (e) {
         this.log("watch error", e?.message ?? e);
         if (++failures === 5)
-          await this.sink.push("system", `Watching Slack channels in workspace "${this.ws.name}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal.`);
+          await this.sink.push("system", `Watching Slack channels in workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal.`);
         if (e?.retryAfter)
           await Bun.sleep(e.retryAfter * 1000);
       }
@@ -861,10 +1000,10 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
           this.log("file download failed", e?.message ?? e);
         }
       }
-    const requester = await this.slack.userName(this.ws.slackUserId);
+    const requester = await this.slack.userName(this.settings.userId);
     const task = {
       id,
-      workspace: this.ws.name,
+      workspace: this.workspace,
       channel: t.channel,
       channelName: t.channelName,
       threadTs: t.root,
@@ -873,7 +1012,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
       permalink: await this.slack.permalink(t.channel, t.root).catch(() => ""),
       requester,
       request: t.kind === "mention" ? requestText(t.message.text, this.botUserId) : "",
-      defaultRepo: this.ws.channelRepos?.[t.channelName],
+      defaultRepo: this.settings.channelRepos?.[t.channelName],
       transcript: formatTranscript(thread, names, {
         triggerTs: t.message.ts,
         triggerNote: t.kind === "mention" ? `${requester} asked you here` : `${requester} reacted :${this.triggerEmoji}: here`,
@@ -888,7 +1027,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
     this.state.threads[t.root] = { channel: t.channel, task: id, expectReply: false, postedAt: Date.now(), lastSeen: thread.at(-1).ts };
     this.save();
     await this.sink.push("task_request", taskEvent(task), {
-      workspace: this.ws.name,
+      workspace: this.workspace,
       task: id,
       thread: threadRef(t.channel, t.root),
       default_repo: task.defaultRepo ?? ""
@@ -897,10 +1036,10 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
 }
 var DM_SCOPES = ["chat:write", "im:history", "im:read", "im:write"];
 var CHANNEL_SCOPES = ["channels:read", "groups:read", "channels:history", "groups:history", "reactions:read", "reactions:write", "users:read", "files:read"];
-async function slackChecks(ws) {
-  const fix = `run \`remy setup ${ws.name}\``;
-  const out = [{ label: "Slack user ID", ok: /^[UW][A-Z0-9]+$/.test(ws.slackUserId), hint: fix }];
-  const token = readToken(ws.name, "slack-bot");
+async function slackChecks(workspace, settings) {
+  const fix = `run \`remy setup ${workspace}\``;
+  const out = [{ label: "Slack user ID", ok: /^[UW][A-Z0-9]+$/.test(settings.userId), hint: fix }];
+  const token = readToken(workspace, "slack-bot");
   out.push({ label: "Slack bot token", ok: !!token, hint: fix });
   if (token) {
     const who = await new Slack(token).whoami().catch((e) => ({ error: String(e?.message ?? e) }));
@@ -909,13 +1048,13 @@ async function slackChecks(ws) {
     else {
       const lacks = (want) => want.filter((s) => !who.scopes.includes(s));
       const dm = lacks(DM_SCOPES);
-      out.push({ label: "Slack scopes for DMs", ok: !dm.length, hint: `add ${dm.join(", ")} as Bot Token Scopes, reinstall the app, then \`remy setup ${ws.name}\`` });
+      out.push({ label: "Slack scopes for DMs", ok: !dm.length, hint: `add ${dm.join(", ")} as Bot Token Scopes, reinstall the app, then \`remy setup ${workspace}\`` });
       const ch = lacks(CHANNEL_SCOPES);
       out.push({ label: "Slack scopes for channel tasks", ok: !ch.length, hint: `tasks from channel threads need ${ch.join(", ")}`, optional: true });
     }
   }
-  if (ws.transport === "socket")
-    out.push({ label: "app-level token (Socket Mode)", ok: !!readToken(ws.name, "slack-app"), hint: fix });
+  if (settings.transport === "socket")
+    out.push({ label: "Slack app-level token (Socket Mode)", ok: !!readToken(workspace, "slack-app"), hint: fix });
   return out;
 }
 
@@ -1053,14 +1192,16 @@ var KEEP_MS = 30 * 24 * 3600000;
 var CONFLICT_PAUSE_MS = 30000;
 
 class TelegramBridge {
-  ws;
+  workspace;
+  settings;
   api;
   sink;
   statePath;
   state;
   conflictReported = false;
-  constructor(ws, api, sink, statePath = PATHS.telegramState(ws.name)) {
-    this.ws = ws;
+  constructor(workspace, settings, api, sink, statePath = PATHS.telegramState(workspace)) {
+    this.workspace = workspace;
+    this.settings = settings;
     this.api = api;
     this.sink = sink;
     this.statePath = statePath;
@@ -1090,7 +1231,7 @@ class TelegramBridge {
   async post(text, opts = {}) {
     const replyTo = opts.thread || (opts.session ? this.latestFor(opts.session) : undefined);
     const session = opts.session ?? (replyTo ? this.state.threads[replyTo]?.session : undefined);
-    const ids = await this.api.send(this.ws.telegramUserId, text, { replyTo: replyTo ? Number(replyTo) : undefined });
+    const ids = await this.api.send(this.settings.userId, text, { replyTo: replyTo ? Number(replyTo) : undefined });
     if (session) {
       for (const id of ids)
         this.state.threads[id] = { session, at: Date.now(), mine: true, expectReply: opts.expect_reply };
@@ -1099,10 +1240,16 @@ class TelegramBridge {
     return String(ids[0]);
   }
   async update(id, text) {
-    await this.api.edit(this.ws.telegramUserId, Number(id), text);
+    await this.api.edit(this.settings.userId, Number(id), text);
+  }
+  answered(session) {
+    for (const t of Object.values(this.state.threads))
+      if (t.session === session)
+        t.answered = true;
+    this.save();
   }
   async askPermission(p) {
-    await this.api.send(this.ws.telegramUserId, `${permissionText(p)}
+    await this.api.send(this.settings.userId, `${permissionText(p)}
 Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
       buttons: [[{ text: "Allow", data: `perm:allow:${p.request_id}` }, { text: "Deny", data: `perm:deny:${p.request_id}` }]]
     });
@@ -1136,23 +1283,23 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
     }
   }
   async onError(e, failures) {
-    this.sink.log(`[${this.ws.name}] telegram poll error`, e?.message ?? e);
+    this.sink.log(`[${this.workspace}] telegram poll error`, e?.message ?? e);
     if (e instanceof TelegramError && e.code === 409) {
       if (!this.conflictReported)
-        await this.sink.push("system", `Another program is reading the Telegram bot of workspace "${this.ws.name}" (a second remy, the Telegram channel plugin, or a webhook). Telegram gives a bot's messages to one reader only. Tell the user in this terminal to give remy a bot of its own.`);
+        await this.sink.push("system", `Another program is reading the Telegram bot of workspace "${this.workspace}" (a second remy, the Telegram channel plugin, or a webhook). Telegram gives a bot's messages to one reader only. Tell the user in this terminal to give remy a bot of its own.`);
       this.conflictReported = true;
       return Bun.sleep(CONFLICT_PAUSE_MS);
     }
     if (failures === 3)
-      await this.sink.push("system", `Reading Telegram for workspace "${this.ws.name}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; \`remy doctor\` checks the bot token.`);
+      await this.sink.push("system", `Reading Telegram for workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; \`remy doctor\` checks the bot token.`);
     await Bun.sleep(Math.max(e?.retryAfter ?? 0, Math.min(5 * failures, 60)) * 1000);
   }
   isOwner(from) {
-    return !!from && from.id === this.ws.telegramUserId && !from.is_bot;
+    return !!from && from.id === this.settings.userId && !from.is_bot;
   }
   async onMessage(m) {
     if (m.chat.type !== "private" || !this.isOwner(m.from))
-      return this.sink.log(`[${this.ws.name}] ignored telegram message from ${m.from?.id}`);
+      return this.sink.log(`[${this.workspace}] ignored telegram message from ${m.from?.id}`);
     const text = (m.text ?? m.caption ?? "").trim();
     if (!text)
       return void await this.api.send(m.chat.id, "I can only read text for now.", { replyTo: m.message_id });
@@ -1164,14 +1311,11 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
     const repliedTo = m.reply_to_message?.message_id;
     const session = repliedTo ? this.state.threads[repliedTo]?.session : undefined;
     if (session) {
-      for (const t of Object.values(this.state.threads))
-        if (t.session === session)
-          t.answered = true;
       this.state.threads[m.message_id] = { session, at: Date.now(), mine: false };
-      this.save();
+      this.answered(session);
     }
     await this.sink.push("user_message", text, {
-      workspace: this.ws.name,
+      workspace: this.workspace,
       id: String(m.message_id),
       thread: repliedTo ? String(m.message_id) : "",
       session: session ?? "",
@@ -1191,10 +1335,10 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
 ${done}`).catch(() => {});
   }
 }
-async function telegramChecks(ws) {
-  const fix = `run \`remy setup ${ws.name}\``;
-  const out = [{ label: "Telegram user ID", ok: ws.telegramUserId > 0, hint: fix }];
-  const token = readToken(ws.name, "telegram-bot");
+async function telegramChecks(workspace, settings) {
+  const fix = `run \`remy setup ${workspace}\``;
+  const out = [{ label: "Telegram user ID", ok: settings.userId > 0, hint: fix }];
+  const token = readToken(workspace, "telegram-bot");
   out.push({ label: "Telegram bot token", ok: !!token, hint: fix });
   if (!token)
     return out;
@@ -1204,40 +1348,71 @@ async function telegramChecks(ws) {
     return [...out, { label: "Telegram bot token works", ok: false, hint: me.error }];
   const hook = await tg.webhook().catch(() => "");
   out.push({ label: `Telegram bot @${me.username} is free for remy`, ok: !hook, hint: "it sends its messages to a webhook, so another program uses it; give remy a bot of its own" });
-  const reach = await tg.canMessage(ws.telegramUserId);
+  const reach = await tg.canMessage(settings.userId);
   out.push({ label: `@${me.username} can message you`, ok: reach === true, hint: `${reach}; open https://t.me/${me.username} and press Start` });
   return out;
 }
 
 // src/bridges.ts
-var messengerName = (ws) => isTelegram(ws) ? "Telegram" : "Slack";
-function createMessenger(ws, sink, opts) {
+function describeMessengers(ws) {
+  const kinds = messengersOf(ws);
+  return kinds.map(messengerLabel).join(" + ") + (kinds.length > 1 ? ` (${ws.both ?? "mirror"})` : "");
+}
+function createMember(ws, kind, sink, opts) {
   const missing = (what) => new Error(`workspace "${ws.name}" has no ${what}; run \`remy setup ${ws.name}\``);
-  if (isTelegram(ws)) {
+  if (kind === "telegram") {
     const token = readToken(ws.name, "telegram-bot");
-    if (!token || !ws.telegramUserId)
+    if (!token || !ws.telegram?.userId)
       throw missing("Telegram bot token or user ID");
-    return new TelegramBridge(ws, new Telegram(token), sink);
+    return new TelegramBridge(ws.name, ws.telegram, new Telegram(token), sink);
   }
   const bot = readToken(ws.name, "slack-bot");
-  if (!bot || !ws.slackUserId)
+  if (!bot || !ws.slack?.userId)
     throw missing("Slack bot token or user ID");
-  return new SlackBridge(ws, { bot, app: readToken(ws.name, "slack-app") }, sink, opts.triggerEmoji);
+  return new SlackBridge(ws.name, ws.slack, { bot, app: readToken(ws.name, "slack-app") }, sink, opts.triggerEmoji);
 }
-var checkWorkspace = (ws) => (isTelegram(ws) ? telegramChecks(ws) : slackChecks(ws)).catch((e) => [{ label: "checks", ok: false, hint: String(e?.message ?? e) }]);
+function createMessenger(ws, sink, opts, kinds = messengersOf(ws)) {
+  if (!kinds.length)
+    throw new Error(`workspace "${ws.name}" has neither Slack nor Telegram; run \`remy setup ${ws.name}\``);
+  if (messengersOf(ws).length === 1)
+    return createMember(ws, kinds[0], sink, opts);
+  const fan = new Fanout(ws.name, ws.both ?? "mirror", ws.main ?? "slack", sink.log);
+  for (const k of kinds)
+    fan.add(k, createMember(ws, k, fan.sinkFor(k, sink), opts));
+  return fan;
+}
+var checksFor = (ws, kind) => (kind === "telegram" ? telegramChecks(ws.name, ws.telegram) : slackChecks(ws.name, ws.slack)).catch((e) => [
+  { label: `${messengerLabel(kind)} checks`, ok: false, hint: String(e?.message ?? e) }
+]);
+async function checkWorkspace(ws) {
+  const kinds = messengersOf(ws);
+  if (!kinds.length)
+    return [{ label: "Slack or Telegram connected", ok: false, hint: `run \`remy setup ${ws.name}\``, messenger: "slack" }];
+  const all = await Promise.all(kinds.map(async (k) => (await checksFor(ws, k)).map((c) => ({ ...c, messenger: k }))));
+  return all.flat();
+}
 async function openWorkspaces(workspaces, sink, opts) {
   const bridges = new Map;
   const off = [];
-  const checked = await Promise.all(workspaces.map(async (ws) => ({ ws, problems: blocking(await checkWorkspace(ws)) })));
-  for (const { ws, problems } of checked) {
-    try {
+  await Promise.all(workspaces.map(async (ws) => {
+    const checks = await checkWorkspace(ws);
+    const working = [];
+    for (const k of messengersOf(ws)) {
+      const problems = blocking(checks.filter((c) => c.messenger === k));
       if (problems.length)
-        throw new Error(problems.map((p) => `${p.label}: ${p.hint}`).join("; "));
-      bridges.set(ws.name, createMessenger(ws, sink, opts));
-    } catch (e) {
-      off.push({ name: ws.name, reason: e?.message ?? String(e) });
+        off.push({ workspace: ws.name, messenger: k, reason: problems.map((p) => `${p.label}: ${p.hint}`).join("; ") });
+      else
+        working.push(k);
     }
-  }
+    if (!working.length)
+      return;
+    try {
+      bridges.set(ws.name, createMessenger(ws, sink, opts, working));
+    } catch (e) {
+      for (const k of working)
+        off.push({ workspace: ws.name, messenger: k, reason: e?.message ?? String(e) });
+    }
+  }));
   return { bridges, off };
 }
 var quietSink = { push: async () => {}, permission: async () => {}, log: () => {} };
@@ -1257,6 +1432,15 @@ async function doctor() {
   rows.push({ label: "at least one workspace", ok: c.workspaces.length > 0, hint: "run `remy setup`" });
   const perWorkspace = await Promise.all(c.workspaces.map(async (ws) => (await checkWorkspace(ws)).map((r) => ({ ...r, workspace: ws.name }))));
   rows.push(...perWorkspace.flat());
+  const byBot = new Map;
+  for (const ws of c.workspaces.filter((w) => w.telegram)) {
+    const token = readToken(ws.name, "telegram-bot");
+    const other = token && byBot.get(token);
+    if (other)
+      rows.push({ label: "Telegram bot of its own", ok: false, workspace: ws.name, messenger: "telegram", hint: `uses the same bot as "${other}"; give it another bot, or remove one of them (\`remy setup\`)` });
+    else if (token)
+      byBot.set(token, ws.name);
+  }
   const catchAll = c.workspaces.filter((w) => !w.repos?.length && !w.paths?.length);
   if (catchAll.length > 1)
     rows.push({ label: "one catch-all workspace", ok: false, optional: true, hint: `${catchAll.length} have no repos or paths; "${catchAll[0].name}" gets every unmatched session` });
@@ -1982,6 +2166,53 @@ class r extends y {
     });
   }
 }
+class a extends y {
+  options;
+  cursor = 0;
+  get _value() {
+    return this.options[this.cursor]?.value;
+  }
+  get _enabledOptions() {
+    return this.options.filter((e) => e.disabled !== true);
+  }
+  toggleAll() {
+    const e = this._enabledOptions, i = this.value !== undefined && this.value.length === e.length;
+    this.value = i ? [] : e.map((t) => t.value);
+  }
+  toggleInvert() {
+    const e = this.value;
+    if (!e)
+      return;
+    const i = this._enabledOptions.filter((t) => !e.includes(t.value));
+    this.value = i.map((t) => t.value);
+  }
+  toggleValue() {
+    this.value === undefined && (this.value = []);
+    const e = this.value.includes(this._value);
+    this.value = e ? this.value.filter((i) => i !== this._value) : [...this.value, this._value];
+  }
+  constructor(e) {
+    super(e, false), this.options = e.options, this.value = [...e.initialValues ?? []];
+    const i = Math.max(this.options.findIndex(({ value: t }) => t === e.cursorAt), 0);
+    this.cursor = this.options[i]?.disabled ? findCursor(i, 1, this.options) : i, this.on("key", (t, l) => {
+      l.name === "a" && this.toggleAll(), l.name === "i" && this.toggleInvert();
+    }), this.on("cursor", (t) => {
+      switch (t) {
+        case "left":
+        case "up":
+          this.cursor = findCursor(this.cursor, -1, this.options);
+          break;
+        case "down":
+        case "right":
+          this.cursor = findCursor(this.cursor, 1, this.options);
+          break;
+        case "space":
+          this.toggleValue();
+          break;
+      }
+    });
+  }
+}
 var u$1 = class u extends y {
   _mask = "\u2022";
   get cursor() {
@@ -2228,6 +2459,89 @@ var MULTISELECT_INSTRUCTIONS = [
   `${styleText2("dim", "Space:")} select`,
   `${styleText2("dim", "Enter:")} confirm`
 ];
+var m = (i, u) => i.split(`
+`).map((d) => u(d)).join(`
+`);
+var multiselect = (i) => {
+  const u = (t, a) => {
+    const r = t.label ?? String(t.value);
+    return a === "disabled" ? `${styleText2("gray", S_CHECKBOX_INACTIVE)} ${m(r, (o) => styleText2(["strikethrough", "gray"], o))}${t.hint ? ` ${styleText2("dim", `(${t.hint ?? "disabled"})`)}` : ""}` : a === "active" ? `${styleText2("cyan", S_CHECKBOX_ACTIVE)} ${r}${t.hint ? ` ${styleText2("dim", `(${t.hint})`)}` : ""}` : a === "selected" ? `${styleText2("green", S_CHECKBOX_SELECTED)} ${m(r, (o) => styleText2("dim", o))}${t.hint ? ` ${styleText2("dim", `(${t.hint})`)}` : ""}` : a === "cancelled" ? `${m(r, (o) => styleText2(["strikethrough", "dim"], o))}` : a === "active-selected" ? `${styleText2("green", S_CHECKBOX_SELECTED)} ${r}${t.hint ? ` ${styleText2("dim", `(${t.hint})`)}` : ""}` : a === "submitted" ? `${m(r, (o) => styleText2("dim", o))}` : `${styleText2("dim", S_CHECKBOX_INACTIVE)} ${m(r, (o) => styleText2("dim", o))}`;
+  }, d = i.required ?? true, x = i.showInstructions ?? true;
+  return new a({
+    options: i.options,
+    signal: i.signal,
+    input: i.input,
+    output: i.output,
+    initialValues: i.initialValues,
+    required: d,
+    cursorAt: i.cursorAt,
+    validate(t) {
+      if (d && (t === undefined || t.length === 0))
+        return `Please select at least one option.
+${styleText2("reset", styleText2("dim", `Press ${styleText2(["gray", "bgWhite", "inverse"], " space ")} to select, ${styleText2("gray", styleText2("bgWhite", styleText2("inverse", " enter ")))} to submit`))}`;
+    },
+    render() {
+      const t = i.withGuide ?? settings.withGuide, a = wrapTextWithPrefix(i.output, i.message, t ? `${symbolBar(this.state)}  ` : "", `${symbol(this.state)}  `), r = `${t ? `${styleText2("gray", S_BAR)}
+` : ""}${a}
+`, o = this.value ?? [], g = (n, l) => {
+        if (n.disabled)
+          return u(n, "disabled");
+        const s = o.includes(n.value);
+        return l && s ? u(n, "active-selected") : s ? u(n, "selected") : u(n, l ? "active" : "inactive");
+      };
+      switch (this.state) {
+        case "submit": {
+          const n = this.options.filter(({ value: s }) => o.includes(s)).map((s) => u(s, "submitted")).join(styleText2("dim", ", ")) || styleText2("dim", "none"), l = wrapTextWithPrefix(i.output, n, t ? `${styleText2("gray", S_BAR)}  ` : "");
+          return `${r}${l}`;
+        }
+        case "cancel": {
+          const n = this.options.filter(({ value: s }) => o.includes(s)).map((s) => u(s, "cancelled")).join(styleText2("dim", ", "));
+          if (n.trim() === "")
+            return `${r}${styleText2("gray", S_BAR)}`;
+          const l = wrapTextWithPrefix(i.output, n, t ? `${styleText2("gray", S_BAR)}  ` : "");
+          return `${r}${l}${t ? `
+${styleText2("gray", S_BAR)}` : ""}`;
+        }
+        case "error": {
+          const n = t ? `${styleText2("yellow", S_BAR)}  ` : "", l = this.error.split(`
+`).map(($, v) => v === 0 ? `${t ? `${styleText2("yellow", S_BAR_END)}  ` : ""}${styleText2("yellow", $)}` : `   ${$}`).join(`
+`), s = r.split(`
+`).length, h = l.split(`
+`).length + 1;
+          return `${r}${n}${limitOptions({
+            output: i.output,
+            options: this.options,
+            cursor: this.cursor,
+            maxItems: i.maxItems,
+            columnPadding: n.length,
+            rowPadding: s + h,
+            style: g
+          }).join(`
+${n}`)}
+${l}
+`;
+        }
+        default: {
+          const n = t ? `${styleText2("cyan", S_BAR)}  ` : "", l = r.split(`
+`).length, s = x ? formatInstructionFooter(MULTISELECT_INSTRUCTIONS, t) : t ? [styleText2("cyan", S_BAR_END)] : [], h = s.join(`
+`), $ = s.length + 1;
+          return `${r}${n}${limitOptions({
+            output: i.output,
+            options: this.options,
+            cursor: this.cursor,
+            maxItems: i.maxItems,
+            columnPadding: n.length,
+            rowPadding: l + $,
+            style: g
+          }).join(`
+${n}`)}
+${h}
+`;
+        }
+      }
+    }
+  }).prompt();
+};
 var log = {
   message: (s = [], {
     symbol: e = styleText2("gray", S_BAR),
@@ -2587,7 +2901,7 @@ async function answer(prompt) {
 var list = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
 var describe = (ws) => {
   const scope = [...ws.repos ?? [], ...ws.paths ?? []].join(", ") || "everything else";
-  return `${messengerName(ws)} \xB7 ${scope}`;
+  return `${describeMessengers(ws)} \xB7 ${scope}`;
 };
 async function setup(only) {
   if (!process.stdin.isTTY)
@@ -2632,7 +2946,7 @@ async function general(c) {
 }
 async function workspaces(c) {
   if (!c.workspaces.length)
-    log.info("A workspace is where remy talks to you: a Slack workspace or your Telegram chat. You can add several.");
+    log.info("A workspace is where remy talks to you about a set of sessions: in Slack, in Telegram, or both. You can add several.");
   for (;; ) {
     const choice = await answer(select({
       message: c.workspaces.length ? "Workspaces" : "Add your first workspace",
@@ -2646,7 +2960,20 @@ async function workspaces(c) {
     if (choice === "+done")
       return;
     if (choice !== "+add") {
-      await setupWorkspace(c, choice);
+      const action = await answer(select({
+        message: `Workspace "${choice}"`,
+        options: [
+          { value: "edit", label: "Edit" },
+          { value: "remove", label: "Remove", hint: "its sessions go to another workspace; stored tokens stay in the keychain" }
+        ]
+      }));
+      if (action === "edit")
+        await setupWorkspace(c, choice);
+      else if (await answer(confirm({ message: `Remove "${choice}"?`, initialValue: false }))) {
+        c.workspaces = c.workspaces.filter((w) => w.name !== choice);
+        saveConfig(c);
+        log.success(`Removed "${choice}"`);
+      }
       continue;
     }
     const name = await answer(text({
@@ -2660,26 +2987,54 @@ async function workspaces(c) {
 async function setupWorkspace(c, name) {
   const existing = c.workspaces.find((w) => w.name === name);
   log.step(import_picocolors.default.bold(`Workspace "${name}"`));
-  const messenger = await answer(select({
-    message: "Talk to remy here through",
+  const kinds = await answer(multiselect({
+    message: `Talk to remy here through ${import_picocolors.default.dim("(space to pick, enter to confirm)")}`,
     options: [
       { value: "slack", label: "Slack", hint: "a DM with your Slack app's bot; tasks from channel threads" },
       { value: "telegram", label: "Telegram", hint: "a chat with your own bot; good on the phone" }
     ],
-    initialValue: existing && isTelegram(existing) ? "telegram" : "slack"
+    initialValues: existing ? messengersOf(existing) : ["slack"],
+    required: true
   }));
+  const together = kinds.length > 1 ? await askBoth(existing) : {};
   const routing = await askRouting(c, name, existing);
-  const ws = messenger === "telegram" ? await setupTelegram(routing, existing && isTelegram(existing) ? existing : undefined) : await setupSlack(c, routing, existing && !isTelegram(existing) ? existing : undefined);
+  const ws = { ...routing, ...together };
+  if (kinds.includes("slack"))
+    ws.slack = await setupSlack(c, name, existing?.slack);
+  if (kinds.includes("telegram"))
+    ws.telegram = await setupTelegram(name, existing?.telegram);
   c.workspaces = existing ? c.workspaces.map((w) => w === existing ? ws : w) : [...c.workspaces, ws];
   saveConfig(c);
   const s = spinner();
   s.start("Sending you a test message");
   try {
     await createMessenger(ws, quietSink, { triggerEmoji: c.triggerEmoji }).post(`\uD83D\uDC4B remy is connected here ("${name}"). Start the coordinator with \`remy start\`.`);
-    s.stop(`Saved "${name}" and sent you a test message in ${messengerName(ws)}`);
+    s.stop(`Saved "${name}" and sent you a test message in ${kinds.map(messengerLabel).join(" and ")}`);
   } catch (e) {
     s.error(`Saved "${name}", but the test message failed: ${e?.message ?? e}`);
   }
+}
+async function askBoth(existing) {
+  const both = await answer(select({
+    message: "With both connected",
+    options: [
+      { value: "mirror", label: "Mirror", hint: "everything in both; what you write in one shows in the other" },
+      { value: "pings", label: "Main app + pings", hint: "everything in one; the other only gets questions and permission prompts" },
+      { value: "follow", label: "Follow me", hint: "messages go to whichever app you last wrote from" }
+    ],
+    initialValue: existing?.both ?? "mirror"
+  }));
+  if (both === "mirror")
+    return { both };
+  const main = await answer(select({
+    message: both === "pings" ? "Which app gets everything?" : "Which app first, before you've written?",
+    options: [
+      { value: "slack", label: "Slack" },
+      { value: "telegram", label: "Telegram" }
+    ],
+    initialValue: existing?.main ?? "slack"
+  }));
+  return { both, main };
 }
 async function askRouting(c, name, existing) {
   const others = c.workspaces.filter((w) => w.name !== name);
@@ -2718,12 +3073,12 @@ var SLACK_APP_STEPS = [
   `3. Reinstall the app and copy the ${import_picocolors.default.bold("Bot User OAuth Token")} (xoxb-\u2026)`
 ].join(`
 `);
-async function setupSlack(c, routing, existing) {
-  const { name } = routing;
-  const slackUserId = await answer(text({
+async function setupSlack(c, name, existing) {
+  log.step("Slack");
+  const userId = await answer(text({
     message: `Your Slack member ID ${import_picocolors.default.dim("(profile \u2192 \u22EE \u2192 Copy member ID)")}`,
     placeholder: "U012ABC345",
-    initialValue: existing?.slackUserId ?? "",
+    initialValue: existing?.userId ?? "",
     validate: (v) => /^[UW][A-Z0-9]+$/.test(v?.trim() ?? "") ? undefined : "Starts with U, like U012ABC345"
   }));
   const transport = await answer(select({
@@ -2758,10 +3113,10 @@ ${import_picocolors.default.bold("Basic Information")} \u2192 App-Level Tokens \
 ${import_picocolors.default.bold("Event Subscriptions")} \u2192 enable \u2192 bot event message.im`, "Socket Mode");
     await askToken(name, "slack-app", "app-level token", async () => "App-level token saved");
   }
-  return { ...routing, messenger: "slack", slackUserId: slackUserId.trim(), transport, channelRepos: pairs.length ? Object.fromEntries(pairs) : undefined };
+  return { userId: userId.trim(), transport, channelRepos: pairs.length ? Object.fromEntries(pairs) : undefined };
 }
-async function setupTelegram(routing, existing) {
-  const { name } = routing;
+async function setupTelegram(name, existing) {
+  log.step("Telegram");
   if (!readToken(name, "telegram-bot"))
     note([
       `In Telegram, message ${import_picocolors.default.cyan("@BotFather")}, send ${import_picocolors.default.bold("/newbot")} and pick a name.`,
@@ -2781,10 +3136,10 @@ async function setupTelegram(routing, existing) {
   });
   const tg = new Telegram(readToken(name, "telegram-bot"));
   username ||= (await tg.getMe()).username;
-  let telegramUserId = existing?.telegramUserId ?? 0;
-  if (changed || !telegramUserId || !await answer(confirm({ message: `Stay paired with Telegram user ${telegramUserId}?`, initialValue: true })))
-    telegramUserId = await pairTelegram(tg, username, name);
-  return { ...routing, messenger: "telegram", telegramUserId };
+  let userId = existing?.userId ?? 0;
+  if (changed || !userId || !await answer(confirm({ message: `Stay paired with Telegram user ${userId}?`, initialValue: true })))
+    userId = await pairTelegram(tg, username, name);
+  return { userId };
 }
 async function pairTelegram(tg, username, workspace) {
   log.info(`Open ${import_picocolors.default.cyan(`https://t.me/${username}`)} and press ${import_picocolors.default.bold("Start")} (or send the bot any message).`);
@@ -3066,19 +3421,25 @@ async function start(extra) {
   const { rows } = await doctor();
   const c = loadConfig();
   const problems = blocking(rows);
-  const broken = new Set(problems.map((r) => r.workspace).filter((w) => w !== undefined));
-  const working = c.workspaces.filter((w) => !broken.has(w.name));
+  const offApps = new Set(problems.filter((r) => r.workspace).map((r) => `${r.workspace}/${r.messenger}`));
+  const liveApps = (w) => messengersOf(w).filter((k) => !offApps.has(`${w.name}/${k}`));
+  const working = c.workspaces.filter((w) => liveApps(w).length);
   if (problems.some((r) => !r.workspace) || !working.length) {
     console.log(formatChecks(rows));
     console.error(`
 ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${import_picocolors.default.cyan("remy setup")}).`)}`);
     process.exit(1);
   }
-  if (broken.size) {
-    const fallback = workspaceFor({}, { ...c, workspaces: working })?.name;
-    console.log(formatChecks(rows.filter((r) => r.workspace && broken.has(r.workspace))));
-    for (const name of broken)
-      console.log(import_picocolors.default.yellow(`! ${import_picocolors.default.bold(name)} is off until fixed (${import_picocolors.default.cyan(`remy setup ${name}`)}); its sessions report to ${import_picocolors.default.bold(fallback ?? "")} meanwhile.`));
+  const hurt = c.workspaces.filter((w) => liveApps(w).length < messengersOf(w).length);
+  if (hurt.length) {
+    const fallback = workspaceFor({}, { ...c, workspaces: working })?.name ?? "";
+    console.log(formatChecks(rows.filter((r) => offApps.has(`${r.workspace}/${r.messenger}`))));
+    for (const w of hurt) {
+      const live = liveApps(w);
+      const fix = import_picocolors.default.cyan(`remy setup ${w.name}`);
+      const down = messengersOf(w).filter((k) => !live.includes(k)).map(messengerLabel).join(" and ");
+      console.log(import_picocolors.default.yellow(live.length ? `! ${down} in ${import_picocolors.default.bold(w.name)} is off until fixed (${fix}); ${w.name} works through ${live.map(messengerLabel).join(" and ")} meanwhile.` : `! ${import_picocolors.default.bold(w.name)} is off until fixed (${fix}); its sessions report to ${import_picocolors.default.bold(fallback)} meanwhile.`));
+    }
     console.log("");
   }
   writeJson(PATHS.mcpConfig, {

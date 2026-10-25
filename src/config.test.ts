@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
-import { homedir } from "node:os";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { DEFAULTS, workspaceFor, type Config } from "./config";
 
 const config = (workspaces: Config["workspaces"]): Config => ({ ...DEFAULTS, workspaces });
-const work = { name: "work", slackUserId: "U1", transport: "poll" as const, repos: ["acme-corp/*"], paths: ["~/Repositories/work-notes"] };
-const personal = { name: "personal", slackUserId: "U2", transport: "socket" as const };
+const work = { name: "work", slack: { userId: "U1", transport: "poll" as const }, repos: ["acme-corp/*"], paths: ["~/Repositories/work-notes"] };
+const personal = { name: "personal", telegram: { userId: 2 } };
 const at = (p: string) => `${homedir()}/${p}`;
 
 test("routes by GitHub repo, so worktrees in sibling folders follow their repo", () => {
@@ -26,4 +28,23 @@ test("the longest matching folder wins; with no catch-all the first workspace ge
   const c = config([work, inner]);
   expect(workspaceFor({ cwd: at("Repositories/work-notes/tools/x") }, c)?.name).toBe("inner");
   expect(workspaceFor({ cwd: at("elsewhere") }, c)?.name).toBe("work");
+});
+
+test("configs from before 0.6 move their flat messenger fields under slack / telegram", () => {
+  const dir = mkdtempSync(join(tmpdir(), "remy-cfg-"));
+  writeFileSync(
+    join(dir, "config.json"),
+    JSON.stringify({
+      workspaces: [
+        { name: "work", slackUserId: "U1", transport: "socket", repos: ["acme-corp/*"], channelRepos: { bugs: "api" } },
+        { name: "personal", messenger: "telegram", telegramUserId: 7 },
+      ],
+    }),
+  );
+  const r = Bun.spawnSync(["bun", "-e", 'console.log(JSON.stringify(require("./src/config").loadConfig().workspaces))'], { env: { ...process.env, REMY_DIR: dir } });
+  expect(JSON.parse(r.stdout.toString())).toEqual([
+    { name: "work", repos: ["acme-corp/*"], slack: { userId: "U1", transport: "socket", channelRepos: { bugs: "api" } } },
+    { name: "personal", telegram: { userId: 7 } },
+  ]);
+  rmSync(dir, { recursive: true, force: true });
 });

@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { createMessenger, quietSink } from "./bridges";
-import { loadConfig, PATHS, REMY_DIR, workspaceFor, writeJson } from "./config";
+import { loadConfig, messengerLabel, messengersOf, PATHS, REMY_DIR, workspaceFor, writeJson, type Workspace } from "./config";
 import { doctor } from "./doctor";
 import { runHook } from "./hook";
 import { blocking } from "./messenger";
@@ -35,18 +35,30 @@ async function start(extra: string[]) {
   const { rows } = await doctor();
   const c = loadConfig();
   const problems = blocking(rows);
-  const broken = new Set(problems.map((r) => r.workspace).filter((w) => w !== undefined));
-  const working = c.workspaces.filter((w) => !broken.has(w.name));
+  const offApps = new Set(problems.filter((r) => r.workspace).map((r) => `${r.workspace}/${r.messenger}`));
+  const liveApps = (w: Workspace) => messengersOf(w).filter((k) => !offApps.has(`${w.name}/${k}`));
+  const working = c.workspaces.filter((w) => liveApps(w).length);
   if (problems.some((r) => !r.workspace) || !working.length) {
     console.log(formatChecks(rows));
     console.error(`\n${errorLine(`fix the ${pc.red("✗")} items first (${pc.cyan("remy setup")}).`)}`);
     process.exit(1);
   }
-  if (broken.size) {
-    const fallback = workspaceFor({}, { ...c, workspaces: working })?.name;
-    console.log(formatChecks(rows.filter((r) => r.workspace && broken.has(r.workspace))));
-    for (const name of broken)
-      console.log(pc.yellow(`! ${pc.bold(name)} is off until fixed (${pc.cyan(`remy setup ${name}`)}); its sessions report to ${pc.bold(fallback ?? "")} meanwhile.`));
+  const hurt = c.workspaces.filter((w) => liveApps(w).length < messengersOf(w).length);
+  if (hurt.length) {
+    const fallback = workspaceFor({}, { ...c, workspaces: working })?.name ?? "";
+    console.log(formatChecks(rows.filter((r) => offApps.has(`${r.workspace}/${r.messenger}`))));
+    for (const w of hurt) {
+      const live = liveApps(w);
+      const fix = pc.cyan(`remy setup ${w.name}`);
+      const down = messengersOf(w).filter((k) => !live.includes(k)).map(messengerLabel).join(" and ");
+      console.log(
+        pc.yellow(
+          live.length
+            ? `! ${down} in ${pc.bold(w.name)} is off until fixed (${fix}); ${w.name} works through ${live.map(messengerLabel).join(" and ")} meanwhile.`
+            : `! ${pc.bold(w.name)} is off until fixed (${fix}); its sessions report to ${pc.bold(fallback)} meanwhile.`,
+        ),
+      );
+    }
     console.log("");
   }
   writeJson(PATHS.mcpConfig, {

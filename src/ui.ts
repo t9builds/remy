@@ -3,13 +3,14 @@
  * the coordinator, which runs `remy status` through Bash, reads plain text.
  */
 import pc from "picocolors";
+import type { MessengerKind } from "./config";
 import type { Check } from "./messenger";
 import type { Ci } from "./snapshot";
 
 export { pc };
 
-/** A `remy doctor` line, ready to style. `workspace` is set for a workspace's own checks. */
-export type CheckRow = Check & { workspace?: string };
+/** A `remy doctor` line, ready to style. `workspace` and `messenger` are set for a workspace's own checks. */
+export type CheckRow = Check & { workspace?: string; messenger?: MessengerKind };
 
 export function formatChecks(rows: CheckRow[]) {
   return rows

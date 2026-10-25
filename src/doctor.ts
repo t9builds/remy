@@ -1,6 +1,6 @@
 /** `remy doctor`: what remy needs, checked. Returns rows so the CLI and setup can each show them their way. */
 import { checkWorkspace } from "./bridges";
-import { loadConfig } from "./config";
+import { loadConfig, readToken } from "./config";
 import { blocking } from "./messenger";
 import type { CheckRow } from "./ui";
 
@@ -19,6 +19,15 @@ export async function doctor(): Promise<{ ok: boolean; rows: CheckRow[] }> {
   rows.push({ label: "at least one workspace", ok: c.workspaces.length > 0, hint: "run `remy setup`" });
   const perWorkspace = await Promise.all(c.workspaces.map(async (ws) => (await checkWorkspace(ws)).map((r) => ({ ...r, workspace: ws.name }))));
   rows.push(...perWorkspace.flat());
+  // Telegram gives a bot's messages to one reader, so two workspaces can't share a bot.
+  const byBot = new Map<string, string>();
+  for (const ws of c.workspaces.filter((w) => w.telegram)) {
+    const token = readToken(ws.name, "telegram-bot");
+    const other = token && byBot.get(token);
+    if (other)
+      rows.push({ label: "Telegram bot of its own", ok: false, workspace: ws.name, messenger: "telegram", hint: `uses the same bot as "${other}"; give it another bot, or remove one of them (\`remy setup\`)` });
+    else if (token) byBot.set(token, ws.name);
+  }
   const catchAll = c.workspaces.filter((w) => !w.repos?.length && !w.paths?.length);
   if (catchAll.length > 1)
     rows.push({ label: "one catch-all workspace", ok: false, optional: true, hint: `${catchAll.length} have no repos or paths; "${catchAll[0]!.name}" gets every unmatched session` });

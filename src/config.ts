@@ -31,11 +31,13 @@ export type Routing = {
   paths?: string[];
 };
 
-/** A Slack workspace. Configs from before Telegram have no `messenger`. */
-export type SlackWorkspace = Routing & {
-  messenger?: "slack";
+export type MessengerKind = "slack" | "telegram";
+export const MESSENGERS: MessengerKind[] = ["slack", "telegram"];
+export const messengerLabel = (k: MessengerKind) => (k === "slack" ? "Slack" : "Telegram");
+
+export type SlackSettings = {
   /** Your Slack member ID (U…) in this workspace. Only messages from this user reach the coordinator. */
-  slackUserId: string;
+  userId: string;
   /**
    * How remy reads your DMs. "poll" works when teammates share the Slack app.
    * "socket" (Socket Mode) is instant but only for an app nobody else runs remy with:
@@ -47,14 +49,38 @@ export type SlackWorkspace = Routing & {
 };
 
 /** Your private chat with your own Telegram bot. A bot serves one remy: Telegram hands its updates to a single reader. */
-export type TelegramWorkspace = Routing & {
-  messenger: "telegram";
+export type TelegramSettings = {
   /** Your Telegram user ID. Only messages from this user reach the coordinator; it is also the chat remy writes to. */
-  telegramUserId: number;
+  userId: number;
 };
 
-export type Workspace = SlackWorkspace | TelegramWorkspace;
-export const isTelegram = (w: Workspace): w is TelegramWorkspace => w.messenger === "telegram";
+/**
+ * With Slack and Telegram both connected:
+ * - "mirror": everything goes to both, and what you write in one shows in the other.
+ * - "pings": everything goes to `main`; the other gets only questions and permission prompts.
+ * - "follow": messages go to whichever you last wrote from (`main` until you have).
+ */
+export type BothMode = "mirror" | "pings" | "follow";
+
+/** Where remy talks to you about a set of sessions: Slack, Telegram, or both. */
+export type Workspace = Routing & {
+  slack?: SlackSettings;
+  telegram?: TelegramSettings;
+  /** How Slack and Telegram work together when both are set. Default "mirror". */
+  both?: BothMode;
+  /** The app that gets everything with "pings", and that "follow" starts with. Default "slack". */
+  main?: MessengerKind;
+};
+
+export const messengersOf = (ws: Workspace) => MESSENGERS.filter((k) => ws[k]);
+
+/** Configs from before 0.6 had one messenger per workspace, as flat fields. */
+function migrateWorkspace(w: any): Workspace {
+  if (w.slack || w.telegram) return w;
+  const { messenger, slackUserId, transport, channelRepos, telegramUserId, ...routing } = w;
+  if (messenger === "telegram") return { ...routing, telegram: { userId: telegramUserId } };
+  return { ...routing, slack: { userId: slackUserId ?? "", transport: transport ?? "poll", channelRepos } };
+}
 
 export type Config = {
   workspaces: Workspace[];
@@ -113,7 +139,8 @@ export function loadConfig(): Config {
   const raw = readJson<Partial<Config> & { slackUserId?: string }>(PATHS.config, {});
   const config = { ...DEFAULTS, ...raw };
   // 0.1 configs had a single top-level slackUserId.
-  if (!raw.workspaces && raw.slackUserId) config.workspaces = [{ name: "default", slackUserId: raw.slackUserId, transport: "poll" }];
+  if (!raw.workspaces && raw.slackUserId) config.workspaces = [{ name: "default", slack: { userId: raw.slackUserId, transport: "poll" } }];
+  config.workspaces = config.workspaces.map(migrateWorkspace);
   delete (config as any).slackUserId;
   return config;
 }

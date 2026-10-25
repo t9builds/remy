@@ -3,7 +3,7 @@
  * Telegram has no threads in a private chat, so a session's messages form a reply chain: remy posts each message
  * about a session as a reply to its previous one, and a user reply to any of them is tagged with that session.
  */
-import { PATHS, readJson, readToken, writeJson, type TelegramWorkspace } from "./config";
+import { PATHS, readJson, readToken, writeJson, type TelegramSettings } from "./config";
 import { AWAIT_ANSWER_MS, parseVerdict, permissionText, type Check, type Messenger, type PermissionRequest, type PostOptions, type Sink } from "./messenger";
 import { Telegram, TelegramError, type TgMessage, type TgUpdate, type TgUser } from "./telegram";
 
@@ -24,10 +24,11 @@ export class TelegramBridge implements Messenger {
   private conflictReported = false;
 
   constructor(
-    readonly ws: TelegramWorkspace,
+    readonly workspace: string,
+    private settings: TelegramSettings,
     private api: TelegramApi,
     private sink: Sink,
-    private statePath = PATHS.telegramState(ws.name),
+    private statePath = PATHS.telegramState(workspace),
   ) {
     this.state = readJson<State>(statePath, { threads: {} });
   }
@@ -57,7 +58,7 @@ export class TelegramBridge implements Messenger {
   async post(text: string, opts: PostOptions = {}) {
     const replyTo = opts.thread || (opts.session ? this.latestFor(opts.session) : undefined);
     const session = opts.session ?? (replyTo ? this.state.threads[replyTo]?.session : undefined);
-    const ids = await this.api.send(this.ws.telegramUserId, text, { replyTo: replyTo ? Number(replyTo) : undefined });
+    const ids = await this.api.send(this.settings.userId, text, { replyTo: replyTo ? Number(replyTo) : undefined });
     if (session) {
       for (const id of ids) this.state.threads[id] = { session, at: Date.now(), mine: true, expectReply: opts.expect_reply };
       this.save();
@@ -66,11 +67,16 @@ export class TelegramBridge implements Messenger {
   }
 
   async update(id: string, text: string) {
-    await this.api.edit(this.ws.telegramUserId, Number(id), text);
+    await this.api.edit(this.settings.userId, Number(id), text);
+  }
+
+  answered(session: string) {
+    for (const t of Object.values(this.state.threads)) if (t.session === session) t.answered = true;
+    this.save();
   }
 
   async askPermission(p: PermissionRequest) {
-    await this.api.send(this.ws.telegramUserId, `${permissionText(p)}\nOr reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
+    await this.api.send(this.settings.userId, `${permissionText(p)}\nOr reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
       buttons: [[{ text: "Allow", data: `perm:allow:${p.request_id}` }, { text: "Deny", data: `perm:deny:${p.request_id}` }]],
     });
   }
@@ -105,28 +111,28 @@ export class TelegramBridge implements Messenger {
   }
 
   private async onError(e: any, failures: number) {
-    this.sink.log(`[${this.ws.name}] telegram poll error`, e?.message ?? e);
+    this.sink.log(`[${this.workspace}] telegram poll error`, e?.message ?? e);
     if (e instanceof TelegramError && e.code === 409) {
       if (!this.conflictReported)
         await this.sink.push(
           "system",
-          `Another program is reading the Telegram bot of workspace "${this.ws.name}" (a second remy, the Telegram channel plugin, or a webhook). Telegram gives a bot's messages to one reader only. Tell the user in this terminal to give remy a bot of its own.`,
+          `Another program is reading the Telegram bot of workspace "${this.workspace}" (a second remy, the Telegram channel plugin, or a webhook). Telegram gives a bot's messages to one reader only. Tell the user in this terminal to give remy a bot of its own.`,
         );
       this.conflictReported = true;
       return Bun.sleep(CONFLICT_PAUSE_MS);
     }
     if (failures === 3)
-      await this.sink.push("system", `Reading Telegram for workspace "${this.ws.name}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; \`remy doctor\` checks the bot token.`);
+      await this.sink.push("system", `Reading Telegram for workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; \`remy doctor\` checks the bot token.`);
     await Bun.sleep(Math.max(e?.retryAfter ?? 0, Math.min(5 * failures, 60)) * 1000);
   }
 
   private isOwner(from?: TgUser) {
-    return !!from && from.id === this.ws.telegramUserId && !from.is_bot;
+    return !!from && from.id === this.settings.userId && !from.is_bot;
   }
 
   private async onMessage(m: TgMessage) {
     // Anyone can find a bot and write to it: gate on the sender.
-    if (m.chat.type !== "private" || !this.isOwner(m.from)) return this.sink.log(`[${this.ws.name}] ignored telegram message from ${m.from?.id}`);
+    if (m.chat.type !== "private" || !this.isOwner(m.from)) return this.sink.log(`[${this.workspace}] ignored telegram message from ${m.from?.id}`);
     const text = (m.text ?? m.caption ?? "").trim();
     if (!text) return void (await this.api.send(m.chat.id, "I can only read text for now.", { replyTo: m.message_id }));
     if (text === "/start") return;
@@ -136,12 +142,11 @@ export class TelegramBridge implements Messenger {
     const repliedTo = m.reply_to_message?.message_id;
     const session = repliedTo ? this.state.threads[repliedTo]?.session : undefined;
     if (session) {
-      for (const t of Object.values(this.state.threads)) if (t.session === session) t.answered = true;
       this.state.threads[m.message_id] = { session, at: Date.now(), mine: false };
-      this.save();
+      this.answered(session);
     }
     await this.sink.push("user_message", text, {
-      workspace: this.ws.name,
+      workspace: this.workspace,
       id: String(m.message_id),
       thread: repliedTo ? String(m.message_id) : "",
       session: session ?? "",
@@ -160,10 +165,10 @@ export class TelegramBridge implements Messenger {
 }
 
 /** What `remy doctor` checks for a Telegram workspace. */
-export async function telegramChecks(ws: TelegramWorkspace): Promise<Check[]> {
-  const fix = `run \`remy setup ${ws.name}\``;
-  const out: Check[] = [{ label: "Telegram user ID", ok: ws.telegramUserId > 0, hint: fix }];
-  const token = readToken(ws.name, "telegram-bot");
+export async function telegramChecks(workspace: string, settings: TelegramSettings): Promise<Check[]> {
+  const fix = `run \`remy setup ${workspace}\``;
+  const out: Check[] = [{ label: "Telegram user ID", ok: settings.userId > 0, hint: fix }];
+  const token = readToken(workspace, "telegram-bot");
   out.push({ label: "Telegram bot token", ok: !!token, hint: fix });
   if (!token) return out;
   const tg = new Telegram(token);
@@ -171,7 +176,7 @@ export async function telegramChecks(ws: TelegramWorkspace): Promise<Check[]> {
   if ("error" in me) return [...out, { label: "Telegram bot token works", ok: false, hint: me.error }];
   const hook = await tg.webhook().catch(() => "");
   out.push({ label: `Telegram bot @${me.username} is free for remy`, ok: !hook, hint: "it sends its messages to a webhook, so another program uses it; give remy a bot of its own" });
-  const reach = await tg.canMessage(ws.telegramUserId);
+  const reach = await tg.canMessage(settings.userId);
   out.push({ label: `@${me.username} can message you`, ok: reach === true, hint: `${reach}; open https://t.me/${me.username} and press Start` });
   return out;
 }

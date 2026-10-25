@@ -8,7 +8,7 @@
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { PATHS, readJson, readToken, writeJson, type SlackWorkspace } from "./config";
+import { PATHS, readJson, readToken, writeJson, type SlackSettings } from "./config";
 import { AWAIT_ANSWER_MS, parseVerdict, permissionText, type Check, type Messenger, type PermissionRequest, type PostOptions, type Sink } from "./messenger";
 import { Slack, socketMode, type SlackMessage } from "./slack";
 import { formatTranscript, requestText, taskEvent, taskId, type SlackTask } from "./task";
@@ -42,31 +42,41 @@ export class SlackBridge implements Messenger {
   private tick = 0;
 
   constructor(
-    readonly ws: SlackWorkspace,
+    readonly workspace: string,
+    private settings: SlackSettings,
     private tokens: { bot: string; app?: string },
     private sink: Sink,
     private triggerEmoji: string,
   ) {
     this.slack = new Slack(tokens.bot);
-    this.state = readJson<State>(PATHS.slackState(ws.name), { threads: {} });
+    this.state = readJson<State>(PATHS.slackState(workspace), { threads: {} });
   }
 
   private save() {
-    writeJson(PATHS.slackState(this.ws.name), this.state);
+    writeJson(PATHS.slackState(this.workspace), this.state);
   }
 
   private log(...a: unknown[]) {
-    this.sink.log(`[${this.ws.name}]`, ...a);
+    this.sink.log(`[${this.workspace}]`, ...a);
   }
 
   async ensureDm() {
-    if (!this.dm) this.dm = await this.slack.openDm(this.ws.slackUserId);
+    if (!this.dm) this.dm = await this.slack.openDm(this.settings.userId);
     return this.dm;
+  }
+
+  /** The DM thread about `session` from the last day, so its messages stay together. */
+  private threadOf(session: string) {
+    let best: [string, number] | undefined;
+    for (const [root, t] of Object.entries(this.state.threads))
+      if (t.session === session && !t.channel && Date.now() - t.postedAt < 24 * 3600_000 && (!best || t.postedAt > best[1])) best = [root, t.postedAt];
+    return best?.[0];
   }
 
   /** Post to the DM, or in a channel thread when `thread` is "<channel>/<ts>". Returns the message's id. */
   async post(text: string, opts: PostOptions = {}) {
-    const thread = opts.thread ? parseRef(opts.thread) : undefined;
+    const ref = opts.thread || (opts.session ? this.threadOf(opts.session) : undefined);
+    const thread = ref ? parseRef(ref) : undefined;
     const channel = thread?.channel;
     const ts = await this.slack.post(channel ?? (await this.ensureDm()), text, thread?.ts);
     const root = thread?.ts ?? ts;
@@ -95,14 +105,19 @@ export class SlackBridge implements Messenger {
     await this.slack.update(channel ?? (await this.ensureDm()), ts, text);
   }
 
+  answered(session: string) {
+    for (const t of Object.values(this.state.threads)) if (t.session === session) t.answered = true;
+    this.save();
+  }
+
   async askPermission(p: PermissionRequest) {
     await this.post(`${permissionText(p)}\nReply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true });
   }
 
   async start() {
-    if (this.ws.transport === "socket" && !this.tokens.app)
-      await this.sink.push("system", `Workspace "${this.ws.name}" is set to Socket Mode but has no app-level token (xapp-…); reading it by polling instead.`);
-    if (this.tokens.app && this.ws.transport === "socket") this.startSocket(this.tokens.app);
+    if (this.settings.transport === "socket" && !this.tokens.app)
+      await this.sink.push("system", `Slack in workspace "${this.workspace}" is set to Socket Mode but has no app-level token (xapp-…); reading it by polling instead.`);
+    if (this.tokens.app && this.settings.transport === "socket") this.startSocket(this.tokens.app);
     else this.startPolling();
     void this.startWatching();
   }
@@ -116,7 +131,7 @@ export class SlackBridge implements Messenger {
   }
 
   private async handleInbound(m: SlackMessage, threadRoot?: string, channel?: string) {
-    if (m.user !== this.ws.slackUserId || m.bot_id) return; // gate on sender, never on the channel
+    if (m.user !== this.settings.userId || m.bot_id) return; // gate on sender, never on the channel
     if (m.subtype && m.subtype !== "thread_broadcast") return;
     this.lastInboundAt = Date.now();
     const v = parseVerdict(m.text);
@@ -129,7 +144,7 @@ export class SlackBridge implements Messenger {
     }
     const text = this.botUserId ? requestText(m.text, this.botUserId) : m.text;
     await this.sink.push("user_message", text, {
-      workspace: this.ws.name,
+      workspace: this.workspace,
       id: threadRef(channel, m.ts),
       thread: root ? threadRef(channel, root) : "",
       session: info?.session ?? "",
@@ -158,7 +173,7 @@ export class SlackBridge implements Messenger {
           if (++failures === 3)
             await this.sink.push(
               "system",
-              `Reading Slack workspace "${this.ws.name}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; check the bot scopes and that the app's Messages tab is on.`,
+              `Reading Slack workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; check the bot scopes and that the app's Messages tab is on.`,
             );
         }
         await Bun.sleep(delay);
@@ -214,7 +229,7 @@ export class SlackBridge implements Messenger {
 
     this.state.watch ??= { channels: {}, handled: {} };
     this.watcher = new ChannelWatcher(this.slack, {
-      me: this.ws.slackUserId,
+      me: this.settings.userId,
       bot: this.botUserId,
       emoji: this.triggerEmoji,
       state: this.state.watch,
@@ -233,7 +248,7 @@ export class SlackBridge implements Messenger {
       } catch (e: any) {
         this.log("watch error", e?.message ?? e);
         if (++failures === 5)
-          await this.sink.push("system", `Watching Slack channels in workspace "${this.ws.name}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal.`);
+          await this.sink.push("system", `Watching Slack channels in workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal.`);
         if (e?.retryAfter) await Bun.sleep(e.retryAfter * 1000);
       }
       this.save();
@@ -281,10 +296,10 @@ export class SlackBridge implements Messenger {
       }
     }
 
-    const requester = await this.slack.userName(this.ws.slackUserId);
+    const requester = await this.slack.userName(this.settings.userId);
     const task: SlackTask = {
       id,
-      workspace: this.ws.name,
+      workspace: this.workspace,
       channel: t.channel,
       channelName: t.channelName,
       threadTs: t.root,
@@ -293,7 +308,7 @@ export class SlackBridge implements Messenger {
       permalink: await this.slack.permalink(t.channel, t.root).catch(() => ""),
       requester,
       request: t.kind === "mention" ? requestText(t.message.text, this.botUserId) : "",
-      defaultRepo: this.ws.channelRepos?.[t.channelName],
+      defaultRepo: this.settings.channelRepos?.[t.channelName],
       transcript: formatTranscript(thread, names, {
         triggerTs: t.message.ts,
         triggerNote: t.kind === "mention" ? `${requester} asked you here` : `${requester} reacted :${this.triggerEmoji}: here`,
@@ -308,7 +323,7 @@ export class SlackBridge implements Messenger {
     this.state.threads[t.root] = { channel: t.channel, task: id, expectReply: false, postedAt: Date.now(), lastSeen: thread.at(-1)!.ts };
     this.save();
     await this.sink.push("task_request", taskEvent(task), {
-      workspace: this.ws.name,
+      workspace: this.workspace,
       task: id,
       thread: threadRef(t.channel, t.root),
       default_repo: task.defaultRepo ?? "",
@@ -320,10 +335,10 @@ const DM_SCOPES = ["chat:write", "im:history", "im:read", "im:write"];
 const CHANNEL_SCOPES = ["channels:read", "groups:read", "channels:history", "groups:history", "reactions:read", "reactions:write", "users:read", "files:read"];
 
 /** What `remy doctor` checks for a Slack workspace. */
-export async function slackChecks(ws: SlackWorkspace): Promise<Check[]> {
-  const fix = `run \`remy setup ${ws.name}\``;
-  const out: Check[] = [{ label: "Slack user ID", ok: /^[UW][A-Z0-9]+$/.test(ws.slackUserId), hint: fix }];
-  const token = readToken(ws.name, "slack-bot");
+export async function slackChecks(workspace: string, settings: SlackSettings): Promise<Check[]> {
+  const fix = `run \`remy setup ${workspace}\``;
+  const out: Check[] = [{ label: "Slack user ID", ok: /^[UW][A-Z0-9]+$/.test(settings.userId), hint: fix }];
+  const token = readToken(workspace, "slack-bot");
   out.push({ label: "Slack bot token", ok: !!token, hint: fix });
   if (token) {
     const who = await new Slack(token).whoami().catch((e) => ({ error: String(e?.message ?? e) }));
@@ -331,11 +346,11 @@ export async function slackChecks(ws: SlackWorkspace): Promise<Check[]> {
     else {
       const lacks = (want: string[]) => want.filter((s) => !who.scopes.includes(s));
       const dm = lacks(DM_SCOPES);
-      out.push({ label: "Slack scopes for DMs", ok: !dm.length, hint: `add ${dm.join(", ")} as Bot Token Scopes, reinstall the app, then \`remy setup ${ws.name}\`` });
+      out.push({ label: "Slack scopes for DMs", ok: !dm.length, hint: `add ${dm.join(", ")} as Bot Token Scopes, reinstall the app, then \`remy setup ${workspace}\`` });
       const ch = lacks(CHANNEL_SCOPES);
       out.push({ label: "Slack scopes for channel tasks", ok: !ch.length, hint: `tasks from channel threads need ${ch.join(", ")}`, optional: true });
     }
   }
-  if (ws.transport === "socket") out.push({ label: "app-level token (Socket Mode)", ok: !!readToken(ws.name, "slack-app"), hint: fix });
+  if (settings.transport === "socket") out.push({ label: "Slack app-level token (Socket Mode)", ok: !!readToken(workspace, "slack-app"), hint: fix });
   return out;
 }

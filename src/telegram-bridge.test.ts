@@ -2,7 +2,6 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TelegramWorkspace } from "./config";
 import type { TgMessage, TgUpdate } from "./telegram";
 import { TelegramBridge } from "./telegram-bridge";
 
@@ -39,9 +38,9 @@ function bridge() {
   const tg = fakeApi();
   const pushed: { kind: string; content: string; meta: Record<string, string> }[] = [];
   const verdicts: [string, string][] = [];
-  const ws: TelegramWorkspace = { name: "personal", messenger: "telegram", telegramUserId: ME };
   const b = new TelegramBridge(
-    ws,
+    "personal",
+    { userId: ME },
     tg.api,
     {
       push: async (kind, content, meta = {}) => void pushed.push({ kind, content, meta }),

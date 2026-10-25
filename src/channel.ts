@@ -13,7 +13,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { messengerName, openWorkspaces } from "./bridges";
+import { describeMessengers, openWorkspaces, type Off } from "./bridges";
 import { loadConfig, PATHS, readJson, workspaceFor, type Config } from "./config";
 import type { RemyEvent } from "./hook";
 import type { Messenger, Sink } from "./messenger";
@@ -27,7 +27,7 @@ const log = (...a: unknown[]) => {
   } catch {}
 };
 
-const INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel source="remy" kind="..." workspace="...">. A workspace is a Slack workspace or a Telegram chat; the post tool sends to the right one.
+const INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel source="remy" kind="..." workspace="...">. A workspace talks to the user in Slack, in Telegram, or both; post once and remy delivers it as the workspace is set up. With both, events carry via (the app the user wrote from); pass ids and threads back unchanged.
 - kind="user_message": the user wrote to you. Answer with post, passing the same workspace, and thread when the tag has it. If it has session, the user is replying to that agent. If it has awaiting instead, that agent asked the user a question recently: if the message reads like the answer, treat it as a reply to that agent.
 - kind="task_request": the user mentioned you, or reacted with the trigger emoji, in a Slack channel thread. Follow "Tasks from Slack threads" in your instructions.
 - kind="agent_needs_input": a session is blocked waiting for the user. Post it with post(workspace, session=<name>, expect_reply=true).
@@ -37,7 +37,7 @@ const INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel so
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
 
 const mcp = new Server(
-  { name: "remy", version: "0.5.1" },
+  { name: "remy", version: "0.6.0" },
   {
     capabilities: {
       experimental: { "claude/channel": {}, "claude/channel/permission": {} },
@@ -64,7 +64,7 @@ const sink: Sink = {
 };
 
 let bridges = new Map<string, Messenger>();
-let off: { name: string; reason: string }[] = [];
+let off: Off[] = [];
 /** The config with only the workspaces that work, so sessions of a broken one route to a working one. */
 let active: Config = { ...config, workspaces: [] };
 const ready = openWorkspaces(config.workspaces, sink, { triggerEmoji: config.triggerEmoji }).then((r) => {
@@ -95,7 +95,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => (await ready, {
           text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
           workspace: {
             type: "string",
-            description: `Workspace from the event tag. Working: ${active.workspaces.map((w) => `${w.name} (${messengerName(w)})`).join(", ") || "none"}`,
+            description: `Workspace from the event tag. Working: ${active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", ") || "none"}`,
           },
           thread: { type: "string", description: "Answer in this thread: thread or id from the event tag, or an id post returned" },
           session: {
@@ -131,11 +131,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const origin = a.session && !a.thread ? readJson<Spawned>(PATHS.spawned, {})[a.session]?.slack : undefined;
   if (origin) Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
   const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
-  const rerouted = a.workspace && a.workspace !== bridge.ws.name ? ` ("${a.workspace}" is off, so this went to "${bridge.ws.name}")` : "";
+  const rerouted = a.workspace && a.workspace !== bridge.workspace ? ` ("${a.workspace}" is off, so this went to "${bridge.workspace}")` : "";
   try {
     if (req.params.name === "post") {
       const id = await bridge.post(String(a.text), { thread: a.thread, session: a.session, expect_reply: a.expect_reply });
-      return { content: [{ type: "text", text: `posted to ${bridge.ws.name} id=${id}${rerouted}` }] };
+      return { content: [{ type: "text", text: `posted to ${bridge.workspace} id=${id}${rerouted}` }] };
     }
     if (req.params.name === "update") {
       await bridge.update(String(a.id), String(a.text));
@@ -143,7 +143,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
   } catch (e: any) {
     // Slack and Telegram errors carry their own `code`, which isn't a JSON-RPC one: report them as a failed call.
-    return { isError: true, content: [{ type: "text", text: `${req.params.name} to ${bridge.ws.name} failed: ${e?.message ?? e}` }] };
+    return { isError: true, content: [{ type: "text", text: `${req.params.name} to ${bridge.workspace} failed: ${e?.message ?? e}` }] };
   }
   throw new Error(`unknown tool: ${req.params.name}`);
 });
@@ -279,20 +279,27 @@ process.stdin.on("close", () => process.exit(0));
 await mcp.connect(new StdioServerTransport());
 await initialized;
 await ready;
-log("started", [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => o.name).join(",")}` : "");
+log("started", [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => `${o.workspace}/${o.messenger}`).join(",")}` : "");
 
 if (!config.workspaces.length) await push("system", "No workspace is configured. Tell the user in this terminal to run `remy setup`, then `remy start`.");
-else if (!bridges.size) await push("system", `No workspace works: ${off.map((o) => `"${o.name}" (${o.reason})`).join("; ")}. Tell the user in this terminal; \`remy doctor\` shows what to fix.`);
+else if (!bridges.size) await push("system", `No workspace works: ${off.map((o) => `"${o.workspace}" ${o.messenger} (${o.reason})`).join("; ")}. Tell the user in this terminal; \`remy doctor\` shows what to fix.`);
 else {
   const fallback = workspaceFor({}, active)?.name;
-  for (const o of off)
-    await push(
-      "system",
-      `Workspace "${o.name}" is off: ${o.reason}. Until it's fixed (\`remy setup ${o.name}\`, then restart), its sessions report to "${fallback}" and posts to "${o.name}" go there too. Don't post a separate hello for "${o.name}"; mention it in the hello to "${fallback}".`,
-    );
+  for (const name of new Set(off.map((o) => o.workspace))) {
+    const mine = off.filter((o) => o.workspace === name);
+    const why = mine.map((o) => `${o.messenger}: ${o.reason}`).join("; ");
+    const fix = `\`remy setup ${name}\`, then restart`;
+    if (bridges.has(name))
+      await push("system", `In workspace "${name}", ${mine.map((o) => o.messenger).join(" and ")} is off (${why}). Until it's fixed (${fix}), "${name}" works through its other app only. Mention it in your hello there.`);
+    else
+      await push(
+        "system",
+        `Workspace "${name}" is off (${why}). Until it's fixed (${fix}), its sessions report to "${fallback}" and posts to "${name}" go there too. Don't post a separate hello for "${name}"; mention it in the hello to "${fallback}".`,
+      );
+  }
 }
 for (const b of bridges.values())
-  b.start().catch((e) => push("system", `Workspace "${b.ws.name}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
+  b.start().catch((e) => push("system", `Workspace "${b.workspace}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
 tailEvents();
 await digest(); // stores the baseline on first run
 setInterval(digest, config.digestMinutes * 60_000);

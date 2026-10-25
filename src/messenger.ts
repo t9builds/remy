@@ -6,7 +6,6 @@
  * Ids are opaque strings each messenger makes and reads back: the coordinator copies them from event tags into
  * `thread` and `update`. Text is Slack mrkdwn everywhere; a messenger that formats differently converts it.
  */
-import type { Workspace } from "./config";
 
 export type PostOptions = {
   /** Answer in this thread: the `thread` or `id` from an event tag, or the id `post` returned. */
@@ -20,11 +19,14 @@ export type PostOptions = {
 export type PermissionRequest = { request_id: string; tool_name: string; description: string; input_preview: string };
 
 export interface Messenger {
-  readonly ws: Workspace;
+  /** The workspace's name. */
+  readonly workspace: string;
   /** Returns the new message's id. */
   post(text: string, opts?: PostOptions): Promise<string>;
   update(id: string, text: string): Promise<void>;
   askPermission(p: PermissionRequest): Promise<void>;
+  /** The user answered `session`'s question somewhere else; stop treating it as open here. */
+  answered(session: string): void;
   /** Start reading the user's messages in the background. */
   start(): Promise<void>;
 }

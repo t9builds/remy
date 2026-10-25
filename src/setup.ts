@@ -7,20 +7,23 @@ import * as p from "@clack/prompts";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { createMessenger, messengerName, quietSink } from "./bridges";
+import { createMessenger, describeMessengers, quietSink } from "./bridges";
 import {
   ensureDir,
   expandHome,
-  isTelegram,
   loadConfig,
+  messengerLabel,
+  messengersOf,
   readToken,
   saveConfig,
   storeToken,
   TOKEN_FORMAT,
+  type BothMode,
   type Config,
+  type MessengerKind,
   type Routing,
-  type SlackWorkspace,
-  type TelegramWorkspace,
+  type SlackSettings,
+  type TelegramSettings,
   type TokenKind,
   type Workspace,
 } from "./config";
@@ -44,7 +47,7 @@ async function answer<T>(prompt: Promise<T>): Promise<Exclude<T, symbol>> {
 const list = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
 const describe = (ws: Workspace) => {
   const scope = [...(ws.repos ?? []), ...(ws.paths ?? [])].join(", ") || "everything else";
-  return `${messengerName(ws)} · ${scope}`;
+  return `${describeMessengers(ws)} · ${scope}`;
 };
 
 export async function setup(only?: string) {
@@ -98,7 +101,7 @@ async function general(c: Config) {
 }
 
 async function workspaces(c: Config) {
-  if (!c.workspaces.length) p.log.info("A workspace is where remy talks to you: a Slack workspace or your Telegram chat. You can add several.");
+  if (!c.workspaces.length) p.log.info("A workspace is where remy talks to you about a set of sessions: in Slack, in Telegram, or both. You can add several.");
   for (;;) {
     const choice = await answer(
       p.select<string>({
@@ -113,7 +116,21 @@ async function workspaces(c: Config) {
     );
     if (choice === "+done") return;
     if (choice !== "+add") {
-      await setupWorkspace(c, choice);
+      const action = await answer(
+        p.select({
+          message: `Workspace "${choice}"`,
+          options: [
+            { value: "edit", label: "Edit" },
+            { value: "remove", label: "Remove", hint: "its sessions go to another workspace; stored tokens stay in the keychain" },
+          ],
+        }),
+      );
+      if (action === "edit") await setupWorkspace(c, choice);
+      else if (await answer(p.confirm({ message: `Remove "${choice}"?`, initialValue: false }))) {
+        c.workspaces = c.workspaces.filter((w) => w.name !== choice);
+        saveConfig(c);
+        p.log.success(`Removed "${choice}"`);
+      }
       continue;
     }
     const name = await answer(
@@ -130,21 +147,22 @@ async function workspaces(c: Config) {
 async function setupWorkspace(c: Config, name: string) {
   const existing = c.workspaces.find((w) => w.name === name);
   p.log.step(pc.bold(`Workspace "${name}"`));
-  const messenger = await answer(
-    p.select({
-      message: "Talk to remy here through",
+  const kinds = await answer(
+    p.multiselect<MessengerKind>({
+      message: `Talk to remy here through ${pc.dim("(space to pick, enter to confirm)")}`,
       options: [
         { value: "slack", label: "Slack", hint: "a DM with your Slack app's bot; tasks from channel threads" },
         { value: "telegram", label: "Telegram", hint: "a chat with your own bot; good on the phone" },
       ],
-      initialValue: existing && isTelegram(existing) ? "telegram" : "slack",
+      initialValues: existing ? messengersOf(existing) : ["slack"],
+      required: true,
     }),
   );
+  const together = kinds.length > 1 ? await askBoth(existing) : {};
   const routing = await askRouting(c, name, existing);
-  const ws =
-    messenger === "telegram"
-      ? await setupTelegram(routing, existing && isTelegram(existing) ? existing : undefined)
-      : await setupSlack(c, routing, existing && !isTelegram(existing) ? existing : undefined);
+  const ws: Workspace = { ...routing, ...together };
+  if (kinds.includes("slack")) ws.slack = await setupSlack(c, name, existing?.slack);
+  if (kinds.includes("telegram")) ws.telegram = await setupTelegram(name, existing?.telegram);
   c.workspaces = existing ? c.workspaces.map((w) => (w === existing ? ws : w)) : [...c.workspaces, ws];
   saveConfig(c);
 
@@ -152,10 +170,37 @@ async function setupWorkspace(c: Config, name: string) {
   s.start("Sending you a test message");
   try {
     await createMessenger(ws, quietSink, { triggerEmoji: c.triggerEmoji }).post(`👋 remy is connected here ("${name}"). Start the coordinator with \`remy start\`.`);
-    s.stop(`Saved "${name}" and sent you a test message in ${messengerName(ws)}`);
+    s.stop(`Saved "${name}" and sent you a test message in ${kinds.map(messengerLabel).join(" and ")}`);
   } catch (e: any) {
     s.error(`Saved "${name}", but the test message failed: ${e?.message ?? e}`);
   }
+}
+
+/** How Slack and Telegram work together in one workspace. */
+async function askBoth(existing?: Workspace): Promise<{ both: BothMode; main?: MessengerKind }> {
+  const both = await answer(
+    p.select<BothMode>({
+      message: "With both connected",
+      options: [
+        { value: "mirror", label: "Mirror", hint: "everything in both; what you write in one shows in the other" },
+        { value: "pings", label: "Main app + pings", hint: "everything in one; the other only gets questions and permission prompts" },
+        { value: "follow", label: "Follow me", hint: "messages go to whichever app you last wrote from" },
+      ],
+      initialValue: existing?.both ?? "mirror",
+    }),
+  );
+  if (both === "mirror") return { both };
+  const main = await answer(
+    p.select<MessengerKind>({
+      message: both === "pings" ? "Which app gets everything?" : "Which app first, before you've written?",
+      options: [
+        { value: "slack", label: "Slack" },
+        { value: "telegram", label: "Telegram" },
+      ],
+      initialValue: existing?.main ?? "slack",
+    }),
+  );
+  return { both, main };
 }
 
 async function askRouting(c: Config, name: string, existing?: Workspace): Promise<Routing> {
@@ -205,13 +250,13 @@ const SLACK_APP_STEPS = [
   `3. Reinstall the app and copy the ${pc.bold("Bot User OAuth Token")} (xoxb-…)`,
 ].join("\n");
 
-async function setupSlack(c: Config, routing: Routing, existing?: SlackWorkspace): Promise<SlackWorkspace> {
-  const { name } = routing;
-  const slackUserId = await answer(
+async function setupSlack(c: Config, name: string, existing?: SlackSettings): Promise<SlackSettings> {
+  p.log.step("Slack");
+  const userId = await answer(
     p.text({
       message: `Your Slack member ID ${pc.dim("(profile → ⋮ → Copy member ID)")}`,
       placeholder: "U012ABC345",
-      initialValue: existing?.slackUserId ?? "",
+      initialValue: existing?.userId ?? "",
       validate: (v) => (/^[UW][A-Z0-9]+$/.test(v?.trim() ?? "") ? undefined : "Starts with U, like U012ABC345"),
     }),
   );
@@ -251,11 +296,11 @@ async function setupSlack(c: Config, routing: Routing, existing?: SlackWorkspace
       );
     await askToken(name, "slack-app", "app-level token", async () => "App-level token saved");
   }
-  return { ...routing, messenger: "slack", slackUserId: slackUserId.trim(), transport, channelRepos: pairs.length ? Object.fromEntries(pairs) : undefined };
+  return { userId: userId.trim(), transport, channelRepos: pairs.length ? Object.fromEntries(pairs) : undefined };
 }
 
-async function setupTelegram(routing: Routing, existing?: TelegramWorkspace): Promise<TelegramWorkspace> {
-  const { name } = routing;
+async function setupTelegram(name: string, existing?: TelegramSettings): Promise<TelegramSettings> {
+  p.log.step("Telegram");
   if (!readToken(name, "telegram-bot"))
     p.note(
       [
@@ -278,10 +323,10 @@ async function setupTelegram(routing: Routing, existing?: TelegramWorkspace): Pr
   });
   const tg = new Telegram(readToken(name, "telegram-bot")!);
   username ||= (await tg.getMe()).username;
-  let telegramUserId = existing?.telegramUserId ?? 0;
-  if (changed || !telegramUserId || !(await answer(p.confirm({ message: `Stay paired with Telegram user ${telegramUserId}?`, initialValue: true }))))
-    telegramUserId = await pairTelegram(tg, username, name);
-  return { ...routing, messenger: "telegram", telegramUserId };
+  let userId = existing?.userId ?? 0;
+  if (changed || !userId || !(await answer(p.confirm({ message: `Stay paired with Telegram user ${userId}?`, initialValue: true }))))
+    userId = await pairTelegram(tg, username, name);
+  return { userId };
 }
 
 /** Learn the user's Telegram ID from the first message they send the bot. */

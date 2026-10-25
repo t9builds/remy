@@ -15336,7 +15336,17 @@ var PATHS = {
   telegramState: (workspace) => join(REMY_DIR, `telegram-state.${workspace}.json`),
   tokenFile: (workspace, kind) => join(REMY_DIR, `${kind}-token.${workspace}`)
 };
-var isTelegram = (w) => w.messenger === "telegram";
+var MESSENGERS = ["slack", "telegram"];
+var messengerLabel = (k) => k === "slack" ? "Slack" : "Telegram";
+var messengersOf = (ws) => MESSENGERS.filter((k) => ws[k]);
+function migrateWorkspace(w) {
+  if (w.slack || w.telegram)
+    return w;
+  const { messenger, slackUserId, transport, channelRepos, telegramUserId, ...routing } = w;
+  if (messenger === "telegram")
+    return { ...routing, telegram: { userId: telegramUserId } };
+  return { ...routing, slack: { userId: slackUserId ?? "", transport: transport ?? "poll", channelRepos } };
+}
 var DEFAULTS = {
   workspaces: [],
   repoRoots: [join(homedir(), "Repositories")],
@@ -15372,7 +15382,8 @@ function loadConfig() {
   const raw = readJson(PATHS.config, {});
   const config = { ...DEFAULTS, ...raw };
   if (!raw.workspaces && raw.slackUserId)
-    config.workspaces = [{ name: "default", slackUserId: raw.slackUserId, transport: "poll" }];
+    config.workspaces = [{ name: "default", slack: { userId: raw.slackUserId, transport: "poll" } }];
+  config.workspaces = config.workspaces.map(migrateWorkspace);
   delete config.slackUserId;
   return config;
 }
@@ -15439,6 +15450,118 @@ function storeToken(workspace, kind, token) {
   }
   writeFileSync(PATHS.tokenFile(workspace, kind), token + `
 `, { mode: 384 });
+}
+
+// src/fanout.ts
+var encodeId = (parts) => Object.entries(parts).map(([k, v]) => `${k}:${v}`).join("|");
+function decodeId(id) {
+  const parts = {};
+  for (const piece of id.split("|")) {
+    const i = piece.indexOf(":");
+    const k = piece.slice(0, i);
+    if (k === "slack" || k === "telegram")
+      parts[k] = piece.slice(i + 1);
+  }
+  return parts;
+}
+
+class Fanout {
+  workspace;
+  mode;
+  main;
+  log;
+  members = new Map;
+  lastFrom;
+  constructor(workspace, mode, main, log = () => {}) {
+    this.workspace = workspace;
+    this.mode = mode;
+    this.main = main;
+    this.log = log;
+    this.lastFrom = main;
+  }
+  add(kind, m) {
+    this.members.set(kind, m);
+  }
+  get kinds() {
+    return [...this.members.keys()];
+  }
+  sinkFor(kind, sink) {
+    const prefix = (meta) => {
+      const out = { ...meta, via: kind };
+      for (const key of ["id", "thread"])
+        if (out[key])
+          out[key] = encodeId({ [kind]: out[key] });
+      return out;
+    };
+    return {
+      ...sink,
+      push: async (event, content, meta = {}) => {
+        if (event === "user_message") {
+          this.lastFrom = kind;
+          await this.share(kind, content, meta.session);
+        }
+        await sink.push(event, content, prefix(meta));
+      }
+    };
+  }
+  async share(from, text, session) {
+    for (const [k, m] of this.members) {
+      if (k === from)
+        continue;
+      if (session)
+        m.answered(session);
+      const echo = this.mode === "mirror" || this.mode === "pings" && k === this.main;
+      if (echo)
+        await m.post(`\uD83D\uDCAC _You, in ${messengerLabel(from)}:_ ${text}`, { session: session || undefined }).catch((e) => this.log("echo failed", k, e?.message ?? e));
+    }
+  }
+  targets(opts, parts) {
+    const live = this.kinds;
+    const inThread = live.filter((k) => parts[k]);
+    if (this.mode === "mirror")
+      return live;
+    if (this.mode === "follow") {
+      if (inThread.length)
+        return inThread;
+      return [live.includes(this.lastFrom) ? this.lastFrom : live[0]];
+    }
+    if (!live.includes(this.main))
+      return live;
+    return live.filter((k) => k === this.main || opts.expect_reply || parts[k]);
+  }
+  async post(text, opts = {}) {
+    const parts = opts.thread ? decodeId(opts.thread) : {};
+    const out = {};
+    let error;
+    for (const k of this.targets(opts, parts)) {
+      try {
+        out[k] = await this.members.get(k).post(text, { ...opts, thread: parts[k] });
+      } catch (e) {
+        error ??= e;
+        this.log("post failed", k, e?.message ?? e);
+      }
+    }
+    if (!Object.keys(out).length)
+      throw error ?? new Error(`no app of workspace "${this.workspace}" took the message`);
+    return encodeId(out);
+  }
+  async update(id, text) {
+    for (const [k, part] of Object.entries(decodeId(id)))
+      await this.members.get(k)?.update(part, text);
+  }
+  async askPermission(p) {
+    const to = this.mode === "follow" ? this.targets({}, {}) : this.kinds;
+    for (const k of to)
+      await this.members.get(k).askPermission(p);
+  }
+  answered(session) {
+    for (const m of this.members.values())
+      m.answered(session);
+  }
+  async start() {
+    for (const m of this.members.values())
+      await m.start();
+  }
 }
 
 // src/messenger.ts
@@ -15789,7 +15912,8 @@ var parseRef = (ref) => {
 };
 
 class SlackBridge {
-  ws;
+  workspace;
+  settings;
   tokens;
   sink;
   triggerEmoji;
@@ -15798,27 +15922,36 @@ class SlackBridge {
   state;
   lastInboundAt = 0;
   tick = 0;
-  constructor(ws, tokens, sink, triggerEmoji) {
-    this.ws = ws;
+  constructor(workspace, settings, tokens, sink, triggerEmoji) {
+    this.workspace = workspace;
+    this.settings = settings;
     this.tokens = tokens;
     this.sink = sink;
     this.triggerEmoji = triggerEmoji;
     this.slack = new Slack(tokens.bot);
-    this.state = readJson(PATHS.slackState(ws.name), { threads: {} });
+    this.state = readJson(PATHS.slackState(workspace), { threads: {} });
   }
   save() {
-    writeJson(PATHS.slackState(this.ws.name), this.state);
+    writeJson(PATHS.slackState(this.workspace), this.state);
   }
   log(...a) {
-    this.sink.log(`[${this.ws.name}]`, ...a);
+    this.sink.log(`[${this.workspace}]`, ...a);
   }
   async ensureDm() {
     if (!this.dm)
-      this.dm = await this.slack.openDm(this.ws.slackUserId);
+      this.dm = await this.slack.openDm(this.settings.userId);
     return this.dm;
   }
+  threadOf(session) {
+    let best;
+    for (const [root, t] of Object.entries(this.state.threads))
+      if (t.session === session && !t.channel && Date.now() - t.postedAt < 24 * 3600000 && (!best || t.postedAt > best[1]))
+        best = [root, t.postedAt];
+    return best?.[0];
+  }
   async post(text, opts = {}) {
-    const thread = opts.thread ? parseRef(opts.thread) : undefined;
+    const ref = opts.thread || (opts.session ? this.threadOf(opts.session) : undefined);
+    const thread = ref ? parseRef(ref) : undefined;
     const channel = thread?.channel;
     const ts = await this.slack.post(channel ?? await this.ensureDm(), text, thread?.ts);
     const root = thread?.ts ?? ts;
@@ -15847,14 +15980,20 @@ class SlackBridge {
     const { channel, ts } = parseRef(id);
     await this.slack.update(channel ?? await this.ensureDm(), ts, text);
   }
+  answered(session) {
+    for (const t of Object.values(this.state.threads))
+      if (t.session === session)
+        t.answered = true;
+    this.save();
+  }
   async askPermission(p) {
     await this.post(`${permissionText(p)}
 Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true });
   }
   async start() {
-    if (this.ws.transport === "socket" && !this.tokens.app)
-      await this.sink.push("system", `Workspace "${this.ws.name}" is set to Socket Mode but has no app-level token (xapp-\u2026); reading it by polling instead.`);
-    if (this.tokens.app && this.ws.transport === "socket")
+    if (this.settings.transport === "socket" && !this.tokens.app)
+      await this.sink.push("system", `Slack in workspace "${this.workspace}" is set to Socket Mode but has no app-level token (xapp-\u2026); reading it by polling instead.`);
+    if (this.tokens.app && this.settings.transport === "socket")
       this.startSocket(this.tokens.app);
     else
       this.startPolling();
@@ -15865,7 +16004,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
     return open[0]?.session;
   }
   async handleInbound(m, threadRoot, channel) {
-    if (m.user !== this.ws.slackUserId || m.bot_id)
+    if (m.user !== this.settings.userId || m.bot_id)
       return;
     if (m.subtype && m.subtype !== "thread_broadcast")
       return;
@@ -15881,7 +16020,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
     }
     const text = this.botUserId ? requestText(m.text, this.botUserId) : m.text;
     await this.sink.push("user_message", text, {
-      workspace: this.ws.name,
+      workspace: this.workspace,
       id: threadRef(channel, m.ts),
       thread: root ? threadRef(channel, root) : "",
       session: info?.session ?? "",
@@ -15905,7 +16044,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
           this.log("poll error", e?.message ?? e);
           delay = Math.max(delay, (e?.retryAfter || 30) * 1000);
           if (++failures === 3)
-            await this.sink.push("system", `Reading Slack workspace "${this.ws.name}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; check the bot scopes and that the app's Messages tab is on.`);
+            await this.sink.push("system", `Reading Slack workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; check the bot scopes and that the app's Messages tab is on.`);
         }
         await Bun.sleep(delay);
       }
@@ -15950,7 +16089,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
       this.log(`missing ${missing.join(", ")}; some channels may not be readable`);
     this.state.watch ??= { channels: {}, handled: {} };
     this.watcher = new ChannelWatcher(this.slack, {
-      me: this.ws.slackUserId,
+      me: this.settings.userId,
       bot: this.botUserId,
       emoji: this.triggerEmoji,
       state: this.state.watch,
@@ -15970,7 +16109,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
       } catch (e) {
         this.log("watch error", e?.message ?? e);
         if (++failures === 5)
-          await this.sink.push("system", `Watching Slack channels in workspace "${this.ws.name}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal.`);
+          await this.sink.push("system", `Watching Slack channels in workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal.`);
         if (e?.retryAfter)
           await Bun.sleep(e.retryAfter * 1000);
       }
@@ -16013,10 +16152,10 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
           this.log("file download failed", e?.message ?? e);
         }
       }
-    const requester = await this.slack.userName(this.ws.slackUserId);
+    const requester = await this.slack.userName(this.settings.userId);
     const task = {
       id,
-      workspace: this.ws.name,
+      workspace: this.workspace,
       channel: t.channel,
       channelName: t.channelName,
       threadTs: t.root,
@@ -16025,7 +16164,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
       permalink: await this.slack.permalink(t.channel, t.root).catch(() => ""),
       requester,
       request: t.kind === "mention" ? requestText(t.message.text, this.botUserId) : "",
-      defaultRepo: this.ws.channelRepos?.[t.channelName],
+      defaultRepo: this.settings.channelRepos?.[t.channelName],
       transcript: formatTranscript(thread, names, {
         triggerTs: t.message.ts,
         triggerNote: t.kind === "mention" ? `${requester} asked you here` : `${requester} reacted :${this.triggerEmoji}: here`,
@@ -16040,7 +16179,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
     this.state.threads[t.root] = { channel: t.channel, task: id, expectReply: false, postedAt: Date.now(), lastSeen: thread.at(-1).ts };
     this.save();
     await this.sink.push("task_request", taskEvent(task), {
-      workspace: this.ws.name,
+      workspace: this.workspace,
       task: id,
       thread: threadRef(t.channel, t.root),
       default_repo: task.defaultRepo ?? ""
@@ -16049,10 +16188,10 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
 }
 var DM_SCOPES = ["chat:write", "im:history", "im:read", "im:write"];
 var CHANNEL_SCOPES = ["channels:read", "groups:read", "channels:history", "groups:history", "reactions:read", "reactions:write", "users:read", "files:read"];
-async function slackChecks(ws) {
-  const fix = `run \`remy setup ${ws.name}\``;
-  const out = [{ label: "Slack user ID", ok: /^[UW][A-Z0-9]+$/.test(ws.slackUserId), hint: fix }];
-  const token = readToken(ws.name, "slack-bot");
+async function slackChecks(workspace, settings) {
+  const fix = `run \`remy setup ${workspace}\``;
+  const out = [{ label: "Slack user ID", ok: /^[UW][A-Z0-9]+$/.test(settings.userId), hint: fix }];
+  const token = readToken(workspace, "slack-bot");
   out.push({ label: "Slack bot token", ok: !!token, hint: fix });
   if (token) {
     const who = await new Slack(token).whoami().catch((e) => ({ error: String(e?.message ?? e) }));
@@ -16061,13 +16200,13 @@ async function slackChecks(ws) {
     else {
       const lacks = (want) => want.filter((s) => !who.scopes.includes(s));
       const dm = lacks(DM_SCOPES);
-      out.push({ label: "Slack scopes for DMs", ok: !dm.length, hint: `add ${dm.join(", ")} as Bot Token Scopes, reinstall the app, then \`remy setup ${ws.name}\`` });
+      out.push({ label: "Slack scopes for DMs", ok: !dm.length, hint: `add ${dm.join(", ")} as Bot Token Scopes, reinstall the app, then \`remy setup ${workspace}\`` });
       const ch = lacks(CHANNEL_SCOPES);
       out.push({ label: "Slack scopes for channel tasks", ok: !ch.length, hint: `tasks from channel threads need ${ch.join(", ")}`, optional: true });
     }
   }
-  if (ws.transport === "socket")
-    out.push({ label: "app-level token (Socket Mode)", ok: !!readToken(ws.name, "slack-app"), hint: fix });
+  if (settings.transport === "socket")
+    out.push({ label: "Slack app-level token (Socket Mode)", ok: !!readToken(workspace, "slack-app"), hint: fix });
   return out;
 }
 
@@ -16205,14 +16344,16 @@ var KEEP_MS = 30 * 24 * 3600000;
 var CONFLICT_PAUSE_MS = 30000;
 
 class TelegramBridge {
-  ws;
+  workspace;
+  settings;
   api;
   sink;
   statePath;
   state;
   conflictReported = false;
-  constructor(ws, api, sink, statePath = PATHS.telegramState(ws.name)) {
-    this.ws = ws;
+  constructor(workspace, settings, api, sink, statePath = PATHS.telegramState(workspace)) {
+    this.workspace = workspace;
+    this.settings = settings;
     this.api = api;
     this.sink = sink;
     this.statePath = statePath;
@@ -16242,7 +16383,7 @@ class TelegramBridge {
   async post(text, opts = {}) {
     const replyTo = opts.thread || (opts.session ? this.latestFor(opts.session) : undefined);
     const session = opts.session ?? (replyTo ? this.state.threads[replyTo]?.session : undefined);
-    const ids = await this.api.send(this.ws.telegramUserId, text, { replyTo: replyTo ? Number(replyTo) : undefined });
+    const ids = await this.api.send(this.settings.userId, text, { replyTo: replyTo ? Number(replyTo) : undefined });
     if (session) {
       for (const id of ids)
         this.state.threads[id] = { session, at: Date.now(), mine: true, expectReply: opts.expect_reply };
@@ -16251,10 +16392,16 @@ class TelegramBridge {
     return String(ids[0]);
   }
   async update(id, text) {
-    await this.api.edit(this.ws.telegramUserId, Number(id), text);
+    await this.api.edit(this.settings.userId, Number(id), text);
+  }
+  answered(session) {
+    for (const t of Object.values(this.state.threads))
+      if (t.session === session)
+        t.answered = true;
+    this.save();
   }
   async askPermission(p) {
-    await this.api.send(this.ws.telegramUserId, `${permissionText(p)}
+    await this.api.send(this.settings.userId, `${permissionText(p)}
 Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
       buttons: [[{ text: "Allow", data: `perm:allow:${p.request_id}` }, { text: "Deny", data: `perm:deny:${p.request_id}` }]]
     });
@@ -16288,23 +16435,23 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
     }
   }
   async onError(e, failures) {
-    this.sink.log(`[${this.ws.name}] telegram poll error`, e?.message ?? e);
+    this.sink.log(`[${this.workspace}] telegram poll error`, e?.message ?? e);
     if (e instanceof TelegramError && e.code === 409) {
       if (!this.conflictReported)
-        await this.sink.push("system", `Another program is reading the Telegram bot of workspace "${this.ws.name}" (a second remy, the Telegram channel plugin, or a webhook). Telegram gives a bot's messages to one reader only. Tell the user in this terminal to give remy a bot of its own.`);
+        await this.sink.push("system", `Another program is reading the Telegram bot of workspace "${this.workspace}" (a second remy, the Telegram channel plugin, or a webhook). Telegram gives a bot's messages to one reader only. Tell the user in this terminal to give remy a bot of its own.`);
       this.conflictReported = true;
       return Bun.sleep(CONFLICT_PAUSE_MS);
     }
     if (failures === 3)
-      await this.sink.push("system", `Reading Telegram for workspace "${this.ws.name}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; \`remy doctor\` checks the bot token.`);
+      await this.sink.push("system", `Reading Telegram for workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; \`remy doctor\` checks the bot token.`);
     await Bun.sleep(Math.max(e?.retryAfter ?? 0, Math.min(5 * failures, 60)) * 1000);
   }
   isOwner(from) {
-    return !!from && from.id === this.ws.telegramUserId && !from.is_bot;
+    return !!from && from.id === this.settings.userId && !from.is_bot;
   }
   async onMessage(m) {
     if (m.chat.type !== "private" || !this.isOwner(m.from))
-      return this.sink.log(`[${this.ws.name}] ignored telegram message from ${m.from?.id}`);
+      return this.sink.log(`[${this.workspace}] ignored telegram message from ${m.from?.id}`);
     const text = (m.text ?? m.caption ?? "").trim();
     if (!text)
       return void await this.api.send(m.chat.id, "I can only read text for now.", { replyTo: m.message_id });
@@ -16316,14 +16463,11 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
     const repliedTo = m.reply_to_message?.message_id;
     const session = repliedTo ? this.state.threads[repliedTo]?.session : undefined;
     if (session) {
-      for (const t of Object.values(this.state.threads))
-        if (t.session === session)
-          t.answered = true;
       this.state.threads[m.message_id] = { session, at: Date.now(), mine: false };
-      this.save();
+      this.answered(session);
     }
     await this.sink.push("user_message", text, {
-      workspace: this.ws.name,
+      workspace: this.workspace,
       id: String(m.message_id),
       thread: repliedTo ? String(m.message_id) : "",
       session: session ?? "",
@@ -16343,10 +16487,10 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
 ${done}`).catch(() => {});
   }
 }
-async function telegramChecks(ws) {
-  const fix = `run \`remy setup ${ws.name}\``;
-  const out = [{ label: "Telegram user ID", ok: ws.telegramUserId > 0, hint: fix }];
-  const token = readToken(ws.name, "telegram-bot");
+async function telegramChecks(workspace, settings) {
+  const fix = `run \`remy setup ${workspace}\``;
+  const out = [{ label: "Telegram user ID", ok: settings.userId > 0, hint: fix }];
+  const token = readToken(workspace, "telegram-bot");
   out.push({ label: "Telegram bot token", ok: !!token, hint: fix });
   if (!token)
     return out;
@@ -16356,40 +16500,71 @@ async function telegramChecks(ws) {
     return [...out, { label: "Telegram bot token works", ok: false, hint: me.error }];
   const hook = await tg.webhook().catch(() => "");
   out.push({ label: `Telegram bot @${me.username} is free for remy`, ok: !hook, hint: "it sends its messages to a webhook, so another program uses it; give remy a bot of its own" });
-  const reach = await tg.canMessage(ws.telegramUserId);
+  const reach = await tg.canMessage(settings.userId);
   out.push({ label: `@${me.username} can message you`, ok: reach === true, hint: `${reach}; open https://t.me/${me.username} and press Start` });
   return out;
 }
 
 // src/bridges.ts
-var messengerName = (ws) => isTelegram(ws) ? "Telegram" : "Slack";
-function createMessenger(ws, sink, opts) {
+function describeMessengers(ws) {
+  const kinds = messengersOf(ws);
+  return kinds.map(messengerLabel).join(" + ") + (kinds.length > 1 ? ` (${ws.both ?? "mirror"})` : "");
+}
+function createMember(ws, kind, sink, opts) {
   const missing = (what) => new Error(`workspace "${ws.name}" has no ${what}; run \`remy setup ${ws.name}\``);
-  if (isTelegram(ws)) {
+  if (kind === "telegram") {
     const token = readToken(ws.name, "telegram-bot");
-    if (!token || !ws.telegramUserId)
+    if (!token || !ws.telegram?.userId)
       throw missing("Telegram bot token or user ID");
-    return new TelegramBridge(ws, new Telegram(token), sink);
+    return new TelegramBridge(ws.name, ws.telegram, new Telegram(token), sink);
   }
   const bot = readToken(ws.name, "slack-bot");
-  if (!bot || !ws.slackUserId)
+  if (!bot || !ws.slack?.userId)
     throw missing("Slack bot token or user ID");
-  return new SlackBridge(ws, { bot, app: readToken(ws.name, "slack-app") }, sink, opts.triggerEmoji);
+  return new SlackBridge(ws.name, ws.slack, { bot, app: readToken(ws.name, "slack-app") }, sink, opts.triggerEmoji);
 }
-var checkWorkspace = (ws) => (isTelegram(ws) ? telegramChecks(ws) : slackChecks(ws)).catch((e) => [{ label: "checks", ok: false, hint: String(e?.message ?? e) }]);
+function createMessenger(ws, sink, opts, kinds = messengersOf(ws)) {
+  if (!kinds.length)
+    throw new Error(`workspace "${ws.name}" has neither Slack nor Telegram; run \`remy setup ${ws.name}\``);
+  if (messengersOf(ws).length === 1)
+    return createMember(ws, kinds[0], sink, opts);
+  const fan = new Fanout(ws.name, ws.both ?? "mirror", ws.main ?? "slack", sink.log);
+  for (const k of kinds)
+    fan.add(k, createMember(ws, k, fan.sinkFor(k, sink), opts));
+  return fan;
+}
+var checksFor = (ws, kind) => (kind === "telegram" ? telegramChecks(ws.name, ws.telegram) : slackChecks(ws.name, ws.slack)).catch((e) => [
+  { label: `${messengerLabel(kind)} checks`, ok: false, hint: String(e?.message ?? e) }
+]);
+async function checkWorkspace(ws) {
+  const kinds = messengersOf(ws);
+  if (!kinds.length)
+    return [{ label: "Slack or Telegram connected", ok: false, hint: `run \`remy setup ${ws.name}\``, messenger: "slack" }];
+  const all = await Promise.all(kinds.map(async (k) => (await checksFor(ws, k)).map((c) => ({ ...c, messenger: k }))));
+  return all.flat();
+}
 async function openWorkspaces(workspaces, sink, opts) {
   const bridges = new Map;
   const off = [];
-  const checked = await Promise.all(workspaces.map(async (ws) => ({ ws, problems: blocking(await checkWorkspace(ws)) })));
-  for (const { ws, problems } of checked) {
-    try {
+  await Promise.all(workspaces.map(async (ws) => {
+    const checks = await checkWorkspace(ws);
+    const working = [];
+    for (const k of messengersOf(ws)) {
+      const problems = blocking(checks.filter((c) => c.messenger === k));
       if (problems.length)
-        throw new Error(problems.map((p) => `${p.label}: ${p.hint}`).join("; "));
-      bridges.set(ws.name, createMessenger(ws, sink, opts));
-    } catch (e) {
-      off.push({ name: ws.name, reason: e?.message ?? String(e) });
+        off.push({ workspace: ws.name, messenger: k, reason: problems.map((p) => `${p.label}: ${p.hint}`).join("; ") });
+      else
+        working.push(k);
     }
-  }
+    if (!working.length)
+      return;
+    try {
+      bridges.set(ws.name, createMessenger(ws, sink, opts, working));
+    } catch (e) {
+      for (const k of working)
+        off.push({ workspace: ws.name, messenger: k, reason: e?.message ?? String(e) });
+    }
+  }));
   return { bridges, off };
 }
 var quietSink = { push: async () => {}, permission: async () => {}, log: () => {} };
@@ -16618,7 +16793,7 @@ var log = (...a) => {
 `);
   } catch {}
 };
-var INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel source="remy" kind="..." workspace="...">. A workspace is a Slack workspace or a Telegram chat; the post tool sends to the right one.
+var INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel source="remy" kind="..." workspace="...">. A workspace talks to the user in Slack, in Telegram, or both; post once and remy delivers it as the workspace is set up. With both, events carry via (the app the user wrote from); pass ids and threads back unchanged.
 - kind="user_message": the user wrote to you. Answer with post, passing the same workspace, and thread when the tag has it. If it has session, the user is replying to that agent. If it has awaiting instead, that agent asked the user a question recently: if the message reads like the answer, treat it as a reply to that agent.
 - kind="task_request": the user mentioned you, or reacted with the trigger emoji, in a Slack channel thread. Follow "Tasks from Slack threads" in your instructions.
 - kind="agent_needs_input": a session is blocked waiting for the user. Post it with post(workspace, session=<name>, expect_reply=true).
@@ -16626,7 +16801,7 @@ var INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel sour
 - kind="digest": sessions or PRs changed since the last digest. Post one compact summary to that workspace.
 - kind="system": a note from the remy server itself.
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
-var mcp = new Server({ name: "remy", version: "0.5.1" }, {
+var mcp = new Server({ name: "remy", version: "0.6.0" }, {
   capabilities: {
     experimental: { "claude/channel": {}, "claude/channel/permission": {} },
     tools: {}
@@ -16672,7 +16847,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => (await ready, {
           text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
           workspace: {
             type: "string",
-            description: `Workspace from the event tag. Working: ${active.workspaces.map((w) => `${w.name} (${messengerName(w)})`).join(", ") || "none"}`
+            description: `Workspace from the event tag. Working: ${active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", ") || "none"}`
           },
           thread: { type: "string", description: "Answer in this thread: thread or id from the event tag, or an id post returned" },
           session: {
@@ -16706,18 +16881,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (origin)
     Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
   const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
-  const rerouted = a.workspace && a.workspace !== bridge.ws.name ? ` ("${a.workspace}" is off, so this went to "${bridge.ws.name}")` : "";
+  const rerouted = a.workspace && a.workspace !== bridge.workspace ? ` ("${a.workspace}" is off, so this went to "${bridge.workspace}")` : "";
   try {
     if (req.params.name === "post") {
       const id = await bridge.post(String(a.text), { thread: a.thread, session: a.session, expect_reply: a.expect_reply });
-      return { content: [{ type: "text", text: `posted to ${bridge.ws.name} id=${id}${rerouted}` }] };
+      return { content: [{ type: "text", text: `posted to ${bridge.workspace} id=${id}${rerouted}` }] };
     }
     if (req.params.name === "update") {
       await bridge.update(String(a.id), String(a.text));
       return { content: [{ type: "text", text: "updated" }] };
     }
   } catch (e) {
-    return { isError: true, content: [{ type: "text", text: `${req.params.name} to ${bridge.ws.name} failed: ${e?.message ?? e}` }] };
+    return { isError: true, content: [{ type: "text", text: `${req.params.name} to ${bridge.workspace} failed: ${e?.message ?? e}` }] };
   }
   throw new Error(`unknown tool: ${req.params.name}`);
 });
@@ -16851,18 +17026,25 @@ process.stdin.on("close", () => process.exit(0));
 await mcp.connect(new StdioServerTransport);
 await initialized;
 await ready;
-log("started", [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => o.name).join(",")}` : "");
+log("started", [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => `${o.workspace}/${o.messenger}`).join(",")}` : "");
 if (!config2.workspaces.length)
   await push("system", "No workspace is configured. Tell the user in this terminal to run `remy setup`, then `remy start`.");
 else if (!bridges.size)
-  await push("system", `No workspace works: ${off.map((o) => `"${o.name}" (${o.reason})`).join("; ")}. Tell the user in this terminal; \`remy doctor\` shows what to fix.`);
+  await push("system", `No workspace works: ${off.map((o) => `"${o.workspace}" ${o.messenger} (${o.reason})`).join("; ")}. Tell the user in this terminal; \`remy doctor\` shows what to fix.`);
 else {
   const fallback = workspaceFor({}, active)?.name;
-  for (const o of off)
-    await push("system", `Workspace "${o.name}" is off: ${o.reason}. Until it's fixed (\`remy setup ${o.name}\`, then restart), its sessions report to "${fallback}" and posts to "${o.name}" go there too. Don't post a separate hello for "${o.name}"; mention it in the hello to "${fallback}".`);
+  for (const name of new Set(off.map((o) => o.workspace))) {
+    const mine = off.filter((o) => o.workspace === name);
+    const why = mine.map((o) => `${o.messenger}: ${o.reason}`).join("; ");
+    const fix = `\`remy setup ${name}\`, then restart`;
+    if (bridges.has(name))
+      await push("system", `In workspace "${name}", ${mine.map((o) => o.messenger).join(" and ")} is off (${why}). Until it's fixed (${fix}), "${name}" works through its other app only. Mention it in your hello there.`);
+    else
+      await push("system", `Workspace "${name}" is off (${why}). Until it's fixed (${fix}), its sessions report to "${fallback}" and posts to "${name}" go there too. Don't post a separate hello for "${name}"; mention it in the hello to "${fallback}".`);
+  }
 }
 for (const b of bridges.values())
-  b.start().catch((e) => push("system", `Workspace "${b.ws.name}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
+  b.start().catch((e) => push("system", `Workspace "${b.workspace}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
 tailEvents();
 await digest();
 setInterval(digest, config2.digestMinutes * 60000);
