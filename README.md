@@ -14,7 +14,7 @@ What you get:
 - Type "start an agent in api: fix the flaky auth test" in a DM and Remy starts one in its own worktree
 - React 🐭 to a bug report in a Slack channel and an agent picks it up with the whole thread, then posts the PR back there
 
-It runs on your laptop with your own Claude Code login. There's no server to host. In Slack it can share an app your team already has; in Telegram you make your own bot in a minute. Use one or both: work repos in the company Slack, side projects in Telegram on your phone.
+It runs on your laptop with your own Claude Code login. There's no server to host. In Slack it can share an app your team already has; in Telegram you make your own bot in a minute. Use one or both: work repos in the company Slack, side projects in Telegram on your phone, or the same work in both, so you can answer from your desk or your phone.
 
 ## Why
 
@@ -101,7 +101,19 @@ Messages to other sessions go through Claude Code's built-in `SendMessage`.
 
 ## Workspaces
 
-A workspace is one place Remy talks to you: a Slack workspace or your Telegram chat. You can have several, for example the company Slack and a personal Telegram. Each session reports to one workspace: give a workspace `repos` (GitHub `owner/name`, `*` allowed) or `paths` (folders), and the workspace with neither gets everything else. Repo matching follows a repo into its worktrees, wherever they live. One coordinator serves all workspaces.
+A workspace is where Remy talks to you about a set of sessions: in Slack, in Telegram, or both. You can have several, for example "work" and "personal". Each session reports to one workspace: give a workspace `repos` (GitHub `owner/name`, `*` allowed) or `paths` (folders), and the workspace with neither gets everything else. Repo matching follows a repo into its worktrees, wherever they live. One coordinator serves all workspaces.
+
+### Slack and Telegram together
+
+A workspace with both apps works in one of three ways (`both` in the config):
+
+| Mode | What happens |
+|---|---|
+| `mirror` (default) | Everything goes to both. What you write in one shows up in the other, so both read as the same conversation. Answer from either. |
+| `pings` | Everything goes to the `main` app. The other gets only questions and permission prompts, so your phone buzzes when an agent needs you. |
+| `follow` | Messages go to whichever app you last wrote from (`main` until you have). |
+
+A question answered in one app stops counting as open in the other. If one of the two apps is broken (say a Slack app still waiting for approval), the workspace keeps working through the other.
 
 A Slack workspace also picks how remy reads your DMs:
 
@@ -194,25 +206,35 @@ Each workspace:
 
 | Key | Meaning |
 |---|---|
-| `name` | Short label, e.g. `work`; names its tokens and state file |
-| `messenger` | `slack` (the default) or `telegram` |
+| `name` | Short label, e.g. `work`; names its tokens and state files |
 | `repos` | GitHub repos whose sessions report here, e.g. `["acme-corp/*"]`; checked first |
 | `paths` | Folders whose sessions report here |
-| `slackUserId` | Slack: your member ID there; only this user can talk to your remy |
-| `transport` | Slack: `poll` or `socket` |
-| `channelRepos` | Slack: default repo per channel for thread tasks, e.g. `{ "bugs": "api" }` |
-| `telegramUserId` | Telegram: your user ID, set by pairing in `remy setup`; only this user can talk to your remy |
+| `slack.userId` | Your Slack member ID there; only this user can talk to your remy |
+| `slack.transport` | `poll` or `socket` |
+| `slack.channelRepos` | Default repo per channel for thread tasks, e.g. `{ "bugs": "api" }` |
+| `telegram.userId` | Your Telegram user ID, set by pairing in `remy setup`; only this user can talk to your remy |
+| `both` | With Slack and Telegram: `mirror` (default), `pings` or `follow` |
+| `main` | The app that gets everything with `pings`, and the one `follow` starts with: `slack` (default) or `telegram` |
 
-Leave out both `repos` and `paths` for the catch-all workspace.
+Leave out both `repos` and `paths` for the catch-all workspace. Configs from before 0.6, with flat `slackUserId` / `messenger` fields, are read as before.
 
 ```json
 {
   "workspaces": [
-    { "name": "work", "slackUserId": "U012ABC", "transport": "poll", "repos": ["acme-corp/*"] },
-    { "name": "personal", "messenger": "telegram", "telegramUserId": 123456789 }
+    {
+      "name": "work",
+      "repos": ["acme-corp/*"],
+      "slack": { "userId": "U012ABC", "transport": "poll" },
+      "telegram": { "userId": 123456789 },
+      "both": "pings",
+      "main": "slack"
+    },
+    { "name": "personal", "telegram": { "userId": 123456789 } }
   ]
 }
 ```
+
+Each workspace with Telegram needs a bot of its own (`remy doctor` flags two sharing one), so the example above uses two bots.
 
 A path covers the folder and everything inside it, not sibling folders that share its prefix, so prefer `repos` when worktrees sit next to the main checkout. Tokens can also come from `REMY_SLACK_BOT_TOKEN_<WORKSPACE>`, `REMY_SLACK_APP_TOKEN_<WORKSPACE>` and `REMY_TELEGRAM_BOT_TOKEN_<WORKSPACE>`.
 

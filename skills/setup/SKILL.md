@@ -9,7 +9,7 @@ Run `remy doctor` first and fix what it reports, in this order.
 
 ## 1. Workspaces
 
-A workspace is a Slack workspace or the user's Telegram chat with their own bot; the user can have several (say company Slack and personal Telegram). Sessions are routed by GitHub repo (`repos`, e.g. `acme-corp/*`) or folder (`paths`); a workspace with neither gets the rest.
+A workspace is where remy talks to the user about a set of sessions: in Slack, in Telegram (a chat with their own bot), or both. The user can have several (say work and personal). With both apps, the workspace's `both` setting picks `mirror` (everything in both, the default), `pings` (everything in `main`, only questions and permission prompts in the other) or `follow` (wherever the user last wrote). Each Telegram workspace needs its own bot. Sessions are routed by GitHub repo (`repos`, e.g. `acme-corp/*`) or folder (`paths`); a workspace with neither gets the rest.
 
 ### Telegram
 
