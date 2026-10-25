@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULTS, workspaceFor, type Config } from "./config";
+import { compactEnv, compactPct, DEFAULTS, workspaceFor, type Config } from "./config";
 
 const config = (workspaces: Config["workspaces"]): Config => ({ ...DEFAULTS, workspaces });
 const work = { name: "work", slack: { userId: "U1", transport: "poll" as const }, repos: ["acme-corp/*"], paths: ["~/Repositories/work-notes"] };
@@ -47,4 +47,17 @@ test("configs from before 0.6 move their flat messenger fields under slack / tel
     { name: "personal", telegram: { userId: 7 } },
   ]);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("compactPct accepts a whole percentage from 1 to 100", () => {
+  expect(compactPct(50)).toBe(50);
+  expect(compactPct("60")).toBe(60);
+  for (const bad of [0, "0", -5, 150, 12.5, "abc", "", null, undefined]) expect(compactPct(bad)).toBeUndefined();
+});
+
+test("compactEnv sets the override unless the shell already has one", () => {
+  expect(compactEnv(50, {})).toEqual({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50" });
+  expect(compactEnv(50, { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "70" })).toEqual({});
+  expect(compactEnv(0, {})).toEqual({});
+  expect(compactEnv("abc", {})).toEqual({});
 });
