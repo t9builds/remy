@@ -11,7 +11,7 @@ The factory is an extension that takes a change from "agent says it's done" to "
 | **agent** | a fresh agent running a named skill | review, QA, verify on an environment |
 | **wait** | Remy, deterministically | CI green, deploy of a commit finished |
 | **gate** | Remy, against rules | changed lines, protected paths, verdicts |
-| **action** | Remy | merge, deploy, roll back, notify, offer a fix |
+| **action** | Remy | merge, deploy, notify the author, offer a fix |
 
 ```ts
 export default defineFactory({
@@ -21,9 +21,10 @@ export default defineFactory({
     action("merge"),
     wait("deploy", { env: "dev", detector: "cloudbuild" }),
     agent("verify-dev", { skill: "/verify" }),
+    agent("release-check", { skill: "/release-check", onHold: "ask-human" }),
     action("deploy", { env: "prod" }),
     wait("deploy", { env: "prod" }),
-    agent("verify-prod", { skill: "/verify", onFail: "rollback" }),
+    agent("verify-prod", { skill: "/verify", onFail: "notify-author" }),
     action("notify"),
   ],
 });

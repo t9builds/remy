@@ -55,6 +55,14 @@ _Avoid_: stage, job, task
 An agent that checks a change it didn't write, fixes what it finds and records a verdict.
 _Avoid_: reviewer
 
+**Release check**:
+An agent step that decides whether a verified change goes to production on its own or waits for a person.
+_Avoid_: release gate, approval
+
+**Author**:
+The person whose session or agent made a change; a failed production check is reported to them.
+_Avoid_: owner, submitter
+
 **Verdict**:
 What an agent step reports when it's done: pass, fail or fixed, with a summary.
 _Avoid_: result, review
