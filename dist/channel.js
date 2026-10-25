@@ -15356,6 +15356,7 @@ var DEFAULTS = {
   spawnWorktree: true,
   digestMinutes: 15,
   coordinatorName: "remy",
+  coordinatorCompactPct: 50,
   triggerEmoji: "mouse"
 };
 function ensureDir() {
@@ -17036,6 +17037,25 @@ function formatTable(s, paint = PLAIN) {
     const about = x.about ? paint.dim(` \u2014 ${aboutOf(x.about, 80)}`) : "";
     return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}${about}`;
   }).join(`
+`);
+}
+function ago(ms) {
+  const m = Math.round(ms / 60000);
+  return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 48 * 60 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+}
+function formatSession(x, now = Date.now(), paint = PLAIN) {
+  const lines = [formatTable({ takenAt: now, sessions: [{ ...x, about: undefined }] }, paint), `  folder: ${x.cwd}`];
+  if (x.about)
+    lines.push(`  about: ${aboutOf(x.about, 300)}`);
+  if (x.pr) {
+    lines.push(`  PR title: ${x.pr.title}`);
+    if (x.pr.failing.length)
+      lines.push(`  failing: ${x.pr.failing.join(", ")}`);
+  }
+  const e = x.lastEvent;
+  if (e)
+    lines.push(`  last: ${e.event}${e.type ? ` ${e.type}` : ""} ${ago(now - e.ts)}${e.text ? ` \u2014 ${aboutOf(e.text, 800)}` : ""}`);
+  return lines.join(`
 `);
 }
 

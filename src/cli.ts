@@ -9,7 +9,7 @@ import { runHook } from "./hook";
 import { formatMerged } from "./merged";
 import { blocking } from "./messenger";
 import { setup } from "./setup";
-import { formatTable, snapshotDiff, takeSnapshot, type Spawned } from "./snapshot";
+import { formatSession, formatTable, snapshotDiff, takeSnapshot, type Spawned } from "./snapshot";
 import { spawnAgent } from "./spawn";
 import { errorLine, formatChecks, formatHelp, pc, statusPaint } from "./ui";
 
@@ -18,7 +18,7 @@ const ROOT = resolve(import.meta.dir, "..");
 const HELP = formatHelp("remy — a coordinator for your Claude Code sessions, in Slack or Telegram", [
   ["setup [workspace]", "Set up repo folders and workspaces (interactive)"],
   ["start", "Start the coordinator; keep the terminal open"],
-  ["status [--json] [--merged]", "Every session with repo, branch, PR and CI; --merged lists closed agents"],
+  ["status [name] [--json] [--merged]", "Every session with repo, branch, PR and CI; a name shows that one in detail; --merged lists closed agents"],
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task…>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
@@ -76,7 +76,9 @@ async function start(extra: string[]) {
     ...extra,
     "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention.",
   ];
-  const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, REMY_ROLE: "coordinator" } });
+  // Compact well before the window fills: every event is a turn that rereads the whole context.
+  const compact = c.coordinatorCompactPct ? { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(c.coordinatorCompactPct) } : {};
+  const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...compact, REMY_ROLE: "coordinator" } });
   process.exit(r.exitCode ?? 0);
 }
 
@@ -91,7 +93,7 @@ try {
       await runHook();
       break;
     case "status": {
-      const { values } = parse(args, { json: { type: "boolean" }, merged: { type: "boolean" } });
+      const { values, positionals } = parse(args, { json: { type: "boolean" }, merged: { type: "boolean" } });
       if (values.merged) {
         const spawned = readJson<Spawned>(PATHS.spawned, {});
         const merged = Object.fromEntries(Object.entries(spawned).filter(([, x]) => x.merged));
@@ -99,6 +101,13 @@ try {
         break;
       }
       const s = await takeSnapshot();
+      const name = positionals[0];
+      if (name) {
+        const one = s.sessions.find((x) => x.name === name) ?? s.sessions.find((x) => x.name.startsWith(name));
+        if (!one) throw new Error(`no running session "${name}"; \`remy status\` lists them`);
+        console.log(values.json ? JSON.stringify(one, null, 2) : formatSession(one, s.takenAt, statusPaint));
+        break;
+      }
       console.log(values.json ? JSON.stringify(s, null, 2) : formatTable(s, statusPaint));
       break;
     }

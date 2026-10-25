@@ -97,6 +97,8 @@ export type Config = {
   digestMinutes: number;
   /** Session name of the coordinator itself. */
   coordinatorName: string;
+  /** Context-window percentage at which the coordinator compacts (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`); 0 keeps Claude Code's default. */
+  coordinatorCompactPct: number;
   /** Reacting with this emoji (Slack name, no colons) to a message starts a task, like mentioning the bot. */
   triggerEmoji: string;
 };
@@ -109,6 +111,7 @@ export const DEFAULTS: Config = {
   spawnWorktree: true,
   digestMinutes: 15,
   coordinatorName: "remy",
+  coordinatorCompactPct: 50,
   triggerEmoji: "mouse",
 };
 
