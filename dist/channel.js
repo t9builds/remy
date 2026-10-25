@@ -17770,7 +17770,7 @@ var INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel sour
 - kind="verify": remy's verification of a PR moved on (event=merged, dev_passed or dev_failed). Follow "Verified PRs" in your instructions.
 - kind="system": a note from the remy server itself.
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
-var mcp = new Server({ name: "remy", version: "0.9.0" }, {
+var mcp = new Server({ name: "remy", version: "0.10.0" }, {
   capabilities: {
     experimental: { "claude/channel": {}, "claude/channel/permission": {} },
     tools: {}
