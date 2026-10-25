@@ -12,6 +12,7 @@
  * };
  * ```
  */
+import type { Config } from "../config";
 import type { Pr, Ci } from "../snapshot";
 import type { SpawnResult } from "../spawn";
 
@@ -27,6 +28,10 @@ export type SessionRef = {
   branch?: string;
   /** Remy started it (an agent), rather than you. */
   spawned: boolean;
+  /** What it's for: an agent's task, else the session's first prompt. */
+  about?: string;
+  /** Set for an agent started with a `role` (e.g. the factory's step agents). */
+  role?: string;
   /** As last seen: idle, busy or waiting. */
   status: string;
   /** Its branch's PR, as last seen. */
@@ -82,10 +87,15 @@ export type QueueEntry = {
   action: string;
   /** Shown as the line's name, e.g. a session name or "api#212". */
   label: string;
-  /** Which workspace's list: by session, else this workspace, else every workspace. */
+  /**
+   * Which workspace's list: by session, else this workspace, else every workspace. An entry with a session replaces
+   * that session's own line, unless that line is a question (rank 0).
+   */
   session?: string;
   workspace?: string;
   url?: string;
+  /** Show nothing, only keep `session`'s own line off the list: the extension is handling it. */
+  hide?: boolean;
 };
 
 export type CommandContext = { workspace: string; session?: string; thread?: string };
@@ -115,8 +125,11 @@ export interface Remy {
    * `session` names the thread: an agent's name, or any label such as "factory:api#212".
    */
   ask(question: string, opts: PostOptions & { session: string }): Promise<string>;
-  /** Start a background agent, as `remy spawn` does. */
-  spawn(opts: { repo: string; task: string; name?: string; worktree?: boolean; permissionMode?: string }): Promise<SpawnResult>;
+  /**
+   * Start a background agent, as `remy spawn` does. `prompt` replaces `spawnTemplate` with a whole prompt of your own;
+   * `role` marks an agent that reports through `remy report` rather than its own PR, and keeps it off the waiting list.
+   */
+  spawn(opts: { repo: string; task: string; name?: string; worktree?: boolean; permissionMode?: string; prompt?: string; role?: string; pr?: string }): Promise<SpawnResult>;
   /**
    * Close a session: `claude rm` (session and worktree), or `claude stop` when the worktree has work left. Returns
    * what happened. `merged`: an agent closed because this PR merged; it then counts as merged (`remy status --merged`).
@@ -137,6 +150,8 @@ export interface Remy {
   state: State;
   /** Sessions as Remy last saw them. */
   sessions(): SessionRef[];
+  /** Your ~/.remy/config.json, as the daemon loaded it. */
+  readonly config: Readonly<Config>;
   log(...a: unknown[]): void;
 }
 

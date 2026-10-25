@@ -298,14 +298,20 @@ function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
 /** The workspace's list, with only its own sessions, and what extensions put on it. */
 function queueText(snap: Snapshot, workspace: string) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
-  const fromExtensions: QueueItem[] = host.queueEntries().flatMap((e) => {
+  const entries = host.queueEntries();
+  // An extension's entry about a session replaces the session's own line.
+  const claimed = new Set(entries.flatMap((e) => (e.session ? [e.session] : [])));
+  const fromExtensions: QueueItem[] = entries.flatMap((e) => {
+    if (e.hide) return [];
     const of = e.session ? sessions.find((s) => s.name === e.session) : undefined;
     const where = e.workspace ?? (of ? workspace : undefined);
     if (where && where !== workspace) return [];
     return [{ session: e.label, sessionId: `extension:${e.key}`, cwd: "", rank: e.rank, why: e.why, action: e.action, pr: e.url }];
   });
-  // Stable: within a rank, sessions first, then extensions' entries in the order they came.
-  const items = [...queueOf({ ...snap, sessions }), ...fromExtensions].sort((a, b) => a.rank - b.rank);
+  // Stable: within a rank, sessions first, then extensions' entries in the order they came. A session's own
+  // question stays even when an extension speaks for its PR.
+  const own = queueOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
+  const items = [...own, ...fromExtensions].sort((a, b) => a.rank - b.rank);
   return formatQueue(items, sessions);
 }
 
@@ -414,6 +420,7 @@ function newHost() {
     },
     tell: (text, meta) => tell(meta.kind ?? "extension", text, meta),
     sessions: () => (lastSnapshot?.sessions ?? []).map((s) => sessionRef(s, viewWorkspace(s))),
+    config,
     queueChanged: () => scheduleQueue(1_000),
     // Asked for by the user (`/queue`): as it is now, not as of the last look.
     queueText: async (workspace) => queueText(await takeSnapshot(), workspace),

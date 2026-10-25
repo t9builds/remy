@@ -18,6 +18,10 @@ export const PATHS = {
   socket: join(REMY_DIR, "daemon.sock"),
   /** Events held for the coordinator when the daemon stopped, delivered by the next daemon. */
   held: join(REMY_DIR, "held.json"),
+  /** Verdicts factory agents report with `remy report`, and `remy factory retry` requests, one JSON line each. */
+  reports: join(REMY_DIR, "reports.jsonl"),
+  /** Where each PR stands in its factory pipeline; written only by the daemon's factory extension. */
+  factory: join(REMY_DIR, "state", "builtin_factory.json"),
   /** One folder per Slack task: task.json plus files downloaded from the thread. */
   taskDir: (id: string) => join(REMY_DIR, "tasks", id),
   slackState: (workspace: string) => join(REMY_DIR, `slack-state.${workspace}.json`),
@@ -113,6 +117,13 @@ export type Config = {
   triggerEmoji: string;
   /** Seconds between looks at the sessions and their PRs, which raise extension events; also the `tick` interval. */
   tickSeconds: number;
+  /**
+   * The most you allow your own Remy to do with a change (ADR-0006): "notify", "verify", "merge", "deploy-dev" or
+   * "deploy-prod". A repo's factory.ts sets the most its team allows; the lower of the two applies.
+   */
+  autonomy: "notify" | "verify" | "merge" | "deploy-dev" | "deploy-prod";
+  /** Factory agents (verifiers, checks) running at once, on your subscription. */
+  maxFactoryAgents: number;
   /** Extensions beyond your own in ~/.remy/extensions (extensions/load.ts). */
   extensions?: {
     /** Repos whose .remy/extensions run in your daemon: paths, or names under `repoRoots`. */
@@ -135,6 +146,8 @@ export const DEFAULTS: Config = {
   coordinatorCompactPct: 50,
   triggerEmoji: "mouse",
   tickSeconds: 60,
+  autonomy: "notify",
+  maxFactoryAgents: 2,
 };
 
 /** `coordinatorCompactPct` as a whole percentage from 1 to 100, else undefined: Claude Code's default. */

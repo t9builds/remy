@@ -1,4 +1,5 @@
 import type { Extension } from "../api";
+import factory from "./factory";
 import mergedCleanup from "./merged-cleanup";
 import queueCommand from "./queue-command";
 import slackTasks from "./slack-tasks";
@@ -8,4 +9,5 @@ export const BUILTINS: Record<string, Extension> = {
   "merged-cleanup": mergedCleanup,
   "slack-tasks": slackTasks,
   queue: queueCommand,
+  factory,
 };

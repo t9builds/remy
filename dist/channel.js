@@ -33,6 +33,19 @@ var __toESM = (mod, isNodeMode, target) => {
   return to;
 };
 var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, {
+      get: all[name],
+      enumerable: true,
+      configurable: true,
+      set: __exportSetter.bind(all, name)
+    });
+};
 
 // node_modules/ajv/dist/compile/codegen/code.js
 var require_code = __commonJS(function(exports) {
@@ -15335,6 +15348,8 @@ var PATHS = {
   log: join(REMY_DIR, "daemon.log"),
   socket: join(REMY_DIR, "daemon.sock"),
   held: join(REMY_DIR, "held.json"),
+  reports: join(REMY_DIR, "reports.jsonl"),
+  factory: join(REMY_DIR, "state", "builtin_factory.json"),
   taskDir: (id) => join(REMY_DIR, "tasks", id),
   slackState: (workspace) => join(REMY_DIR, `slack-state.${workspace}.json`),
   telegramState: (workspace) => join(REMY_DIR, `telegram-state.${workspace}.json`),
@@ -15361,7 +15376,9 @@ var DEFAULTS = {
   coordinatorName: "remy",
   coordinatorCompactPct: 50,
   triggerEmoji: "mouse",
-  tickSeconds: 60
+  tickSeconds: 60,
+  autonomy: "notify",
+  maxFactoryAgents: 2
 };
 function compactPct(value) {
   const n = Number(value);

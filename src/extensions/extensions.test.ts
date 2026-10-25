@@ -65,6 +65,7 @@ function host(over: Partial<HostDeps> = {}) {
     close: async () => "session and worktree removed",
     tell: (text, meta) => void told.push({ text, meta }),
     sessions: () => [],
+    config: DEFAULTS,
     queueChanged: () => void queueChanges++,
     queueText: async (w) => `list for ${w}`,
     log: (...a) => void logs.push(a.join(" ")),

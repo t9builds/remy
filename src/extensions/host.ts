@@ -4,7 +4,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { readJson, writeJson } from "../config";
+import { readJson, writeJson, type Config } from "../config";
 import type { Command, CommandContext, EventName, Events, Extension, PostOptions, QueueEntry, Remy, SessionRef } from "./api";
 
 export type HostDeps = {
@@ -15,6 +15,7 @@ export type HostDeps = {
   queueText(workspace: string): Promise<string>;
   tell(text: string, meta: Record<string, string>): void;
   sessions(): SessionRef[];
+  config: Config;
   /** The waiting list changed. */
   queueChanged(): void;
   log(...a: unknown[]): void;
@@ -180,6 +181,7 @@ export class ExtensionHost {
         },
       },
       sessions: () => deps.sessions(),
+      config: deps.config,
       log: (...a) => deps.log(`[${ext}]`, ...a),
     };
   }

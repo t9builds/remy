@@ -44,6 +44,8 @@ function itemOf(s: SessionView): Omit<QueueItem, "session" | "sessionId" | "cwd"
   if (s.status === "busy") return undefined;
   if (asked) return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
   if (s.status === "waiting") return { rank: 0, why: "waits for your answer", action: "reply to its thread" };
+  // A factory agent reports through `remy report`, not its own PR state.
+  if (s.role) return undefined;
   if (pr?.ci === "fail") return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
   if (pr?.review === "CHANGES_REQUESTED") return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
   if (pr && pr.ci !== "pending") return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };

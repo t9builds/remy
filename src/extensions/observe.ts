@@ -16,6 +16,8 @@ export const sessionRef = (s: SessionView, workspace: string): SessionRef => ({
   repo: s.repo,
   branch: s.branch,
   spawned: s.spawned,
+  about: s.about,
+  role: s.role,
   status: s.status,
   pr: s.pr,
   workspace,

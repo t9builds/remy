@@ -15,17 +15,20 @@ import { discover, importExtension, type ExtensionHost } from "./host";
 
 export const USER_EXTENSIONS = join(REMY_DIR, "extensions");
 
-/** The extension folders of the repos `extensions.repos` lists, by repo name. A repo that isn't found is an error. */
-export function repoExtensionDirs(config: Config): { repo: string; dir?: string; error?: string }[] {
+/** The checkouts of the repos `extensions.repos` lists, whose own code may run in your daemon. A repo that isn't found is an error. */
+export function trustedRepos(config: Config): { repo: string; root?: string; error?: string }[] {
   return (config.extensions?.repos ?? []).map((repo) => {
     try {
       const root = resolveRepo(repo, config.repoRoots);
-      return { repo: basename(root), dir: join(root, ".remy", "extensions") };
+      return { repo: basename(root), root };
     } catch (e: any) {
       return { repo, error: String(e?.message ?? e) };
     }
   });
 }
+
+/** The extension folders of the trusted repos, by repo name. */
+export const repoExtensionDirs = (config: Config) => trustedRepos(config).map((r) => ({ ...r, dir: r.root && join(r.root, ".remy", "extensions") }));
 
 export async function loadExtensions(host: ExtensionHost, config: Config, { builtins = BUILTINS, userDir = USER_EXTENSIONS } = {}) {
   const disabled = new Set(config.extensions?.disabled ?? []);

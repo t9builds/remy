@@ -8,6 +8,11 @@ import { createMessenger, quietSink } from "./bridges";
 import { compactEnv, compactPct, configStamp, loadConfig, messengerLabel, messengersOf, PATHS, readJson, REMY_DIR, workspaceFor, writeJson, type Workspace } from "./config";
 import { runDaemon } from "./daemon";
 import { doctor } from "./doctor";
+import { formatRuns, loadFactory } from "./extensions/builtin/factory";
+import { trustedRepos } from "./extensions/load";
+import { lowerLevel } from "./factory/define";
+import { appendReport, headOf, repoRootOf } from "./factory/live";
+import type { Run } from "./factory/pipeline";
 import { runHook } from "./hook";
 import { formatMerged } from "./merged";
 import { askDaemon, VERSION, type DaemonStatus } from "./link";
@@ -15,7 +20,7 @@ import { formatQueue, queueOf } from "./queue";
 import { blocking } from "./messenger";
 import { setup } from "./setup";
 import { findSession, formatSession, formatTable, snapshotDiff, takeSnapshot, type Spawned } from "./snapshot";
-import { spawnAgent } from "./spawn";
+import { resolveRepo, spawnAgent } from "./spawn";
 import { errorLine, formatChecks, formatHelp, pc, statusPaint } from "./ui";
 
 const ROOT = resolve(import.meta.dir, "..");
@@ -28,6 +33,8 @@ const HELP = formatHelp("remy — a coordinator for your Claude Code sessions, i
   ["queue [--json]", "What waits on you, most urgent first"],
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task…>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
+  ["factory [--json] | factory retry <pr> | factory check [repo]", "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts"],
+  ["report <step> pass|fail|fixed --pr <url> --summary <text>", "A factory agent's verdict on its step"],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
   ["doctor", "Check requirements, tokens and scopes"],
   ["dir", "Print remy's state folder"],
@@ -187,6 +194,42 @@ try {
         slackTask: values["slack-task"],
       });
       console.log(JSON.stringify(r, null, 2));
+      break;
+    }
+    case "factory": {
+      const { values, positionals } = parse(args, { json: { type: "boolean" } });
+      const runs = readJson<{ runs?: Record<string, Run> }>(PATHS.factory, {}).runs ?? {};
+      if (positionals[0] === "check") {
+        const c = loadConfig();
+        const root = repoRootOf(positionals[1] ? resolveRepo(positionals[1], c.repoRoots) : process.cwd());
+        const l = await loadFactory(root);
+        if (!l.mtime) throw new Error(`no ${join(root, ".remy", "factory.ts")}`);
+        if (l.error) throw new Error(`${join(root, ".remy", "factory.ts")}: ${l.error}`);
+        const f = l.factory!;
+        const trusted = trustedRepos(c).some((r) => r.root === root);
+        console.log(f.steps.map((s, i) => `${i + 1}. ${s.kind} ${s.name}${"env" in s && s.env ? ` (${s.env})` : ""}`).join("\n"));
+        console.log(`\nautonomy: ${lowerLevel(f.autonomy ?? "notify", c.autonomy)} (repo ${f.autonomy ?? "notify"}, yours ${c.autonomy})`);
+        if (!trusted) console.log(pc.yellow(`! not in extensions.repos, so the factory doesn't run here`));
+        break;
+      }
+      if (positionals[0] === "retry") {
+        const want = positionals[1] ?? "";
+        const run = runs[want] ?? Object.values(runs).find((r) => `#${r.number}` === want || String(r.number) === want);
+        if (!run) throw new Error(`usage: ${pc.cyan("remy factory retry <pr-url>")}; \`remy factory\` lists the PRs`);
+        appendReport({ pr: run.pr, step: "", kind: "retry" });
+        console.log(`#${run.number} runs its held step again within a minute or so.`);
+        break;
+      }
+      console.log(values.json ? JSON.stringify(runs, null, 2) : formatRuns(Object.values(runs)));
+      break;
+    }
+    case "report": {
+      const { values, positionals } = parse(args, { pr: { type: "string" }, summary: { type: "string" } });
+      const [step, verdict] = positionals;
+      const usage = `usage: ${pc.cyan("remy report <step> pass|fail|fixed --pr <pr-url> --summary <one line>")}`;
+      if (!step || !["pass", "fail", "fixed"].includes(verdict ?? "") || !values.summary || !/^https:\/\/github\.com\/.+\/pull\/\d+$/.test(values.pr ?? "")) throw new Error(usage);
+      appendReport({ pr: values.pr!, step, verdict: verdict as "pass" | "fail" | "fixed", summary: values.summary, head: await headOf(values.pr!) });
+      console.log("Recorded. Remy picks it up within a minute or so.");
       break;
     }
     case "post": {

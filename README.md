@@ -20,7 +20,7 @@ It runs on your laptop with your own Claude Code login. There's no server to hos
 
 I usually have several Claude Code sessions going across a few repos, and I kept losing track of them. Starting agents was never the problem. Knowing which ones were done, stuck or broken was. I wanted one chat that knows about all of them, tells me when something needs me, and lets me answer without finding the right terminal.
 
-Remy doesn't write code. It starts agents, checks on them and passes messages back and forth. It won't merge, close or delete anything unless you tell it to in Slack. Reviewing and merging is still on you.
+Remy doesn't write code. It starts agents, checks on them and passes messages back and forth. It won't merge, close or delete anything unless you tell it to in Slack, or you turn on the [factory](#factory) for a repo and raise your own autonomy level.
 
 ## What it looks like
 
@@ -100,7 +100,8 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | `remy status` | Joins `claude agents --json`, each session's git branch and `gh pr view` |
 | `src/queue.ts` | Ranks what waits on you from that snapshot; the daemon keeps it as one message per workspace (`~/.remy/queue.json`) |
 | `remy daemon` (`src/daemon.ts`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, posts the merged/ended notices itself (`src/notices.ts`), runs extensions and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
-| `src/extensions/` | The extension API (`api.ts`), the host that runs extensions in the daemon, and the built-in ones: closing merged agents, Slack-thread tasks, `/queue` |
+| `src/extensions/` | The extension API (`api.ts`), the host that runs extensions in the daemon, and the built-in ones: closing merged agents, Slack-thread tasks, `/queue`, the factory |
+| `src/factory/` | The factory's pipelines: authoring helpers (`define.ts`, imported as `remy/factory`), the run state machine (`pipeline.ts`) and gh / Cloud Build / shell (`live.ts`) |
 | `remy` channel (`src/channel.ts`) | Runs inside the coordinator session only. A thin client of the daemon over `~/.remy/daemon.sock` (`src/link.ts`): pushes the daemon's events into the session and gives Claude `post` / `update` |
 | `src/bridges.ts` | Picks the Slack or Telegram bridge for each workspace; both implement `Messenger` (`src/messenger.ts`) |
 | `src/slack-bridge.ts` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in (`src/watch.ts`) |
@@ -259,7 +260,7 @@ In any channel the bot is in, mention it in a thread (`@bot fix this, it's in ap
 
 Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
 
-From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`.
+From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`, `remy factory`.
 
 ## Config
 
@@ -280,6 +281,8 @@ From a terminal: `remy status` (`remy status <name>` for one session in detail, 
 | `extensions.repos` | `[]` | Repos whose `.remy/extensions` run in your daemon: paths, or names under `repoRoots` |
 | `extensions.packages` | `[]` | Extension packages installed in `~/.remy` |
 | `extensions.disabled` | `[]` | Extensions not to load, by name, built-in ones included |
+| `autonomy` | `notify` | The most you let the [factory](#factory) do with your changes: `notify`, `verify`, `merge`, `deploy-dev` or `deploy-prod` |
+| `maxFactoryAgents` | `2` | Factory agents (verifiers, checks) running at once on your subscription |
 
 Each workspace:
 
@@ -319,7 +322,7 @@ A path covers the folder and everything inside it, not sibling folders that shar
 
 ## Extensions
 
-Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/builtin/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, and `queue` answers `/queue`. Turn one off with `extensions.disabled` and write your own instead.
+Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/builtin/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `queue` answers `/queue`, and `factory` runs [pipelines](#factory). Turn one off with `extensions.disabled` and write your own instead.
 
 ```ts
 // ~/.remy/extensions/red-ci.ts
@@ -360,6 +363,59 @@ Extensions load from three places:
 | packages in `extensions.packages` | anyone's; install them with `cd ~/.remy && bun add <package>` |
 
 An extension runs in the daemon with your tokens and can post, start agents and close them. Installing one is a trust decision, like adding a dependency with write access, which is why a repo's extensions run only once you list the repo. `remy doctor` shows which extensions loaded and why any failed; restart the daemon after adding or changing one (`remy daemon stop`, then `remy start`, or restart its service).
+
+## Factory
+
+The factory is a built-in extension that takes a change from "the agent says it's done" to verified on production. No person reviews the code by default. Agents that didn't write a change verify it at every point where it moves on, and you're asked only for judgment calls.
+
+Each repo defines its pipeline in `.remy/factory.ts`, committed with the code:
+
+```ts
+import { action, agent, defineFactory, gate, wait } from "remy/factory";
+
+export default defineFactory({
+  autonomy: "deploy-prod", // the most the team allows
+  environments: {
+    dev: { detector: "cloudbuild", project: "acme-dev", url: "https://dev.acme.example" },
+    prod: { detector: "command", check: "./scripts/deployed.sh prod {sha}", deploy: "./scripts/deploy.sh prod {sha}" },
+  },
+  steps: [
+    agent("review", { skill: "/remy:review", repeat: "until-clean", maxRounds: 3 }),
+    gate("merge", { maxLines: 400, protect: ["migrations/**"] }),
+    action("merge"),
+    wait("deploy", { env: "dev" }),
+    agent("verify-dev", { skill: "/remy:verify", env: "dev" }),
+    agent("release-check", { skill: "/remy:release-check", onHold: "ask-human" }),
+    action("deploy", { env: "prod" }),
+    wait("deploy", { env: "prod" }),
+    agent("verify-prod", { skill: "/remy:verify", env: "prod", onFail: "notify-author" }),
+    action("notify"),
+  ],
+});
+```
+
+| Step | Done by | What it does |
+|---|---|---|
+| `agent(name, { skill })` | a fresh agent running the skill | Works on the PR in its own worktree and finishes with `remy report <name> pass\|fail\|fixed --pr <url> --summary "…"`. `fixed` with `repeat: "until-clean"` hands the step to another fresh agent once CI is green on the fixes. `fail` waits for you (`onFail: "hold"`), asks you whether to go on (`"ask-human"`, or `onHold`), or tells you at once and offers a fix (`"notify-author"`) |
+| `wait("ci")`, `wait("deploy", { env })` | Remy | CI green on the PR's head; the merge commit deployed, seen by Cloud Build (`detector: "cloudbuild"`) or a `check` command that exits 0 |
+| `gate(name, { maxLines, protect })` | Remy | Changed lines, protected paths, CI, and that each verdict covers the PR's current head; new commits send the PR back to the step that hasn't seen them |
+| `action("merge" \| "deploy" \| "notify")` | Remy | Merges with `gh pr merge --match-head-commit`, runs the environment's `deploy` command, tells you the change is through |
+
+Any skill can be an agent step: Remy adds the PR, the rules and the `remy report` line to its prompt, and reads only that report, never the agent's text. Remy ships `/remy:review`, `/remy:verify` and `/remy:release-check`, so a pipeline works before you bring skills of your own.
+
+How far Remy goes on its own is the lower of the repo's `autonomy` and yours in `~/.remy/config.json`. A teammate who clones a repo set to `deploy-prod` gets `notify` until they raise their own:
+
+| Level | Remy does |
+|---|---|
+| `notify` | nothing in the factory; it only reports, as without one |
+| `verify` | runs the agent, wait and gate steps; asks you before it merges |
+| `merge` | merges verified changes |
+| `deploy-dev` | deploys verified changes to dev |
+| `deploy-prod` | promotes to production after dev verification |
+
+A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a `fail`, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
+
+The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Step agents count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
 
 ## Limits
 

@@ -33,6 +33,19 @@ var __toESM = (mod, isNodeMode, target) => {
   return to;
 };
 var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, {
+      get: all[name],
+      enumerable: true,
+      configurable: true,
+      set: __exportSetter.bind(all, name)
+    });
+};
 
 // node_modules/sisteransi/src/index.js
 var require_src = __commonJS(function(exports, module) {
@@ -166,7 +179,7 @@ var require_picocolors = __commonJS(function(exports, module) {
 import { spawn } from "child_process";
 import { openSync as openSync2 } from "fs";
 import { homedir as homedir3 } from "os";
-import { join as join8, resolve as resolve4 } from "path";
+import { join as join9, resolve as resolve4 } from "path";
 import { parseArgs } from "util";
 
 // src/config.ts
@@ -185,6 +198,8 @@ var PATHS = {
   log: join(REMY_DIR, "daemon.log"),
   socket: join(REMY_DIR, "daemon.sock"),
   held: join(REMY_DIR, "held.json"),
+  reports: join(REMY_DIR, "reports.jsonl"),
+  factory: join(REMY_DIR, "state", "builtin_factory.json"),
   taskDir: (id) => join(REMY_DIR, "tasks", id),
   slackState: (workspace) => join(REMY_DIR, `slack-state.${workspace}.json`),
   telegramState: (workspace) => join(REMY_DIR, `telegram-state.${workspace}.json`),
@@ -211,7 +226,9 @@ var DEFAULTS = {
   coordinatorName: "remy",
   coordinatorCompactPct: 50,
   triggerEmoji: "mouse",
-  tickSeconds: 60
+  tickSeconds: 60,
+  autonomy: "notify",
+  maxFactoryAgents: 2
 };
 function compactPct(value) {
   const n = Number(value);
@@ -1511,8 +1528,8 @@ async function openWorkspaces(workspaces, sink, opts) {
 var quietSink = { push: async () => {}, permission: async () => {}, log: () => {} };
 
 // src/daemon.ts
-import { appendFileSync as appendFileSync2, openSync, readSync, closeSync, statSync as statSync5, unlinkSync as unlinkSync2 } from "fs";
-import { join as join6 } from "path";
+import { appendFileSync as appendFileSync3, openSync, readSync, closeSync, statSync as statSync6, unlinkSync as unlinkSync2 } from "fs";
+import { join as join7 } from "path";
 
 // src/extensions/host.ts
 import { existsSync as existsSync2, mkdirSync as mkdirSync3, readdirSync, statSync as statSync2 } from "fs";
@@ -1662,6 +1679,7 @@ class ExtensionHost {
         }
       },
       sessions: () => deps.sessions(),
+      config: deps.config,
       log: (...a) => deps.log(`[${ext}]`, ...a)
     };
   }
@@ -1692,7 +1710,7 @@ async function importExtension(path) {
 }
 
 // src/extensions/load.ts
-import { basename as basename2, join as join5 } from "path";
+import { basename as basename2, join as join6 } from "path";
 
 // src/spawn.ts
 import { existsSync as existsSync3, statSync as statSync4 } from "fs";
@@ -2064,7 +2082,7 @@ async function gitInfo(cwd) {
   return { branch: branch || undefined, repo };
 }
 async function prInfo(cwd, branch) {
-  const out = await run(["gh", "pr", "view", branch, "--json", "number,url,title,state,isDraft,reviewDecision,statusCheckRollup"], cwd);
+  const out = await run(["gh", "pr", "view", branch, "--json", "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid"], cwd);
   if (!out)
     return;
   const j = JSON.parse(out);
@@ -2075,7 +2093,8 @@ async function prInfo(cwd, branch) {
     state: j.state,
     draft: !!j.isDraft,
     review: j.reviewDecision ?? "",
-    ...ciOf(j.statusCheckRollup)
+    ...ciOf(j.statusCheckRollup),
+    head: j.headRefOid
   };
 }
 var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
@@ -2101,6 +2120,7 @@ async function takeSnapshot() {
       cwd,
       startedAt: a.startedAt,
       spawned: !!spawn,
+      role: spawn?.role,
       about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
       repo,
       branch,
@@ -2141,7 +2161,7 @@ function diff(prev, next) {
     }
   }
   for (const p of prev.sessions)
-    if (!after.has(p.sessionId))
+    if (!after.has(p.sessionId) && !p.role)
       add(p, "ended", p.pr ? `last PR ${prLabel(p.pr)}` : "session closed");
   return changes;
 }
@@ -2233,7 +2253,7 @@ async function spawnAgent(opts) {
   for (let i = 2;existsSync3(join4(cwd, ".claude", "worktrees", label)); i++)
     label = `${base}-${i}`;
   const slack = opts.slackTask ? loadTask(opts.slackTask) : undefined;
-  const prompt = config.spawnTemplate.replaceAll("{task}", slack ? taskPrompt(slack, opts.task) : opts.task);
+  const prompt = opts.prompt ?? config.spawnTemplate.replaceAll("{task}", slack ? taskPrompt(slack, opts.task) : opts.task);
   const worktree = opts.worktree ?? config.spawnWorktree;
   const cmd = ["claude", "--bg", "-n", name, "--permission-mode", opts.permissionMode ?? config.spawnPermissionMode];
   if (worktree)
@@ -2252,11 +2272,683 @@ async function spawnAgent(opts) {
     label,
     task: opts.task,
     startedAt: Date.now(),
-    slack: slack && { workspace: slack.workspace, channel: slack.channel, threadTs: slack.threadTs, task: slack.id }
+    slack: slack && { workspace: slack.workspace, channel: slack.channel, threadTs: slack.threadTs, task: slack.id },
+    role: opts.role,
+    pr: opts.pr
   };
   writeJson(PATHS.spawned, spawned);
   return { name, label, id, cwd, worktree, output: out };
 }
+
+// src/extensions/builtin/factory.ts
+import { existsSync as existsSync4, statSync as statSync5 } from "fs";
+import { join as join5 } from "path";
+
+// src/factory/define.ts
+var exports_define = {};
+__export(exports_define, {
+  LEVELS: () => LEVELS,
+  action: () => action,
+  agent: () => agent,
+  atLeast: () => atLeast,
+  defineFactory: () => defineFactory,
+  gate: () => gate,
+  levelOf: () => levelOf,
+  lowerLevel: () => lowerLevel,
+  validate: () => validate,
+  wait: () => wait
+});
+var LEVELS = ["notify", "verify", "merge", "deploy-dev", "deploy-prod"];
+var lowerLevel = (a, b) => LEVELS.indexOf(a) <= LEVELS.indexOf(b) ? a : b;
+var atLeast = (have, need) => LEVELS.indexOf(have) >= LEVELS.indexOf(need);
+var defineFactory = (f) => f;
+var agent = (name, opts) => ({ kind: "agent", name, ...opts });
+var wait = (name, opts = {}) => ({ kind: "wait", name, ...opts });
+var gate = (name, opts = {}) => ({ kind: "gate", name, ...opts });
+var action = (name, opts = {}) => ({ kind: "action", name, ...opts });
+function levelOf(step) {
+  if (step.kind !== "action" || step.name === "notify")
+    return "verify";
+  if (step.name === "merge")
+    return "merge";
+  return step.env === "dev" ? "deploy-dev" : "deploy-prod";
+}
+function validate(f) {
+  const errors = [];
+  if (!Array.isArray(f?.steps) || !f.steps.length)
+    return ["it has no steps"];
+  if (f.autonomy && !LEVELS.includes(f.autonomy))
+    errors.push(`autonomy "${f.autonomy}" isn't one of ${LEVELS.join(", ")}`);
+  const names = new Set;
+  f.steps.forEach((s, i) => {
+    const at = `step ${i + 1} (${s?.kind} ${s?.name})`;
+    if (!["agent", "wait", "gate", "action"].includes(s?.kind))
+      return errors.push(`${at}: unknown kind`);
+    if (s.kind === "agent") {
+      if (!s.skill)
+        errors.push(`${at}: needs a skill`);
+      if (names.has(s.name))
+        errors.push(`${at}: another agent step is called "${s.name}"`);
+      names.add(s.name);
+    }
+    if (s.kind === "wait" && !["ci", "deploy"].includes(s.name))
+      errors.push(`${at}: wait is "ci" or "deploy"`);
+    if (s.kind === "action" && !["merge", "deploy", "notify"].includes(s.name))
+      errors.push(`${at}: action is "merge", "deploy" or "notify"`);
+    if (s.kind === "wait" && s.name === "deploy" || s.kind === "action" && s.name === "deploy") {
+      if (!s.env)
+        errors.push(`${at}: needs env`);
+      else if (!f.environments?.[s.env])
+        errors.push(`${at}: no environment "${s.env}" in environments`);
+    }
+    if (s.kind === "action" && s.name === "deploy" && s.env && f.environments?.[s.env] && !f.environments[s.env].deploy)
+      errors.push(`${at}: environment "${s.env}" has no deploy command`);
+  });
+  for (const s of f.steps)
+    if (s.kind === "gate") {
+      for (const v of s.verdicts ?? [])
+        if (!names.has(v))
+          errors.push(`gate ${s.name}: no agent step "${v}"`);
+    }
+  return errors;
+}
+
+// src/factory/live.ts
+import { appendFileSync as appendFileSync2, readFileSync as readFileSync3 } from "fs";
+import { dirname } from "path";
+async function run2(cmd, cwd) {
+  const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  return { ok: code === 0, out: out.trim(), err: err.trim() };
+}
+async function prDetail(url) {
+  const r = await run2(["gh", "pr", "view", url, "--json", "state,isDraft,reviewDecision,statusCheckRollup,headRefOid,additions,deletions,files,changedFiles,mergeCommit"]);
+  if (!r.ok)
+    return;
+  const j = JSON.parse(r.out);
+  const files = (j.files ?? []).map((f) => f.path);
+  return {
+    state: j.state,
+    draft: !!j.isDraft,
+    review: j.reviewDecision ?? "",
+    ci: ciOf(j.statusCheckRollup).ci,
+    head: j.headRefOid,
+    lines: (j.additions ?? 0) + (j.deletions ?? 0),
+    files,
+    allFiles: files.length >= (j.changedFiles ?? 0),
+    mergeSha: j.mergeCommit?.oid
+  };
+}
+async function mergePr(url, head, method) {
+  const r = await run2(["gh", "pr", "merge", url, `--${method}`, "--match-head-commit", head]);
+  return { ok: r.ok, out: r.err || r.out };
+}
+var RUNNING = new Set(["QUEUED", "PENDING", "WORKING", "STATUS_UNKNOWN"]);
+function buildOf(builds) {
+  const ok = builds.find((b) => b.status === "SUCCESS");
+  if (ok)
+    return { status: "success", id: ok.id };
+  const running = builds.find((b) => RUNNING.has(b.status));
+  if (running)
+    return { status: "running", id: running.id };
+  const failed = builds.sort((a, b) => (b.createTime ?? "").localeCompare(a.createTime ?? ""))[0];
+  return failed ? { status: "failed", id: failed.id, detail: failed.status.toLowerCase() } : { status: "none" };
+}
+async function cloudBuild(sha, e) {
+  if (!e.project)
+    return { status: "error", detail: "the environment has no Cloud Build project" };
+  const filter = `substitutions.COMMIT_SHA="${sha}"${e.trigger ? ` AND buildTriggerId="${e.trigger}"` : ""}`;
+  const cmd = ["gcloud", "builds", "list", "--project", e.project, "--filter", filter, "--format", "json(id,status,createTime)", "--limit", "10"];
+  if (e.region)
+    cmd.push("--region", e.region);
+  const r = await run2(cmd);
+  if (!r.ok)
+    return { status: "error", detail: r.err.split(`
+`).find((l) => l.startsWith("ERROR")) ?? r.err.split(`
+`)[0] };
+  return buildOf(JSON.parse(r.out || "[]"));
+}
+var shell = (command, sha, cwd) => run2(["sh", "-c", command.replaceAll("{sha}", sha)], cwd);
+async function deployed(sha, e, cwd) {
+  if (e.detector === "command") {
+    if (!e.check)
+      return { status: "error", detail: "the environment has no check command" };
+    return (await shell(e.check, sha, cwd)).ok ? { status: "success" } : { status: "running" };
+  }
+  return cloudBuild(sha, e);
+}
+async function deploy(sha, e, cwd) {
+  const r = await shell(e.deploy, sha, cwd);
+  return { ok: r.ok, out: r.err || r.out };
+}
+function repoRootOf(cwd) {
+  try {
+    const r = Bun.spawnSync(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, stdout: "pipe", stderr: "ignore" });
+    const common = r.exitCode === 0 ? r.stdout.toString().trim() : "";
+    return common.endsWith("/.git") ? dirname(common) : cwd;
+  } catch {
+    return cwd;
+  }
+}
+function readReports() {
+  try {
+    return readFileSync3(PATHS.reports, "utf8").split(`
+`).filter(Boolean).flatMap((l) => {
+      try {
+        return [JSON.parse(l)];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+function appendReport(r) {
+  ensureDir();
+  appendFileSync2(PATHS.reports, JSON.stringify({ ...r, at: Date.now() }) + `
+`, { mode: 384 });
+}
+async function headOf(url) {
+  const r = await run2(["gh", "pr", "view", url, "--json", "headRefOid", "-q", ".headRefOid"]);
+  return r.ok ? r.out : undefined;
+}
+
+// src/factory/pipeline.ts
+var GRACE_MS = 3 * 60000;
+var PUSH_WAIT_MS = 30 * 60000;
+var isActive = (r) => r.stage !== "held" && r.stage !== "done";
+var YES = /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approve[d]?|\uD83D\uDC4D|\u2705)\b/i;
+function gateBlockers(d, gate) {
+  const why = [];
+  if (d.draft)
+    why.push("it's a draft");
+  if (d.review === "CHANGES_REQUESTED")
+    why.push("changes were requested");
+  if (gate.ci !== false && d.ci === "fail")
+    why.push("CI fails");
+  if (gate.ci !== false && d.ci === "pending")
+    why.push("CI is still running");
+  if (gate.maxLines !== undefined && d.lines > gate.maxLines)
+    why.push(`${d.lines} changed lines (limit ${gate.maxLines})`);
+  if (gate.protect?.length && !d.allFiles)
+    why.push("too many files to check against the protected ones");
+  const hit = d.files.find((f) => (gate.protect ?? []).some((p) => new Bun.Glob(p).match(f)));
+  if (hit)
+    why.push(`touches protected ${hit}`);
+  return why;
+}
+function agentPrompt(run, step, f) {
+  const n = run.number;
+  const env = step.env ? f.environments?.[step.env] : undefined;
+  const afterMerge = !!run.mergeSha;
+  const rounds = step.repeat === "until-clean" ? `, round ${run.round} of at most ${step.maxRounds ?? 3}` : "";
+  return [
+    `${step.skill}${step.instructions ? ` ${step.instructions}` : ""}`,
+    "",
+    `You are the "${step.name}" step of Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}${rounds}. You didn't write this change: look for what's wrong with it, don't set out to confirm it works.`,
+    ...run.about ? [`What it is for: ${run.about}`] : [],
+    ...step.env ? [`It is deployed to ${step.env}${env?.url ? ` (${env.url})` : ""}${run.mergeSha ? ` as ${run.mergeSha}` : ""}: check it there.`] : [],
+    afterMerge ? `Read the change with \`gh pr view ${n}\` and \`gh pr diff ${n}\`. Don't write code, push or open PRs.` : `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). If you fix something, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`.`,
+    "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
+    "",
+    "As the very last step, report your verdict with exactly one of:",
+    `  remy report ${step.name} pass --pr ${run.pr} --summary "<one line>"`,
+    `  remy report ${step.name} fail --pr ${run.pr} --summary "<one line: what is wrong, for a person to decide>"`,
+    ...afterMerge ? [] : [`  remy report ${step.name} fixed --pr ${run.pr} --summary "<one line: what you fixed>"   (you pushed fixes; a fresh agent checks again)`]
+  ].join(`
+`);
+}
+function enter(run, stage, now, reason) {
+  Object.assign(run, { stage, since: now, reason });
+}
+var hold = (run, now, reason) => (enter(run, "held", now, reason), false);
+function next(run, now, to = run.step + 1) {
+  Object.assign(run, { step: to, round: 1, stage: "running", since: now, stepSince: now, reason: undefined, agent: undefined, ask: undefined });
+  return true;
+}
+function ask(run, env, purpose, question) {
+  run.ask = { purpose, question };
+  enter(run, "asking", env.now(), question);
+  env.ask(run, question);
+  return false;
+}
+var lastPass = (run, name) => run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
+async function advance(run, f, autonomy, env) {
+  for (let i = 0;i < 50 && await stepOnce(run, f, autonomy, env); i++)
+    ;
+}
+async function stepOnce(run, f, autonomy, env) {
+  const now = env.now();
+  if (run.stage === "done")
+    return false;
+  if (run.stage === "held") {
+    const retry = env.reports().findLast((r) => r.pr === run.pr && r.kind === "retry");
+    if (retry && retry.at > run.since) {
+      run.urgent = false;
+      return next(run, now, run.step);
+    }
+    return mergedByHand(run, f, env);
+  }
+  if (run.stage === "asking") {
+    if (await mergedByHand(run, f, env))
+      return true;
+    const a = run.ask;
+    if (!a?.answer)
+      return false;
+    const yes = YES.test(a.answer);
+    if (a.purpose === "approve") {
+      if (!yes)
+        return hold(run, now, `you said no to ${describe(f.steps[run.step])}: ${a.answer}`);
+      run.approved.push(run.step);
+      run.ask = undefined;
+      enter(run, "running", now);
+      return true;
+    }
+    if (a.purpose === "continue")
+      return yes ? next(run, now) : hold(run, now, `stopped: ${a.answer}`);
+    run.ask = undefined;
+    enter(run, "done", now, yes ? "a fix was started" : "no fix wanted");
+    return false;
+  }
+  const step = f.steps[run.step];
+  if (!step) {
+    enter(run, "done", now, "through the pipeline");
+    return false;
+  }
+  if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(run.step)) {
+    const said = run.reports.findLast((r) => r.verdict === "pass" || r.verdict === "fixed")?.summary;
+    return ask(run, env, "approve", `${describe(step)} for #${run.number} ${run.title}?${said ? ` Last verdict: ${said}.` : ""} Reply yes to go ahead (your autonomy stops at ${autonomy}).`);
+  }
+  if (step.kind === "agent")
+    return agentStep(run, step, f, env);
+  if (step.kind === "wait")
+    return waitStep(run, step, f, env);
+  if (step.kind === "gate")
+    return gateStep(run, step, f, env);
+  return actionStep(run, step, f, env);
+}
+var describe = (s) => s.kind === "action" ? s.name === "merge" ? "Merge" : s.name === "deploy" ? `Deploy to ${s.env}` : "Notify" : `${s.kind} ${s.name}`;
+async function mergedByHand(run, f, env) {
+  const merge = f.steps.findIndex((s, i) => i >= run.step && s.kind === "action" && s.name === "merge");
+  if (merge < 0 || run.mergeSha)
+    return false;
+  const d = await env.pr(run.pr);
+  if (d?.state !== "MERGED")
+    return false;
+  run.mergeSha = d.mergeSha;
+  return next(run, env.now(), merge + 1);
+}
+async function agentStep(run, step, f, env) {
+  const now = env.now();
+  if (run.stage === "awaiting-fix") {
+    const d = await env.pr(run.pr);
+    if (!d)
+      return false;
+    if (d.state !== "OPEN")
+      return closed(run, d, f, env);
+    if (d.head === run.head)
+      return now - run.since > PUSH_WAIT_MS ? hold(run, now, `${step.name} said it pushed fixes, but the PR didn't change`) : false;
+    if (d.ci === "fail")
+      return hold(run, now, `CI fails after ${step.name}'s fixes`);
+    if (d.ci === "pending")
+      return false;
+    run.head = d.head;
+    enter(run, "running", now);
+  }
+  if (!run.agent) {
+    if (!env.canStartAgent())
+      return false;
+    if (!run.mergeSha) {
+      const d = await env.pr(run.pr);
+      if (!d)
+        return false;
+      if (d.state !== "OPEN")
+        return closed(run, d, f, env);
+      run.head = d.head;
+    }
+    const agent = await env.spawn(run, step, agentPrompt(run, step, f));
+    run.agent = { ...agent, startedAt: env.now() };
+    enter(run, "agent", env.now());
+    return false;
+  }
+  const report = env.reports().findLast((r) => r.pr === run.pr && r.step === step.name && !r.kind && r.at >= run.agent.startedAt);
+  if (!report) {
+    const status = await env.agentStatus(run.agent);
+    const minutes = step.timeoutMinutes ?? 60;
+    if (status === "busy" || status === "waiting")
+      return now - run.agent.startedAt > minutes * 60000 ? hold(run, now, `${step.name} (${run.agent.name}) has worked for over ${minutes} min without reporting`) : false;
+    return now - run.agent.startedAt > GRACE_MS ? hold(run, now, `${step.name} (${run.agent.name}) stopped without reporting`) : false;
+  }
+  await env.close(run.agent);
+  run.agent = undefined;
+  run.reports.push(report);
+  const summary = report.summary ?? "";
+  if (report.verdict === "pass")
+    return next(run, now);
+  if (report.verdict === "fixed") {
+    if (step.repeat !== "until-clean")
+      return next(run, now);
+    if (run.round >= (step.maxRounds ?? 3))
+      return hold(run, now, `${step.name} still fixing after ${run.round} rounds: ${summary}`);
+    run.round++;
+    enter(run, "awaiting-fix", now);
+    return false;
+  }
+  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "hold");
+  if (onFail === "ask-human")
+    return ask(run, env, "continue", `${step.name} for #${run.number} ${run.title} says: ${summary}. Go on anyway? Reply yes, or no to stop here.`);
+  if (onFail === "notify-author") {
+    run.urgent = true;
+    await env.notify(run, `\uD83D\uDD34 *#${run.number} ${run.title}* failed ${step.name}${run.mergeSha ? ` (live as ${run.mergeSha.slice(0, 7)})` : ""}: ${summary}
+${run.pr}`);
+    return ask(run, env, "fix", `Start an agent on a fix for #${run.number}? Reply yes.`);
+  }
+  return hold(run, now, `${step.name}: ${summary}`);
+}
+async function waitStep(run, step, f, env) {
+  const now = env.now();
+  const minutes = step.timeoutMinutes ?? 60;
+  const late = now - run.stepSince > minutes * 60000;
+  if (step.name === "ci") {
+    const d = await env.pr(run.pr);
+    if (!d)
+      return false;
+    if (d.state === "CLOSED")
+      return closed(run, d, f, env);
+    if (d.ci === "pass" || d.ci === "none")
+      return next(run, now);
+    if (d.ci === "fail")
+      return hold(run, now, "CI fails");
+    return late ? hold(run, now, `CI still running after ${minutes} min`) : false;
+  }
+  if (!run.mergeSha)
+    return hold(run, now, `nothing merged to wait for on ${step.env}`);
+  const target = { ...f.environments[step.env], ...step.detector ? { detector: step.detector } : {} };
+  const b = await env.deployed(run.mergeSha, target, run);
+  if (b.status === "success")
+    return next(run, now);
+  if (b.status === "failed")
+    return hold(run, now, `the ${step.env} deploy of ${run.mergeSha.slice(0, 7)} failed${b.id ? ` (${b.id})` : ""}${b.detail ? `: ${b.detail}` : ""}`);
+  if (b.status === "error")
+    run.reason = b.detail;
+  return late ? hold(run, now, `no ${step.env} deploy of ${run.mergeSha.slice(0, 7)} after ${minutes} min${run.reason ? ` (${run.reason})` : ""}`) : false;
+}
+async function gateStep(run, step, f, env) {
+  const now = env.now();
+  const d = await env.pr(run.pr);
+  if (!d)
+    return false;
+  if (d.state === "MERGED")
+    return next(run, now);
+  if (d.state !== "OPEN")
+    return closed(run, d, f, env);
+  const names = step.verdicts ?? f.steps.slice(0, run.step).flatMap((s) => s.kind === "agent" ? [s.name] : []);
+  const stale = names.find((n) => lastPass(run, n)?.head !== d.head);
+  if (stale) {
+    const back = f.steps.findIndex((s) => s.kind === "agent" && s.name === stale);
+    run.head = d.head;
+    next(run, now, back);
+    run.reason = `new commits since ${stale} checked it`;
+    return true;
+  }
+  if (d.ci === "pending" && step.ci !== false)
+    return false;
+  const blockers = gateBlockers(d, step);
+  if (blockers.length)
+    return hold(run, now, `gate ${step.name}: ${blockers.join("; ")}`);
+  run.head = d.head;
+  return next(run, now);
+}
+async function actionStep(run, step, f, env) {
+  const now = env.now();
+  if (step.name === "notify") {
+    const said = run.reports.findLast((r) => r.verdict === "pass" || r.verdict === "fixed")?.summary ?? "";
+    const text = (step.text ?? `\u2705 *#{number} {title}* is through the factory{summary}
+{pr}`).replaceAll("{number}", String(run.number)).replaceAll("{title}", run.title).replaceAll("{pr}", run.pr).replaceAll("{summary}", said ? `: ${said}` : "");
+    await env.notify(run, text);
+    return next(run, now);
+  }
+  if (step.name === "deploy") {
+    if (!run.mergeSha)
+      return hold(run, now, `nothing merged to deploy to ${step.env}`);
+    const r = await env.deploy(run.mergeSha, f.environments[step.env], run);
+    return r.ok ? next(run, now) : hold(run, now, `deploying to ${step.env} failed: ${r.out.split(`
+`)[0]}`);
+  }
+  const d = await env.pr(run.pr);
+  if (!d)
+    return false;
+  if (d.state === "MERGED") {
+    run.mergeSha = d.mergeSha;
+    return next(run, now);
+  }
+  if (d.state !== "OPEN")
+    return closed(run, d, f, env);
+  if (run.mergeRequestedAt) {
+    return now - run.mergeRequestedAt > PUSH_WAIT_MS ? hold(run, now, "Remy asked GitHub to merge it, but it hasn't merged") : false;
+  }
+  if (d.head !== run.head) {
+    const first = f.steps.findIndex((s) => s.kind === "agent");
+    run.head = d.head;
+    return next(run, now, first < 0 ? run.step : first);
+  }
+  const r = await env.merge(run.pr, run.head, step.method ?? "squash");
+  if (!r.ok)
+    return hold(run, now, `merge failed: ${r.out.split(`
+`)[0]}`);
+  run.mergeRequestedAt = now;
+  const after = await env.pr(run.pr);
+  if (after?.state !== "MERGED")
+    return false;
+  run.mergeSha = after.mergeSha;
+  return next(run, now);
+}
+function closed(run, d, f, env) {
+  const merge = f.steps.findIndex((s, i) => i >= run.step && s.kind === "action" && s.name === "merge");
+  if (d.state === "MERGED" && merge >= 0) {
+    run.mergeSha = d.mergeSha;
+    return next(run, env.now(), merge + 1);
+  }
+  enter(run, "done", env.now(), d.state === "MERGED" ? "merged" : "the PR was closed");
+  return false;
+}
+
+// src/extensions/builtin/factory.ts
+var USAGE_LIMIT = /usage limit|limit reached|rate.?limit|out of (extra )?usage/i;
+var BACKOFF_MS = 30 * 60000;
+var KEEP_MS3 = 7 * 24 * 3600000;
+var registered = false;
+function registerModule() {
+  if (registered)
+    return;
+  registered = true;
+  Bun.plugin({ name: "remy-factory", setup: (build) => void build.module("remy/factory", () => ({ exports: { ...exports_define }, loader: "object" })) });
+}
+async function loadFactory(root) {
+  const path = join5(root, ".remy", "factory.ts");
+  if (!existsSync4(path))
+    return { mtime: 0 };
+  const mtime = statSync5(path).mtimeMs;
+  registerModule();
+  try {
+    const f = (await import(`${path}?v=${mtime}`)).default;
+    const errors = validate(f);
+    return errors.length ? { error: errors.join("; "), mtime } : { factory: f, mtime };
+  } catch (e) {
+    return { error: String(e?.message ?? e), mtime };
+  }
+}
+var isReady = (s) => !s.role && !!s.pr?.head && s.pr.state === "OPEN" && !s.pr.draft && s.pr.ci !== "fail" && s.pr.review !== "CHANGES_REQUESTED" && s.status !== "busy";
+var STAGE = {
+  running: "next",
+  agent: "agent at work",
+  "awaiting-fix": "waiting for CI after fixes",
+  asking: "asking you",
+  held: "waits for you",
+  done: "done"
+};
+function formatRuns(runs, factoryOf = () => {
+  return;
+}) {
+  if (!runs.length)
+    return "No PRs in the factory.";
+  return [...runs].sort((a, b) => b.since - a.since).map((r) => {
+    const step = factoryOf(r)?.steps[r.step];
+    const at = step ? `${step.kind} ${step.name}${r.agent ? ` (${r.agent.name})` : ""}${r.round > 1 ? `, round ${r.round}` : ""}` : "";
+    return `#${r.number} ${r.repo} \xB7 ${STAGE[r.stage]}${at ? ` \xB7 ${at}` : ""}${r.reason ? ` \xB7 ${r.reason}` : ""} \xB7 ${r.pr}`;
+  }).join(`
+`);
+}
+var factory_default = (remy) => createFactory()(remy);
+var createFactory = (world = {}) => (remy) => {
+  const trusted = new Map(trustedRepos(remy.config).flatMap((r) => r.root ? [[r.root, r.repo]] : []));
+  const loaded = new Map;
+  const runs = remy.state.get("runs", {});
+  let backoffUntil = remy.state.get("backoffUntil", 0);
+  const save = () => {
+    remy.state.set("runs", runs);
+    remy.state.set("backoffUntil", backoffUntil);
+  };
+  async function factoryAt(root) {
+    if (!trusted.has(root))
+      return;
+    const path = join5(root, ".remy", "factory.ts");
+    const mtime = existsSync4(path) ? statSync5(path).mtimeMs : 0;
+    let l = loaded.get(root);
+    if (!l || l.mtime !== mtime) {
+      l = mtime ? await loadFactory(root) : { mtime: 0 };
+      loaded.set(root, l);
+      if (l.error)
+        remy.log(`${path} not used:`, l.error);
+    }
+    return l.factory;
+  }
+  const autonomy = (f) => lowerLevel(f.autonomy ?? "notify", remy.config.autonomy ?? "notify");
+  const label = (r) => `factory:${r.repo.split("/").pop()}#${r.number}`;
+  function ask(run, question) {
+    remy.ask(question, { session: label(run), workspace: run.workspace }).then(async (answer) => {
+      const r = runs[run.pr];
+      if (!r?.ask || r.ask.answer !== undefined)
+        return;
+      if (r.ask.purpose === "fix" && YES.test(answer)) {
+        const failed = r.reports.findLast((x) => x.verdict === "fail");
+        const spawned = await remy.spawn({ repo: r.repoDir, task: `Fix ${r.pr} ("${r.title}") after it failed ${failed?.step ?? "a check"}: ${failed?.summary ?? r.reason ?? ""}` });
+        await remy.post(`Started *${spawned.name}* on a fix for #${r.number}.`, { workspace: r.workspace });
+      }
+      r.ask.answer = answer;
+      save();
+    }).catch((e) => remy.log("ask failed", run.pr, e?.message ?? e));
+  }
+  const env = {
+    now: Date.now,
+    pr: prDetail,
+    merge: mergePr,
+    deployed: (sha, e, run) => deployed(sha, e, run.repoDir),
+    deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
+    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => r.stage === "agent").length < (remy.config.maxFactoryAgents ?? 2),
+    spawn: async (run, step, prompt) => {
+      try {
+        const r = await remy.spawn({ repo: run.repoDir, task: `${step.name} for ${run.repo}#${run.number}`, prompt, role: "factory", pr: run.pr, worktree: true });
+        return { name: r.name, id: r.id };
+      } catch (e) {
+        if (USAGE_LIMIT.test(String(e?.message)))
+          backoffUntil = Date.now() + BACKOFF_MS;
+        throw e;
+      }
+    },
+    agentStatus: async (a) => (await listAgents()).find((r) => a.id ? r.sessionId.startsWith(a.id) : r.name === a.name)?.status,
+    close: async (a) => void await remy.close(a.name).catch((e) => remy.log("close failed", a.name, e?.message ?? e)),
+    reports: readReports,
+    ask,
+    notify: async (run, text) => void await remy.post(text, { workspace: run.workspace, session: run.session }),
+    ...world
+  };
+  function syncQueue(run) {
+    const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
+    if (run.stage === "done")
+      return remy.queue.remove(run.pr);
+    if (run.stage === "held")
+      return remy.queue.add({ ...base, rank: run.urgent ? 0 : 2, why: run.reason ?? "waits for you", action: `decide, then \`remy factory retry ${run.pr}\`` });
+    remy.queue.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
+  }
+  let ticking = false;
+  remy.on("tick", async () => {
+    if (ticking)
+      return;
+    ticking = true;
+    try {
+      for (const s of remy.sessions().filter(isReady)) {
+        const pr = s.pr;
+        const had = runs[pr.url];
+        if (had && (isActive(had) || had.head === pr.head))
+          continue;
+        const root = repoRootOf(s.cwd);
+        const f = await factoryAt(root);
+        if (!f || autonomy(f) === "notify")
+          continue;
+        const now = Date.now();
+        runs[pr.url] = {
+          pr: pr.url,
+          number: pr.number,
+          title: pr.title,
+          repo: s.repo ?? trusted.get(root),
+          repoDir: root,
+          branch: s.branch ?? "",
+          session: s.name,
+          workspace: s.workspace,
+          about: s.about,
+          head: pr.head,
+          step: 0,
+          round: 1,
+          stage: "running",
+          since: now,
+          stepSince: now,
+          reports: [],
+          approved: []
+        };
+        remy.log("factory run started", pr.url);
+      }
+      for (const [url, run] of Object.entries(runs)) {
+        const f = await factoryAt(run.repoDir);
+        if (!f || !isActive(run) && Date.now() - run.since > KEEP_MS3) {
+          if (!isActive(run) || !f)
+            delete runs[url];
+          remy.queue.remove(url);
+          continue;
+        }
+        try {
+          await advance(run, f, autonomy(f), env);
+        } catch (e) {
+          remy.log("factory step failed", url, e?.message ?? e);
+        }
+        syncQueue(run);
+      }
+    } finally {
+      save();
+      ticking = false;
+    }
+  });
+  remy.on("session.stopped", ({ session, last }) => {
+    const run = Object.values(runs).find((r) => r.agent?.name === session.name);
+    if (!run || !USAGE_LIMIT.test(last ?? ""))
+      return;
+    backoffUntil = Date.now() + BACKOFF_MS;
+    run.agent = undefined;
+    run.stage = "running";
+    save();
+    remy.log("usage limit; factory agents paused until", new Date(backoffUntil).toISOString());
+  });
+  remy.registerCommand("factory", {
+    description: "Where each PR stands in its factory pipeline",
+    run: (_, ctx) => formatRuns(Object.values(runs).filter((r) => r.workspace === ctx.workspace), (r) => loaded.get(r.repoDir)?.factory)
+  });
+  for (const run of Object.values(runs)) {
+    if (run.stage === "asking" && run.ask && run.ask.answer === undefined)
+      ask(run, run.ask.question);
+    syncQueue(run);
+  }
+};
 
 // src/notices.ts
 var noticeWorthy = (c) => c.what === "merged" || c.what === "ended" || c.what === "pr_state" && /\u2192 #\d+ merged/.test(c.detail);
@@ -2323,21 +3015,23 @@ function slackTasks(remy) {
 var BUILTINS = {
   "merged-cleanup": mergedCleanup,
   "slack-tasks": slackTasks,
-  queue: queueCommand
+  queue: queueCommand,
+  factory: factory_default
 };
 
 // src/extensions/load.ts
-var USER_EXTENSIONS = join5(REMY_DIR, "extensions");
-function repoExtensionDirs(config) {
+var USER_EXTENSIONS = join6(REMY_DIR, "extensions");
+function trustedRepos(config) {
   return (config.extensions?.repos ?? []).map((repo) => {
     try {
       const root = resolveRepo(repo, config.repoRoots);
-      return { repo: basename2(root), dir: join5(root, ".remy", "extensions") };
+      return { repo: basename2(root), root };
     } catch (e) {
       return { repo, error: String(e?.message ?? e) };
     }
   });
 }
+var repoExtensionDirs = (config) => trustedRepos(config).map((r) => ({ ...r, dir: r.root && join6(r.root, ".remy", "extensions") }));
 async function loadExtensions(host, config, { builtins = BUILTINS, userDir = USER_EXTENSIONS } = {}) {
   const disabled = new Set(config.extensions?.disabled ?? []);
   const skip = (name) => disabled.has(name);
@@ -2398,6 +3092,8 @@ function itemOf(s) {
     return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
   if (s.status === "waiting")
     return { rank: 0, why: "waits for your answer", action: "reply to its thread" };
+  if (s.role)
+    return;
   if (pr?.ci === "fail")
     return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
   if (pr?.review === "CHANGES_REQUESTED")
@@ -2477,6 +3173,8 @@ var sessionRef = (s, workspace) => ({
   repo: s.repo,
   branch: s.branch,
   spawned: s.spawned,
+  about: s.about,
+  role: s.role,
   status: s.status,
   pr: s.pr,
   workspace
@@ -2528,7 +3226,7 @@ function hookEvents(e, session) {
 }
 
 // src/link.ts
-import { chmodSync, existsSync as existsSync4, unlinkSync } from "fs";
+import { chmodSync, existsSync as existsSync5, unlinkSync } from "fs";
 import { createConnection, createServer } from "net";
 // .claude-plugin/plugin.json
 var plugin_default = {
@@ -2638,7 +3336,7 @@ class LinkServer {
     this.handlers.held?.(this.held);
   }
   async listen() {
-    if (existsSync4(this.path)) {
+    if (existsSync5(this.path)) {
       if (await answers(this.path))
         throw new Error(`a remy daemon is already running (${this.path})`);
       unlinkSync(this.path);
@@ -2852,7 +3550,7 @@ function formatMerged(spawned) {
 // src/daemon.ts
 var log = (...a) => {
   try {
-    appendFileSync2(PATHS.log, `${new Date().toISOString()} ${a.map(String).join(" ")}
+    appendFileSync3(PATHS.log, `${new Date().toISOString()} ${a.map(String).join(" ")}
 `);
   } catch {}
 };
@@ -3030,13 +3728,13 @@ ${e.last ?? "(none)"}`, { workspace, session: s.name, cwd: e.cwd ?? "" });
 function tailEvents() {
   let offset = 0;
   try {
-    offset = statSync5(PATHS.events).size;
+    offset = statSync6(PATHS.events).size;
   } catch {}
   let partial = "";
   setInterval(() => {
     let size = 0;
     try {
-      size = statSync5(PATHS.events).size;
+      size = statSync6(PATHS.events).size;
     } catch {
       return;
     }
@@ -3087,14 +3785,19 @@ function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
 }
 function queueText(snap, workspace) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
-  const fromExtensions = host.queueEntries().flatMap((e) => {
+  const entries = host.queueEntries();
+  const claimed = new Set(entries.flatMap((e) => e.session ? [e.session] : []));
+  const fromExtensions = entries.flatMap((e) => {
+    if (e.hide)
+      return [];
     const of = e.session ? sessions.find((s) => s.name === e.session) : undefined;
     const where = e.workspace ?? (of ? workspace : undefined);
     if (where && where !== workspace)
       return [];
     return [{ session: e.label, sessionId: `extension:${e.key}`, cwd: "", rank: e.rank, why: e.why, action: e.action, pr: e.url }];
   });
-  const items = [...queueOf({ ...snap, sessions }), ...fromExtensions].sort((a, b) => a.rank - b.rank);
+  const own = queueOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
+  const items = [...own, ...fromExtensions].sort((a, b) => a.rank - b.rank);
   return formatQueue(items, sessions);
 }
 function refreshQueue(snapshot) {
@@ -3190,10 +3893,11 @@ function newHost() {
     },
     tell: (text, meta) => tell(meta.kind ?? "extension", text, meta),
     sessions: () => (lastSnapshot?.sessions ?? []).map((s) => sessionRef(s, viewWorkspace(s))),
+    config,
     queueChanged: () => scheduleQueue(1000),
     queueText: async (workspace) => queueText(await takeSnapshot(), workspace),
     log,
-    stateDir: join6(REMY_DIR, "state")
+    stateDir: join7(REMY_DIR, "state")
   });
 }
 var stopping = false;
@@ -4658,7 +5362,7 @@ ${i}
 // src/setup.ts
 import { chmodSync as chmodSync2, mkdirSync as mkdirSync4, writeFileSync as writeFileSync3 } from "fs";
 import { homedir as homedir2 } from "os";
-import { join as join7, resolve as resolve3 } from "path";
+import { join as join8, resolve as resolve3 } from "path";
 
 // src/ui.ts
 var import_picocolors = __toESM(require_picocolors(), 1);
@@ -4694,7 +5398,7 @@ async function answer(prompt) {
   return v;
 }
 var list = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
-var describe = (ws) => {
+var describe2 = (ws) => {
   const scope = [...ws.repos ?? [], ...ws.paths ?? []].join(", ") || "everything else";
   return `${describeMessengers(ws)} \xB7 ${scope}`;
 };
@@ -4748,7 +5452,7 @@ async function workspaces(c) {
     const choice = await answer(select({
       message: c.workspaces.length ? "Workspaces" : "Add your first workspace",
       options: [
-        ...c.workspaces.map((ws) => ({ value: ws.name, label: `Edit ${import_picocolors.default.bold(ws.name)}`, hint: describe(ws) })),
+        ...c.workspaces.map((ws) => ({ value: ws.name, label: `Edit ${import_picocolors.default.bold(ws.name)}`, hint: describe2(ws) })),
         { value: "+add", label: "Add a workspace" },
         ...c.workspaces.length ? [{ value: "+done", label: "Done" }] : []
       ],
@@ -4973,9 +5677,9 @@ async function pairTelegram(tg, username, workspace) {
   throw new Error(`No message reached @${username}; run \`remy setup ${workspace}\` again.`);
 }
 function installShim() {
-  const bin = join7(homedir2(), ".local", "bin");
+  const bin = join8(homedir2(), ".local", "bin");
   mkdirSync4(bin, { recursive: true });
-  const shim = join7(bin, "remy");
+  const shim = join8(bin, "remy");
   writeFileSync3(shim, `#!/bin/sh
 # Installed by \`remy setup\`. Uses the installed remy plugin, falling back to the copy setup ran from.
 root=$(bun -e 'try{const p=require(process.env.HOME+"/.claude/plugins/installed_plugins.json").plugins["remy@remy"];console.log(p?.[p.length-1]?.installPath??"")}catch{}')
@@ -4997,6 +5701,8 @@ var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, 
   ["queue [--json]", "What waits on you, most urgent first"],
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task\u2026>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
+  ["factory [--json] | factory retry <pr> | factory check [repo]", "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts"],
+  ["report <step> pass|fail|fixed --pr <url> --summary <text>", "A factory agent's verdict on its step"],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
   ["doctor", "Check requirements, tokens and scopes"],
   ["dir", "Print remy's state folder"]
@@ -5031,7 +5737,7 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
   }
   await ensureDaemon(c.repoRoots[0] ?? homedir3());
   writeJson(PATHS.mcpConfig, {
-    mcpServers: { remy: { command: process.execPath, args: [join8(ROOT2, "dist", "channel.js")] } }
+    mcpServers: { remy: { command: process.execPath, args: [join9(ROOT2, "dist", "channel.js")] } }
   });
   const cwd = c.repoRoots[0] ?? homedir3();
   const args = [
@@ -5045,7 +5751,7 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
     "--dangerously-load-development-channels",
     "server:remy",
     "--append-system-prompt-file",
-    join8(ROOT2, "coordinator.md"),
+    join9(ROOT2, "coordinator.md"),
     ...extra,
     "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention."
   ];
@@ -5081,7 +5787,7 @@ async function ensureDaemon(cwd) {
   }
   const out = openSync2(PATHS.log, "a");
   const env = { ...process.env, REMY_DAEMON_SERVICE: "0" };
-  spawn(process.execPath, [join8(ROOT2, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
+  spawn(process.execPath, [join9(ROOT2, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
   if (!await daemonWithin(15000, (s) => s.pid !== running?.pid))
     throw new Error(`the remy daemon didn't start; see ${PATHS.log}`);
   console.log(import_picocolors.default.dim(`Started the remy daemon; it keeps running after the coordinator exits (log: ${PATHS.log}).`));
@@ -5146,6 +5852,49 @@ try {
         slackTask: values["slack-task"]
       });
       console.log(JSON.stringify(r, null, 2));
+      break;
+    }
+    case "factory": {
+      const { values, positionals } = parse(args, { json: { type: "boolean" } });
+      const runs = readJson(PATHS.factory, {}).runs ?? {};
+      if (positionals[0] === "check") {
+        const c = loadConfig();
+        const root = repoRootOf(positionals[1] ? resolveRepo(positionals[1], c.repoRoots) : process.cwd());
+        const l = await loadFactory(root);
+        if (!l.mtime)
+          throw new Error(`no ${join9(root, ".remy", "factory.ts")}`);
+        if (l.error)
+          throw new Error(`${join9(root, ".remy", "factory.ts")}: ${l.error}`);
+        const f = l.factory;
+        const trusted = trustedRepos(c).some((r) => r.root === root);
+        console.log(f.steps.map((s, i) => `${i + 1}. ${s.kind} ${s.name}${"env" in s && s.env ? ` (${s.env})` : ""}`).join(`
+`));
+        console.log(`
+autonomy: ${lowerLevel(f.autonomy ?? "notify", c.autonomy)} (repo ${f.autonomy ?? "notify"}, yours ${c.autonomy})`);
+        if (!trusted)
+          console.log(import_picocolors.default.yellow(`! not in extensions.repos, so the factory doesn't run here`));
+        break;
+      }
+      if (positionals[0] === "retry") {
+        const want = positionals[1] ?? "";
+        const run = runs[want] ?? Object.values(runs).find((r) => `#${r.number}` === want || String(r.number) === want);
+        if (!run)
+          throw new Error(`usage: ${import_picocolors.default.cyan("remy factory retry <pr-url>")}; \`remy factory\` lists the PRs`);
+        appendReport({ pr: run.pr, step: "", kind: "retry" });
+        console.log(`#${run.number} runs its held step again within a minute or so.`);
+        break;
+      }
+      console.log(values.json ? JSON.stringify(runs, null, 2) : formatRuns(Object.values(runs)));
+      break;
+    }
+    case "report": {
+      const { values, positionals } = parse(args, { pr: { type: "string" }, summary: { type: "string" } });
+      const [step, verdict] = positionals;
+      const usage = `usage: ${import_picocolors.default.cyan("remy report <step> pass|fail|fixed --pr <pr-url> --summary <one line>")}`;
+      if (!step || !["pass", "fail", "fixed"].includes(verdict ?? "") || !values.summary || !/^https:\/\/github\.com\/.+\/pull\/\d+$/.test(values.pr ?? ""))
+        throw new Error(usage);
+      appendReport({ pr: values.pr, step, verdict, summary: values.summary, head: await headOf(values.pr) });
+      console.log("Recorded. Remy picks it up within a minute or so.");
       break;
     }
     case "post": {
