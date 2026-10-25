@@ -41,7 +41,7 @@ const INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel so
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
 
 const mcp = new Server(
-  { name: "remy", version: "0.8.0" },
+  { name: "remy", version: "0.9.0" },
   {
     capabilities: {
       experimental: { "claude/channel": {}, "claude/channel/permission": {} },
