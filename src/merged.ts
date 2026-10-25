@@ -1,5 +1,4 @@
-import { PATHS, readJson, writeJson } from "./config";
-import { spawnedEntry, type Change, type Snapshot, type Spawned } from "./snapshot";
+import { spawnedEntry, type Pr, type Spawned } from "./snapshot";
 
 export type Merged = { at: number; pr: string; number: number; cleanup: string };
 
@@ -10,39 +9,30 @@ const runSync: Run = (cmd) => {
   return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
 };
 
-/** Spawned agents whose PR merged and that aren't in the middle of a turn, with the id `claude rm` takes. */
-export function mergedToClose(snapshot: Snapshot, spawned: Spawned) {
-  return snapshot.sessions.flatMap((s) => {
-    const spawn = s.pr?.state === "MERGED" && s.status !== "busy" ? spawnedEntry(spawned, s.name, s.sessionId) : undefined;
-    return spawn && !spawn.merged ? [{ session: s, spawn }] : [];
-  });
+/**
+ * Close a session: `claude rm` deletes it and its worktree; when that refuses (uncommitted or unpushed work),
+ * `claude stop` ends it and the worktree stays. Returns what happened.
+ */
+export function closeSession(id: string, run: Run = runSync): string {
+  const rm = run(["claude", "rm", id]);
+  return rm.ok ? "session and worktree removed" : run(["claude", "stop", id]).ok ? `stopped; worktree kept (${rm.out})` : `not removed (${rm.out})`;
 }
 
 /**
- * Close every spawned agent whose PR merged: `claude rm` deletes the session and its worktree; when it refuses
- * (uncommitted or unpushed work), `claude stop` ends the session and the worktree stays. The spawn record is
- * marked merged, which keeps it out of `remy status`. Returns one change per closed agent.
+ * Close a session and, when it was closed because `merged` merged, mark its spawn record merged, which keeps it out of
+ * `remy status` and lists it in `remy status --merged`. `spawned` is updated in place.
  */
-export function closeMerged(snapshot: Snapshot): Change[] {
-  const spawned = readJson<Spawned>(PATHS.spawned, {});
-  const changes = closeIn(snapshot, spawned);
-  if (changes.length) writeJson(PATHS.spawned, spawned);
-  return changes;
+export function closeAndRecord(spawned: Spawned, s: { name: string; sessionId: string }, merged?: Pr, run: Run = runSync): string {
+  const spawn = spawnedEntry(spawned, s.name, s.sessionId);
+  const id = spawn?.id ?? s.sessionId;
+  const cleanup = closeSession(id, run);
+  // Pin the record to this session's id, so a later session that reuses the name isn't taken for it.
+  if (spawn && merged) Object.assign(spawn, { id, merged: { at: Date.now(), pr: merged.url, number: merged.number, cleanup } });
+  return cleanup;
 }
 
-/** `closeMerged` on a given spawn list, which it updates in place. */
-export function closeIn(snapshot: Snapshot, spawned: Spawned, run: Run = runSync): Change[] {
-  const changes: Change[] = [];
-  for (const { session: s, spawn } of mergedToClose(snapshot, spawned)) {
-    const id = spawn.id ?? s.sessionId;
-    const rm = run(["claude", "rm", id]);
-    const cleanup = rm.ok ? "session and worktree removed" : run(["claude", "stop", id]).ok ? `stopped; worktree kept (${rm.out})` : `not removed (${rm.out})`;
-    // Pin the record to this session's id, so a later session that reuses the name isn't taken for it.
-    Object.assign(spawn, { id, merged: { at: Date.now(), pr: s.pr!.url, number: s.pr!.number, cleanup } });
-    changes.push({ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what: "merged", detail: `PR #${s.pr!.number} merged; ${cleanup}`, pr: s.pr!.url });
-  }
-  return changes;
-}
+/** Whether the session is an agent Remy closed because its PR merged. */
+export const closedAsMerged = (spawned: Spawned, sessionId: string) => Object.values(spawned).some((s) => s.merged && s.id && sessionId.startsWith(s.id));
 
 export function formatMerged(spawned: Spawned): string {
   const rows = Object.entries(spawned)

@@ -78,7 +78,7 @@ Every 15 minutes you get a short note about merged PRs and ended sessions, if th
 
 Everything else is on the list.
 
-You review and merge PRs like you always do. Once an agent's PR is merged, Remy closes that agent at the next digest: `claude rm` deletes the session and its worktree, or, if the worktree still has uncommitted or unpushed work, `claude stop` ends the session and the worktree stays. The agent then counts as merged: it's left out of `remy status`, and `remy status --merged` lists it. Remy only does this for agents it started (`remy spawn`), never for sessions you started yourself, and waits while an agent is mid-turn.
+You review and merge PRs like you always do. Once an agent's PR is merged, Remy closes that agent within about a minute and tells you: `claude rm` deletes the session and its worktree, or, if the worktree still has uncommitted or unpushed work, `claude stop` ends the session and the worktree stays. The agent then counts as merged: it's left out of `remy status`, and `remy status --merged` lists it. Remy only does this for agents it started (`remy spawn`), never for sessions you started yourself, and waits while an agent is mid-turn.
 
 Telegram works the same way, in your chat with your bot. Telegram has no threads there, so each agent's messages come as a reply chain: reply to any of them to talk to that agent. Right after an agent asks you something, a plain message works too. When the coordinator itself needs a permission, you get Allow / Deny buttons.
 
@@ -99,7 +99,8 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | Plugin hook (`UserPromptSubmit`) | Names a session that has no name yet after a dish or ingredient (`src/kitchen-names.ts`), on its first prompt, and keeps that prompt in `~/.remy/nicknames.json` as what the session is about |
 | `remy status` | Joins `claude agents --json`, each session's git branch and `gh pr view` |
 | `src/queue.ts` | Ranks what waits on you from that snapshot; the daemon keeps it as one message per workspace (`~/.remy/queue.json`) |
-| `remy daemon` (`src/daemon.ts`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, posts the merged/ended notices itself (`src/notices.ts`), closes merged agents and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
+| `remy daemon` (`src/daemon.ts`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, posts the merged/ended notices itself (`src/notices.ts`), runs extensions and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
+| `src/extensions/` | The extension API (`api.ts`), the host that runs extensions in the daemon, and the built-in ones: closing merged agents, Slack-thread tasks, `/queue` |
 | `remy` channel (`src/channel.ts`) | Runs inside the coordinator session only. A thin client of the daemon over `~/.remy/daemon.sock` (`src/link.ts`): pushes the daemon's events into the session and gives Claude `post` / `update` |
 | `src/bridges.ts` | Picks the Slack or Telegram bridge for each workspace; both implement `Messenger` (`src/messenger.ts`) |
 | `src/slack-bridge.ts` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in (`src/watch.ts`) |
@@ -275,6 +276,10 @@ From a terminal: `remy status` (`remy status <name>` for one session in detail, 
 | `coordinatorName` | `remy` | Session name of the coordinator |
 | `coordinatorCompactPct` | `50` | Context-window percentage (1–100) at which the coordinator compacts; `0` keeps Claude Code's default, and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` set in your shell wins |
 | `triggerEmoji` | `mouse` | Reacting with this emoji (Slack name) starts a task, like a mention |
+| `tickSeconds` | `60` | Seconds between looks at the sessions and their PRs, which raise extension events |
+| `extensions.repos` | `[]` | Repos whose `.remy/extensions` run in your daemon: paths, or names under `repoRoots` |
+| `extensions.packages` | `[]` | Extension packages installed in `~/.remy` |
+| `extensions.disabled` | `[]` | Extensions not to load, by name, built-in ones included |
 
 Each workspace:
 
@@ -311,6 +316,50 @@ Leave out both `repos` and `paths` for the catch-all workspace. Configs from bef
 Each workspace with Telegram needs a bot of its own (`remy doctor` flags two sharing one), so the example above uses two bots.
 
 A path covers the folder and everything inside it, not sibling folders that share its prefix, so prefer `repos` when worktrees sit next to the main checkout. Tokens can also come from `REMY_SLACK_BOT_TOKEN_<WORKSPACE>`, `REMY_SLACK_APP_TOKEN_<WORKSPACE>` and `REMY_TELEGRAM_BOT_TOKEN_<WORKSPACE>`.
+
+## Extensions
+
+Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/builtin/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, and `queue` answers `/queue`. Turn one off with `extensions.disabled` and write your own instead.
+
+```ts
+// ~/.remy/extensions/red-ci.ts
+import type { Remy } from "<remy plugin folder>/src/extensions/api";
+
+export default (remy: Remy) => {
+  remy.on("pr.ci", async ({ session, pr }) => {
+    if (pr.ci === "fail" && session.spawned) await remy.post(`🟠 *${session.name}*: CI failed on <${pr.url}|#${pr.number}>`, { session: session.name });
+  });
+  remy.registerCommand("standup", { description: "What my agents did today", run: () => remy.sessions().map((s) => s.name).join(", ") });
+};
+```
+
+| Events | |
+|---|---|
+| `session.started`, `session.asks`, `session.stopped`, `session.ended` | A session appeared, waits for you (a question, or blocked on input), ended its turn, is gone |
+| `pr.opened`, `pr.ready`, `pr.ci`, `pr.merged` | A session's PR opened, left draft, finished CI (pass or fail), merged |
+| `message` | You wrote in a workspace, or started a task from a Slack thread |
+| `tick` | Every `tickSeconds`, after Remy looked at the sessions again |
+
+| Actions | |
+|---|---|
+| `post(text, { workspace, session, thread })` | Post to you |
+| `ask(question, { session })` | Ask you and wait: it's on the waiting list until you reply in its thread, and the reply goes to the extension, not the coordinator |
+| `spawn({ repo, task })`, `close(session)` | Start an agent, close a session |
+| `queue.add(entry)`, `queue.remove(key)`, `queue.text(workspace)` | Put something on the waiting list, take it off, read the list |
+| `coordinator.tell(text)` | Hand something to the coordinator for a turn |
+| `registerCommand(name, { description, run })` | Answer `/name` in any workspace, without the coordinator |
+| `state.get` / `state.set` | A small JSON store of the extension's own (`~/.remy/state/`) |
+| `sessions()`, `log(…)` | Sessions as last seen; write to the daemon's log |
+
+Extensions load from three places:
+
+| Folder | Whose |
+|---|---|
+| `~/.remy/extensions/` | yours: each `*.ts` file, or folder with an `index.ts` |
+| `<repo>/.remy/extensions/` | the team's, versioned with the code; only for repos listed in `extensions.repos` |
+| packages in `extensions.packages` | anyone's; install them with `cd ~/.remy && bun add <package>` |
+
+An extension runs in the daemon with your tokens and can post, start agents and close them. Installing one is a trust decision, like adding a dependency with write access, which is why a repo's extensions run only once you list the repo. `remy doctor` shows which extensions loaded and why any failed; restart the daemon after adding or changing one (`remy daemon stop`, then `remy start`, or restart its service).
 
 ## Limits
 

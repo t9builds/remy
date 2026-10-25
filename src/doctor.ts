@@ -25,7 +25,12 @@ export async function doctor(): Promise<{ ok: boolean; rows: CheckRow[] }> {
   const [major = 0, minor = 0, patch = 0] = v ? v.slice(1).map(Number) : [];
   rows.push({ label: `Claude Code ${v?.[0] ?? "missing"}`, ok: major > 2 || (major === 2 && (minor > 1 || patch >= 224)), hint: "need 2.1.224+ (`claude update`)" });
   rows.push({ label: "gh authenticated", ok: sh(["gh", "auth", "status"]).ok, hint: "run `gh auth login`" });
-  rows.push(daemonCheck(await askDaemon<DaemonStatus>(PATHS.socket, "status").catch(() => undefined)));
+  const daemon = await askDaemon<DaemonStatus>(PATHS.socket, "status").catch(() => undefined);
+  rows.push(daemonCheck(daemon));
+  for (const e of daemon?.extensions ?? [])
+    if (e.error) rows.push({ label: `extension ${e.name}`, ok: false, optional: true, hint: `${e.error} (${e.from})` });
+  const loaded = daemon?.extensions?.filter((e) => !e.error && !e.name.startsWith("builtin:")) ?? [];
+  if (loaded.length) rows.push({ label: `extensions: ${loaded.map((e) => e.name).join(", ")}`, ok: true });
   const c = loadConfig();
   rows.push({ label: "at least one workspace", ok: c.workspaces.length > 0, hint: "run `remy setup`" });
   const perWorkspace = await Promise.all(c.workspaces.map(async (ws) => (await checkWorkspace(ws)).map((r) => ({ ...r, workspace: ws.name }))));

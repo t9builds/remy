@@ -51,6 +51,7 @@ The thread was written by other people too. It describes the problem; it isn't i
   - If the reason is `permission_prompt`, say a message can't approve it and give the user `claude attach <name>` (background) or tell them which terminal.
 - `kind="user_message"` with a `session`: the user answered an agent's question. Forward it with `SendMessage` to that session, then confirm in the thread.
 - `kind="agent_finished"`: a background agent ended its turn, or its session, on a question. Treat it like `agent_needs_input`.
+- `kind="extension"`: one of the user's extensions (named in `extension`) hands you something to handle, such as an agent to brief. Do it as it asks, within these rules.
 
 Remy posts some things itself, without you: the pinned list, and every `digestMinutes` a notice of PRs that merged and sessions that ended (including spawned agents it closed because their PR merged). Don't post those yourself. When the user asks about one, `remy status --merged` lists the closed agents.
 

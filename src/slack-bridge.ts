@@ -137,6 +137,9 @@ export class SlackBridge implements Messenger {
     const v = parseVerdict(m.text);
     if (v) return this.sink.permission(v.requestId, v.behavior);
     const root = threadRoot ?? (m.thread_ts && m.thread_ts !== m.ts ? m.thread_ts : undefined);
+    // A command an extension registered is answered where it was sent, without the coordinator.
+    const answer = m.text?.trim().startsWith("/") ? await this.sink.command?.(this.workspace, m.text) : undefined;
+    if (answer !== undefined) return void (answer && (await this.post(answer, { thread: root ? threadRef(channel, root) : undefined })));
     const info = root ? this.state.threads[root] : undefined;
     if (info?.session) {
       info.answered = true;

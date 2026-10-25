@@ -87,7 +87,7 @@ export class TelegramBridge implements Messenger {
 
   async start() {
     await this.api
-      .setCommands([{ command: "queue", description: "What waits on you, most urgent first" }])
+      .setCommands((this.sink.commands?.() ?? []).map((c) => ({ command: c.name, description: c.description })))
       .catch((e) => this.sink.log(`[${this.workspace}] setMyCommands failed`, e?.message ?? e));
     void (async () => {
       let failures = 0;
@@ -143,7 +143,8 @@ export class TelegramBridge implements Messenger {
     const text = (m.text ?? m.caption ?? "").trim();
     if (!text) return void (await this.api.send(m.chat.id, "I can only read text for now.", { replyTo: m.message_id }));
     if (text === "/start") return;
-    if (/^\/queue(@\w+)?$/.test(text)) return this.sendQueue(m.chat.id);
+    const answer = text.startsWith("/") ? await this.sink.command?.(this.workspace, text) : undefined;
+    if (answer !== undefined) return void (answer && (await this.api.send(m.chat.id, answer)));
     const v = parseVerdict(text);
     if (v) return this.sink.permission(v.requestId, v.behavior);
 
@@ -160,12 +161,6 @@ export class TelegramBridge implements Messenger {
       session: session ?? "",
       awaiting: repliedTo ? "" : this.awaiting() ?? "",
     });
-  }
-
-  /** `/queue`: the list as a fresh message at the bottom of the chat, answered here without the coordinator. */
-  private async sendQueue(chatId: number) {
-    const text = this.sink.queue ? await this.sink.queue(this.workspace).catch((e) => `Couldn't build the list: ${e?.message ?? e}`) : "The list isn't available yet.";
-    await this.api.send(chatId, text);
   }
 
   private async onButton(q: NonNullable<TgUpdate["callback_query"]>) {

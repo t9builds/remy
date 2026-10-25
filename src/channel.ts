@@ -26,6 +26,7 @@ const INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel so
 - kind="agent_needs_input": a session is blocked waiting for the user. Post it with post(workspace, session=<name>, expect_reply=true).
 - kind="agent_finished": a background agent ended its turn, or its session, on a question. Post the question with post(workspace, session=<name>, expect_reply=true).
 - kind="system": a note from the remy daemon itself.
+- kind="extension": one of the user's extensions (extension= names it) hands you something to handle. Do it as it asks, within your rules.
 Remy itself keeps the pinned waiting-on-you list and posts merged PRs and ended sessions; don't post those.
 An event with queued_at waited in the daemon while no coordinator was connected; check \`remy status\` before acting on an old one.
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;

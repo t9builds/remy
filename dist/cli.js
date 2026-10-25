@@ -166,7 +166,7 @@ var require_picocolors = __commonJS(function(exports, module) {
 import { spawn } from "child_process";
 import { openSync as openSync2 } from "fs";
 import { homedir as homedir3 } from "os";
-import { join as join5, resolve as resolve4 } from "path";
+import { join as join8, resolve as resolve4 } from "path";
 import { parseArgs } from "util";
 
 // src/config.ts
@@ -210,7 +210,8 @@ var DEFAULTS = {
   digestMinutes: 15,
   coordinatorName: "remy",
   coordinatorCompactPct: 50,
-  triggerEmoji: "mouse"
+  triggerEmoji: "mouse",
+  tickSeconds: 60
 };
 function compactPct(value) {
   const n = Number(value);
@@ -937,6 +938,9 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true }
     if (v)
       return this.sink.permission(v.requestId, v.behavior);
     const root = threadRoot ?? (m.thread_ts && m.thread_ts !== m.ts ? m.thread_ts : undefined);
+    const answer = m.text?.trim().startsWith("/") ? await this.sink.command?.(this.workspace, m.text) : undefined;
+    if (answer !== undefined)
+      return void (answer && await this.post(answer, { thread: root ? threadRef(channel, root) : undefined }));
     const info = root ? this.state.threads[root] : undefined;
     if (info?.session) {
       info.answered = true;
@@ -1340,7 +1344,7 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
     });
   }
   async start() {
-    await this.api.setCommands([{ command: "queue", description: "What waits on you, most urgent first" }]).catch((e) => this.sink.log(`[${this.workspace}] setMyCommands failed`, e?.message ?? e));
+    await this.api.setCommands((this.sink.commands?.() ?? []).map((c) => ({ command: c.name, description: c.description }))).catch((e) => this.sink.log(`[${this.workspace}] setMyCommands failed`, e?.message ?? e));
     (async () => {
       let failures = 0;
       for (;; ) {
@@ -1391,8 +1395,9 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
       return void await this.api.send(m.chat.id, "I can only read text for now.", { replyTo: m.message_id });
     if (text === "/start")
       return;
-    if (/^\/queue(@\w+)?$/.test(text))
-      return this.sendQueue(m.chat.id);
+    const answer = text.startsWith("/") ? await this.sink.command?.(this.workspace, text) : undefined;
+    if (answer !== undefined)
+      return void (answer && await this.api.send(m.chat.id, answer));
     const v = parseVerdict(text);
     if (v)
       return this.sink.permission(v.requestId, v.behavior);
@@ -1409,10 +1414,6 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
       session: session ?? "",
       awaiting: repliedTo ? "" : this.awaiting() ?? ""
     });
-  }
-  async sendQueue(chatId) {
-    const text = this.sink.queue ? await this.sink.queue(this.workspace).catch((e) => `Couldn't build the list: ${e?.message ?? e}`) : "The list isn't available yet.";
-    await this.api.send(chatId, text);
   }
   async onButton(q) {
     const [kind, behavior, requestId] = (q.data ?? "").split(":");
@@ -1510,306 +1511,181 @@ async function openWorkspaces(workspaces, sink, opts) {
 var quietSink = { push: async () => {}, permission: async () => {}, log: () => {} };
 
 // src/daemon.ts
-import { appendFileSync as appendFileSync2, openSync, readSync, closeSync, statSync as statSync3, unlinkSync as unlinkSync2 } from "fs";
+import { appendFileSync as appendFileSync2, openSync, readSync, closeSync, statSync as statSync5, unlinkSync as unlinkSync2 } from "fs";
+import { join as join6 } from "path";
 
-// src/link.ts
-import { chmodSync, existsSync as existsSync2, unlinkSync } from "fs";
-import { createConnection, createServer } from "net";
-// .claude-plugin/plugin.json
-var plugin_default = {
-  name: "remy",
-  displayName: "Remy",
-  version: "0.11.0",
-  description: "A coordinator session that tracks all your Claude Code sessions and their PRs and talks to you through Slack or Telegram.",
-  author: { name: "Tomas Svatek" },
-  repository: "https://github.com/t9builds/remy",
-  license: "MIT",
-  keywords: ["coordinator", "slack", "telegram", "sessions", "agents"]
-};
+// src/extensions/host.ts
+import { existsSync as existsSync2, mkdirSync as mkdirSync3, readdirSync, statSync as statSync2 } from "fs";
+import { join as join3 } from "path";
+var COMMAND = /^\/([a-z][\w-]*)(?:@\w+)?(?:\s+([\s\S]*))?$/i;
 
-// src/link.ts
-var VERSION = plugin_default.version;
-var RESTART_EXIT = 75;
-var HOLD_MAX = 500;
-function readLines(socket, onMessage) {
-  let partial = "";
-  socket.setEncoding("utf8");
-  socket.on("data", (chunk) => {
-    const lines = (partial + chunk).split(`
-`);
-    partial = lines.pop() ?? "";
-    for (const l of lines) {
-      if (!l)
-        continue;
-      let m;
-      try {
-        m = JSON.parse(l);
-      } catch {
-        continue;
-      }
-      onMessage(m);
+class ExtensionHost {
+  deps;
+  loaded = [];
+  handlers = new Map;
+  commands = new Map;
+  entries = new Map;
+  asks = new Map;
+  constructor(deps) {
+    this.deps = deps;
+  }
+  async load(name, from, ext) {
+    if (this.loaded.some((l) => l.name === name)) {
+      this.loaded.push({ name, from, error: `an extension named "${name}" is already loaded` });
+      return;
     }
-  });
-}
-var send = (socket, m) => {
-  if (!socket.destroyed)
-    socket.write(JSON.stringify(m) + `
-`);
-};
-function coordinatorTools(working) {
-  return [
-    {
-      name: "post",
-      description: "Send the user a message in a workspace: their Slack DM with the bot (or a Slack channel thread), or their Telegram chat. Returns the message id.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
-          workspace: { type: "string", description: `Workspace from the event tag. Working: ${working || "none"}` },
-          thread: { type: "string", description: "Answer in this thread: thread or id from the event tag, or an id post returned" },
-          session: {
-            type: "string",
-            description: "Agent session this message is about; the user's replies come back tagged with it. For an agent started from a Slack channel thread, leave thread out: the message goes to that thread."
-          },
-          expect_reply: { type: "boolean", description: "A question: watch for the user's answer" }
-        },
-        required: ["text"]
-      }
-    },
-    {
-      name: "update",
-      description: "Edit a message the bot posted earlier.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "The id post returned" },
-          text: { type: "string" },
-          workspace: { type: "string" }
-        },
-        required: ["id", "text"]
-      }
-    }
-  ];
-}
-function answers(path, timeoutMs = 1000) {
-  return new Promise((resolve) => {
-    const s = createConnection(path);
-    const done = (ok) => (s.destroy(), resolve(ok));
-    s.setTimeout(timeoutMs, () => done(false));
-    s.on("connect", () => done(true));
-    s.on("error", () => done(false));
-  });
-}
-
-class LinkServer {
-  path;
-  handlers;
-  server;
-  coordinator;
-  held = [];
-  constructor(path, handlers) {
-    this.path = path;
-    this.handlers = handlers;
-  }
-  get connected() {
-    return !!this.coordinator;
-  }
-  get heldEvents() {
-    return this.held;
-  }
-  hold(events) {
-    this.held.unshift(...events);
-    this.held.splice(0, Math.max(0, this.held.length - HOLD_MAX));
-    this.handlers.held?.(this.held);
-  }
-  async listen() {
-    if (existsSync2(this.path)) {
-      if (await answers(this.path))
-        throw new Error(`a remy daemon is already running (${this.path})`);
-      unlinkSync(this.path);
-    }
-    this.server = createServer((s) => this.accept(s));
-    await new Promise((resolve, reject) => {
-      this.server.once("error", reject);
-      this.server.listen(this.path, () => resolve());
-    });
-    chmodSync(this.path, 384);
-  }
-  close() {
-    this.coordinator?.destroy();
-    this.server?.close();
     try {
-      unlinkSync(this.path);
-    } catch {}
-  }
-  push(event) {
-    if (this.coordinator)
-      return send(this.coordinator, { type: "event", event });
-    this.held.push({ ...event, meta: { ...event.meta, queued_at: new Date().toISOString() } });
-    if (this.held.length > HOLD_MAX)
-      this.handlers.log("link: dropped held event", this.held.shift().kind);
-    this.handlers.held?.(this.held);
-  }
-  permission(request_id, behavior) {
-    if (this.coordinator)
-      send(this.coordinator, { type: "permission", request_id, behavior });
-    else
-      this.handlers.log("link: permission verdict with no coordinator", request_id);
-  }
-  accept(socket) {
-    socket.on("error", (e) => this.handlers.log("link: socket error", e.message));
-    socket.on("close", () => {
-      if (this.coordinator !== socket)
-        return;
-      this.coordinator = undefined;
-      this.handlers.log("link: coordinator disconnected");
-    });
-    readLines(socket, (m) => {
-      if (m.type === "hello")
-        return void this.hello(socket);
-      if (m.type === "permission_request")
-        return void this.handlers.permissionRequest(m.params).catch((e) => this.handlers.log("link: permission request failed", e?.message ?? e));
-      if (m.type === "request")
-        this.handlers.request(m.request, m.args).then((result) => send(socket, { type: "response", id: m.id, result }), (e) => send(socket, { type: "response", id: m.id, error: String(e?.message ?? e) }));
-    });
-  }
-  async hello(socket) {
-    const greeting = await this.handlers.greeting?.().catch(() => []) ?? [];
-    if (socket.destroyed)
-      return;
-    if (this.coordinator && this.coordinator !== socket) {
-      this.handlers.log("link: a newer coordinator connected; closing the old one");
-      this.coordinator.end(JSON.stringify({ type: "replaced" }) + `
-`);
+      await ext(this.api(name));
+      this.loaded.push({ name, from });
+    } catch (e) {
+      this.forget(name);
+      this.loaded.push({ name, from, error: String(e?.message ?? e) });
+      this.deps.log(`extension ${name} failed to load:`, e?.message ?? e);
     }
-    this.coordinator = socket;
-    const held = this.held;
-    this.held = [];
-    this.handlers.log("link: coordinator connected", held.length ? `delivering ${held.length} held` : "");
-    for (const event of [...greeting, ...held])
-      send(socket, { type: "event", event });
-    if (held.length)
-      this.handlers.held?.(this.held);
   }
-}
-
-class LinkClient {
-  path;
-  handlers;
-  retryMs;
-  socket;
-  nextId = 1;
-  pending = new Map;
-  closed = false;
-  constructor(path, handlers, retryMs = 2000) {
-    this.path = path;
-    this.handlers = handlers;
-    this.retryMs = retryMs;
+  async emit(event, payload) {
+    const hs = this.handlers.get(event) ?? [];
+    await Promise.all(hs.map(async (h) => {
+      try {
+        await h.fn(payload);
+      } catch (e) {
+        this.deps.log(`extension ${h.ext} failed on ${event}:`, e?.message ?? e);
+      }
+    }));
   }
-  get connected() {
-    return !!this.socket;
-  }
-  start() {
-    this.connect();
-    return this;
-  }
-  async connectedWithin(ms) {
-    for (const until = Date.now() + ms;!this.socket && Date.now() < until; )
-      await Bun.sleep(50);
-    return this.connected;
-  }
-  close() {
-    this.closed = true;
-    this.socket?.destroy();
-  }
-  connect() {
-    if (this.closed)
+  async command(text, ctx) {
+    const m = COMMAND.exec(text.trim());
+    const c = m && this.commands.get(m[1].toLowerCase());
+    if (!c)
       return;
-    const s = createConnection(this.path);
-    s.on("connect", () => {
-      this.socket = s;
-      send(s, { type: "hello" });
-      this.handlers.state?.(true);
-    });
-    s.on("error", () => {});
-    s.on("close", () => {
-      const wasUp = this.socket === s;
-      if (wasUp)
-        this.socket = undefined;
-      for (const p of this.pending.values())
-        p.reject(new Error("the remy daemon went away"));
-      this.pending.clear();
-      if (wasUp)
-        this.handlers.state?.(false);
-      if (!this.closed)
-        setTimeout(() => this.connect(), this.retryMs);
-    });
-    readLines(s, (m) => {
-      if (m.type === "event")
-        return void Promise.resolve(this.handlers.event(m.event)).catch((e) => this.handlers.log("link: event failed", e?.message ?? e));
-      if (m.type === "permission")
-        return void Promise.resolve(this.handlers.permission(m.request_id, m.behavior)).catch(() => {});
-      if (m.type === "replaced") {
-        this.closed = true;
-        return this.handlers.replaced?.();
-      }
-      if (m.type === "response") {
-        const p = this.pending.get(m.id);
-        this.pending.delete(m.id);
-        if (m.error !== undefined)
-          p?.reject(new Error(m.error));
-        else
-          p?.resolve(m.result);
-      }
-    });
+    try {
+      return await c.command.run((m[2] ?? "").trim(), ctx) ?? "";
+    } catch (e) {
+      this.deps.log(`extension ${c.ext} failed on /${m[1]}:`, e?.message ?? e);
+      return `/${m[1]} failed: ${e?.message ?? e}`;
+    }
   }
-  request(request, args, timeoutMs = 60000) {
-    const s = this.socket;
-    if (!s)
-      return Promise.reject(new Error("the remy daemon isn't running"));
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`the remy daemon didn't answer within ${timeoutMs / 1000} s`));
-      }, timeoutMs);
-      const settle = (fn) => (clearTimeout(timer), fn());
-      this.pending.set(id, { resolve: (v) => settle(() => resolve(v)), reject: (e) => settle(() => reject(e)) });
-      send(s, { type: "request", id, request, args });
-    });
+  commandList() {
+    return [...this.commands].map(([name, c]) => ({ name, description: c.command.description }));
   }
-  permissionRequest(params) {
-    if (!this.socket)
+  answer(session, text) {
+    const a = this.asks.get(session);
+    if (!a)
       return false;
-    send(this.socket, { type: "permission_request", params });
+    this.asks.delete(session);
+    this.entries.delete(`${a.ext}\x00ask:${session}`);
+    this.deps.queueChanged();
+    a.resolve(text);
     return true;
   }
-}
-function askDaemon(path, request, args, timeoutMs = 5000) {
-  return new Promise((resolve, reject) => {
-    const s = createConnection(path);
-    let settled = false;
-    const done = (fn) => {
-      if (settled)
-        return;
-      settled = true;
-      s.destroy();
-      fn();
+  queueEntries() {
+    return [...this.entries.values()].map(({ ext, ...e }) => e);
+  }
+  forget(ext) {
+    for (const [event, hs] of this.handlers)
+      this.handlers.set(event, hs.filter((h) => h.ext !== ext));
+    for (const [name, c] of this.commands)
+      if (c.ext === ext)
+        this.commands.delete(name);
+  }
+  api(ext) {
+    const deps = this.deps;
+    const statePath = join3(deps.stateDir, `${ext.replace(/[^\w.-]+/g, "_")}.json`);
+    const addEntry = (e) => {
+      this.entries.set(`${ext}\x00${e.key}`, { ...e, ext });
+      deps.queueChanged();
     };
-    s.setTimeout(timeoutMs, () => done(() => resolve(undefined)));
-    s.on("error", () => done(() => resolve(undefined)));
-    s.on("close", () => done(() => resolve(undefined)));
-    s.on("connect", () => send(s, { type: "request", id: 1, request, args }));
-    readLines(s, (m) => {
-      if (m.type !== "response")
-        return;
-      done(() => m.error !== undefined ? reject(new Error(m.error)) : resolve(m.result));
-    });
-  });
+    return {
+      name: ext,
+      on: (event, fn) => {
+        this.handlers.set(event, [...this.handlers.get(event) ?? [], { ext, fn }]);
+      },
+      post: (text, opts = {}) => deps.post(text, opts),
+      ask: async (question, opts) => {
+        if (this.asks.has(opts.session))
+          throw new Error(`"${opts.session}" already waits for an answer`);
+        const answer = new Promise((resolve) => this.asks.set(opts.session, { ext, resolve }));
+        const key = `ask:${opts.session}`;
+        addEntry({ key, rank: 0, label: opts.session, why: `asks: "${question.split(`
+`)[0].slice(0, 100)}"`, action: "reply to its thread", session: opts.session, workspace: opts.workspace });
+        try {
+          await deps.post(question, { ...opts, expect_reply: true });
+        } catch (e) {
+          this.asks.delete(opts.session);
+          this.entries.delete(`${ext}\x00${key}`);
+          deps.queueChanged();
+          throw e;
+        }
+        return answer;
+      },
+      spawn: (opts) => deps.spawn(opts),
+      close: (session, opts) => deps.close(session, opts),
+      queue: {
+        add: addEntry,
+        remove: (key) => {
+          if (this.entries.delete(`${ext}\x00${key}`))
+            deps.queueChanged();
+        },
+        text: (workspace) => deps.queueText(workspace)
+      },
+      coordinator: { tell: (text, meta = {}) => deps.tell(text, { kind: "extension", ...meta, extension: ext }) },
+      registerCommand: (name, command) => {
+        const key = name.toLowerCase().replace(/^\//, "");
+        const taken = this.commands.get(key);
+        if (taken)
+          throw new Error(`/${key} is already registered by ${taken.ext}`);
+        this.commands.set(key, { ext, command });
+      },
+      state: {
+        get: (key, fallback) => readJson(statePath, {})[key] ?? fallback,
+        set: (key, value) => {
+          mkdirSync3(deps.stateDir, { recursive: true, mode: 448 });
+          writeJson(statePath, { ...readJson(statePath, {}), [key]: value });
+        },
+        delete: (key) => {
+          const all = readJson(statePath, {});
+          if (!(key in all))
+            return;
+          delete all[key];
+          writeJson(statePath, all);
+        }
+      },
+      sessions: () => deps.sessions(),
+      log: (...a) => deps.log(`[${ext}]`, ...a)
+    };
+  }
+}
+function discover(dir) {
+  if (!existsSync2(dir))
+    return [];
+  const out = [];
+  for (const entry of readdirSync(dir).sort()) {
+    if (entry.startsWith(".") || entry.endsWith(".d.ts") || /\.test\.[jt]s$/.test(entry))
+      continue;
+    const path = join3(dir, entry);
+    if (statSync2(path).isDirectory()) {
+      const index = ["index.ts", "index.js"].map((f) => join3(path, f)).find(existsSync2);
+      if (index)
+        out.push({ name: entry, path: index });
+    } else if (/\.[jt]s$/.test(entry))
+      out.push({ name: entry.replace(/\.[jt]s$/, ""), path });
+  }
+  return out;
+}
+async function importExtension(path) {
+  const mod = await import(path);
+  const ext = mod.default ?? mod;
+  if (typeof ext !== "function")
+    throw new Error("it must export default (remy) => { \u2026 }");
+  return ext;
 }
 
-// src/hook.ts
-import { appendFileSync, statSync as statSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
+// src/extensions/load.ts
+import { basename as basename2, join as join5 } from "path";
+
+// src/spawn.ts
+import { existsSync as existsSync3, statSync as statSync4 } from "fs";
+import { basename, join as join4, resolve as resolve2 } from "path";
 
 // src/kitchen-names.ts
 var KITCHEN_NAMES = [
@@ -2047,6 +1923,7 @@ async function nameSession(input, live) {
 }
 
 // src/hook.ts
+import { appendFileSync, statSync as statSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
 var MAX_BYTES = 5 * 1024 * 1024;
 var KEEP_LINES = 2000;
 async function runHook() {
@@ -2092,7 +1969,7 @@ function trim(s, n) {
 }
 function rotate() {
   try {
-    if (statSync2(PATHS.events).size < MAX_BYTES)
+    if (statSync3(PATHS.events).size < MAX_BYTES)
       return;
     const lines = readFileSync2(PATHS.events, "utf8").trimEnd().split(`
 `);
@@ -2305,41 +2182,69 @@ function formatSession(x, now = Date.now(), paint = PLAIN) {
 `);
 }
 
-// src/merged.ts
-var runSync = (cmd) => {
-  const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
-  return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
-};
-function mergedToClose(snapshot, spawned) {
-  return snapshot.sessions.flatMap((s) => {
-    const spawn = s.pr?.state === "MERGED" && s.status !== "busy" ? spawnedEntry(spawned, s.name, s.sessionId) : undefined;
-    return spawn && !spawn.merged ? [{ session: s, spawn }] : [];
-  });
-}
-function closeMerged(snapshot) {
-  const spawned = readJson(PATHS.spawned, {});
-  const changes = closeIn(snapshot, spawned);
-  if (changes.length)
-    writeJson(PATHS.spawned, spawned);
-  return changes;
-}
-function closeIn(snapshot, spawned, run = runSync) {
-  const changes = [];
-  for (const { session: s, spawn } of mergedToClose(snapshot, spawned)) {
-    const id = spawn.id ?? s.sessionId;
-    const rm = run(["claude", "rm", id]);
-    const cleanup = rm.ok ? "session and worktree removed" : run(["claude", "stop", id]).ok ? `stopped; worktree kept (${rm.out})` : `not removed (${rm.out})`;
-    Object.assign(spawn, { id, merged: { at: Date.now(), pr: s.pr.url, number: s.pr.number, cleanup } });
-    changes.push({ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what: "merged", detail: `PR #${s.pr.number} merged; ${cleanup}`, pr: s.pr.url });
+// src/spawn.ts
+function resolveRepo(repo, roots) {
+  const direct = resolve2(repo.replace(/^~(?=\/)/, process.env.HOME ?? "~"));
+  if (existsSync3(join4(direct, ".git")))
+    return direct;
+  for (const root of roots) {
+    const p = join4(root, repo);
+    if (existsSync3(p) && statSync4(p).isDirectory() && existsSync3(join4(p, ".git")))
+      return p;
   }
-  return changes;
+  throw new Error(`No git repo "${repo}" (checked it as a path and under ${roots.join(", ")})`);
 }
-function formatMerged(spawned) {
-  const rows = Object.entries(spawned).filter(([, s]) => s.merged).sort(([, a], [, b]) => b.merged.at - a.merged.at);
-  if (!rows.length)
-    return "No merged agents.";
-  return rows.map(([name, s]) => `${name} \xB7 ${s.label ?? s.repo} \xB7 PR #${s.merged.number} merged ${new Date(s.merged.at).toLocaleString()} \xB7 ${s.merged.cleanup} ${s.merged.pr}`).join(`
-`);
+var SESSION_ENV = new Set([
+  "REMY_ROLE",
+  "CLAUDECODE",
+  "CLAUDE_PID",
+  "CLAUDE_EFFORT",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN"
+]);
+function slug(s) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+}
+async function spawnAgent(opts) {
+  const config = loadConfig();
+  const cwd = resolveRepo(opts.repo, config.repoRoots);
+  const live = (await listAgents()).map((a) => a.name);
+  const taken = takenNames(live, readJson(PATHS.nicknames, {}), readJson(PATHS.spawned, {}));
+  let name = opts.name ? slug(opts.name) : pickNickname(taken);
+  for (let i = 2;taken.has(name); i++)
+    name = `${slug(opts.name)}-${i}`;
+  let label = slug(`${basename(cwd)}-${opts.task.split(/\s+/).slice(0, 4).join(" ")}`);
+  const base = label;
+  for (let i = 2;existsSync3(join4(cwd, ".claude", "worktrees", label)); i++)
+    label = `${base}-${i}`;
+  const slack = opts.slackTask ? loadTask(opts.slackTask) : undefined;
+  const prompt = config.spawnTemplate.replaceAll("{task}", slack ? taskPrompt(slack, opts.task) : opts.task);
+  const worktree = opts.worktree ?? config.spawnWorktree;
+  const cmd = ["claude", "--bg", "-n", name, "--permission-mode", opts.permissionMode ?? config.spawnPermissionMode];
+  if (worktree)
+    cmd.push("-w", label);
+  cmd.push(prompt);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_ENV.has(k)));
+  const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env });
+  const out = (r.stdout.toString() + r.stderr.toString()).trim();
+  if (r.exitCode !== 0)
+    throw new Error(`claude --bg failed (${r.exitCode}): ${out}`);
+  const id = out.match(/\b([0-9a-f]{6,}(?:-[0-9a-f-]+)?)\b/i)?.[1];
+  const spawned = readJson(PATHS.spawned, {});
+  spawned[name] = {
+    id,
+    repo: cwd,
+    label,
+    task: opts.task,
+    startedAt: Date.now(),
+    slack: slack && { workspace: slack.workspace, channel: slack.channel, threadTs: slack.threadTs, task: slack.id }
+  };
+  writeJson(PATHS.spawned, spawned);
+  return { name, label, id, cwd, worktree, output: out };
 }
 
 // src/notices.ts
@@ -2366,6 +2271,99 @@ function formatNotice(changes) {
   const lines = changes.filter(noticeWorthy).map(line);
   return lines.length ? lines.join(`
 `) : undefined;
+}
+
+// src/extensions/builtin/merged-cleanup.ts
+var shouldClose = (s) => s.spawned && s.pr?.state === "MERGED" && s.status !== "busy";
+function mergedCleanup(remy) {
+  const closing = new Set;
+  const closeIfMerged = async (s) => {
+    if (!shouldClose(s) || closing.has(s.sessionId))
+      return;
+    closing.add(s.sessionId);
+    try {
+      const pr = s.pr;
+      const cleanup = await remy.close(s.name, { merged: pr });
+      const text = formatNotice([{ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what: "merged", detail: `PR #${pr.number} merged; ${cleanup}`, pr: pr.url }]);
+      if (text)
+        await remy.post(text, { workspace: s.workspace });
+    } finally {
+      closing.delete(s.sessionId);
+    }
+  };
+  remy.on("pr.merged", ({ session }) => closeIfMerged(session));
+  remy.on("tick", async () => void await Promise.all(remy.sessions().map(closeIfMerged)));
+}
+
+// src/extensions/builtin/queue-command.ts
+function queueCommand(remy) {
+  remy.registerCommand("queue", { description: "What waits on you, most urgent first", run: (_, ctx) => remy.queue.text(ctx.workspace) });
+}
+
+// src/extensions/builtin/slack-tasks.ts
+function slackTasks(remy) {
+  remy.on("message", (m) => {
+    if (m.kind === "task_request")
+      remy.coordinator.tell(m.text, { ...m.meta, kind: "task_request" });
+  });
+}
+
+// src/extensions/builtin/index.ts
+var BUILTINS = {
+  "merged-cleanup": mergedCleanup,
+  "slack-tasks": slackTasks,
+  queue: queueCommand
+};
+
+// src/extensions/load.ts
+var USER_EXTENSIONS = join5(REMY_DIR, "extensions");
+function repoExtensionDirs(config) {
+  return (config.extensions?.repos ?? []).map((repo) => {
+    try {
+      const root = resolveRepo(repo, config.repoRoots);
+      return { repo: basename2(root), dir: join5(root, ".remy", "extensions") };
+    } catch (e) {
+      return { repo, error: String(e?.message ?? e) };
+    }
+  });
+}
+async function loadExtensions(host, config, { builtins = BUILTINS, userDir = USER_EXTENSIONS } = {}) {
+  const disabled = new Set(config.extensions?.disabled ?? []);
+  const skip = (name) => disabled.has(name);
+  for (const [name, ext] of Object.entries(builtins))
+    if (!skip(name))
+      await host.load(`builtin:${name}`, "built in", ext);
+  const fromFile = async (name, path) => {
+    if (skip(name))
+      return;
+    let ext;
+    try {
+      ext = await importExtension(path);
+    } catch (e) {
+      host.loaded.push({ name, from: path, error: String(e?.message ?? e) });
+      return;
+    }
+    await host.load(name, path, ext);
+  };
+  for (const { name, path } of discover(userDir))
+    await fromFile(name, path);
+  for (const r of repoExtensionDirs(config)) {
+    if (r.error)
+      host.loaded.push({ name: `${r.repo}/*`, from: "extensions.repos", error: r.error });
+    else
+      for (const { name, path } of discover(r.dir))
+        await fromFile(`${r.repo}/${name}`, path);
+  }
+  for (const pkg of config.extensions?.packages ?? []) {
+    let path;
+    try {
+      path = Bun.resolveSync(pkg, REMY_DIR);
+    } catch {
+      host.loaded.push({ name: pkg, from: "extensions.packages", error: `not installed; run \`cd ${REMY_DIR} && bun add ${pkg}\`` });
+      continue;
+    }
+    await fromFile(pkg, path);
+  }
 }
 
 // src/queue.ts
@@ -2460,6 +2458,386 @@ function coalesce(run) {
   };
 }
 
+// src/extensions/observe.ts
+var sessionRef = (s, workspace) => ({
+  name: s.name,
+  sessionId: s.sessionId,
+  cwd: s.cwd,
+  repo: s.repo,
+  branch: s.branch,
+  spawned: s.spawned,
+  status: s.status,
+  pr: s.pr,
+  workspace
+});
+function snapshotEvents(prev, next, workspaceOf) {
+  if (!prev)
+    return [];
+  const out = [];
+  const before = new Map(prev.sessions.map((s) => [s.sessionId, s]));
+  const after = new Set(next.sessions.map((s) => s.sessionId));
+  for (const s of next.sessions) {
+    const session = sessionRef(s, workspaceOf(s));
+    const p = before.get(s.sessionId);
+    if (!p)
+      out.push({ name: "session.started", payload: { session } });
+    const was = p?.pr?.number === s.pr?.number ? p?.pr : undefined;
+    const pr = s.pr;
+    if (!pr)
+      continue;
+    if (!was) {
+      out.push({ name: "pr.opened", payload: { session, pr } });
+      if (pr.state === "OPEN" && !pr.draft)
+        out.push({ name: "pr.ready", payload: { session, pr } });
+      if (p && pr.state === "MERGED")
+        out.push({ name: "pr.merged", payload: { session, pr } });
+      continue;
+    }
+    if (pr.state === "OPEN" && !pr.draft && (was.draft || was.state !== "OPEN"))
+      out.push({ name: "pr.ready", payload: { session, pr } });
+    if (pr.ci !== was.ci && (pr.ci === "pass" || pr.ci === "fail"))
+      out.push({ name: "pr.ci", payload: { session, pr } });
+    if (pr.state === "MERGED" && was.state !== "MERGED")
+      out.push({ name: "pr.merged", payload: { session, pr } });
+  }
+  for (const p of prev.sessions)
+    if (!after.has(p.sessionId))
+      out.push({ name: "session.ended", payload: { session: sessionRef(p, workspaceOf(p)) } });
+  return out;
+}
+function hookEvents(e, session) {
+  if (e.event === "Stop") {
+    const question = questionOf(e.last);
+    const stopped = { name: "session.stopped", payload: { session, last: e.last } };
+    return question ? [stopped, { name: "session.asks", payload: { session, question, reason: "question" } }] : [stopped];
+  }
+  if (e.event === "SessionEnd")
+    return [{ name: "session.ended", payload: { session, reason: e.type } }];
+  return [];
+}
+
+// src/link.ts
+import { chmodSync, existsSync as existsSync4, unlinkSync } from "fs";
+import { createConnection, createServer } from "net";
+// .claude-plugin/plugin.json
+var plugin_default = {
+  name: "remy",
+  displayName: "Remy",
+  version: "0.11.0",
+  description: "A coordinator session that tracks all your Claude Code sessions and their PRs and talks to you through Slack or Telegram.",
+  author: { name: "Tomas Svatek" },
+  repository: "https://github.com/t9builds/remy",
+  license: "MIT",
+  keywords: ["coordinator", "slack", "telegram", "sessions", "agents"]
+};
+
+// src/link.ts
+var VERSION = plugin_default.version;
+var RESTART_EXIT = 75;
+var HOLD_MAX = 500;
+function readLines(socket, onMessage) {
+  let partial = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => {
+    const lines = (partial + chunk).split(`
+`);
+    partial = lines.pop() ?? "";
+    for (const l of lines) {
+      if (!l)
+        continue;
+      let m;
+      try {
+        m = JSON.parse(l);
+      } catch {
+        continue;
+      }
+      onMessage(m);
+    }
+  });
+}
+var send = (socket, m) => {
+  if (!socket.destroyed)
+    socket.write(JSON.stringify(m) + `
+`);
+};
+function coordinatorTools(working) {
+  return [
+    {
+      name: "post",
+      description: "Send the user a message in a workspace: their Slack DM with the bot (or a Slack channel thread), or their Telegram chat. Returns the message id.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
+          workspace: { type: "string", description: `Workspace from the event tag. Working: ${working || "none"}` },
+          thread: { type: "string", description: "Answer in this thread: thread or id from the event tag, or an id post returned" },
+          session: {
+            type: "string",
+            description: "Agent session this message is about; the user's replies come back tagged with it. For an agent started from a Slack channel thread, leave thread out: the message goes to that thread."
+          },
+          expect_reply: { type: "boolean", description: "A question: watch for the user's answer" }
+        },
+        required: ["text"]
+      }
+    },
+    {
+      name: "update",
+      description: "Edit a message the bot posted earlier.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The id post returned" },
+          text: { type: "string" },
+          workspace: { type: "string" }
+        },
+        required: ["id", "text"]
+      }
+    }
+  ];
+}
+function answers(path, timeoutMs = 1000) {
+  return new Promise((resolve) => {
+    const s = createConnection(path);
+    const done = (ok) => (s.destroy(), resolve(ok));
+    s.setTimeout(timeoutMs, () => done(false));
+    s.on("connect", () => done(true));
+    s.on("error", () => done(false));
+  });
+}
+
+class LinkServer {
+  path;
+  handlers;
+  server;
+  coordinator;
+  held = [];
+  constructor(path, handlers) {
+    this.path = path;
+    this.handlers = handlers;
+  }
+  get connected() {
+    return !!this.coordinator;
+  }
+  get heldEvents() {
+    return this.held;
+  }
+  hold(events) {
+    this.held.unshift(...events);
+    this.held.splice(0, Math.max(0, this.held.length - HOLD_MAX));
+    this.handlers.held?.(this.held);
+  }
+  async listen() {
+    if (existsSync4(this.path)) {
+      if (await answers(this.path))
+        throw new Error(`a remy daemon is already running (${this.path})`);
+      unlinkSync(this.path);
+    }
+    this.server = createServer((s) => this.accept(s));
+    await new Promise((resolve, reject) => {
+      this.server.once("error", reject);
+      this.server.listen(this.path, () => resolve());
+    });
+    chmodSync(this.path, 384);
+  }
+  close() {
+    this.coordinator?.destroy();
+    this.server?.close();
+    try {
+      unlinkSync(this.path);
+    } catch {}
+  }
+  push(event) {
+    if (this.coordinator)
+      return send(this.coordinator, { type: "event", event });
+    this.held.push({ ...event, meta: { ...event.meta, queued_at: new Date().toISOString() } });
+    if (this.held.length > HOLD_MAX)
+      this.handlers.log("link: dropped held event", this.held.shift().kind);
+    this.handlers.held?.(this.held);
+  }
+  permission(request_id, behavior) {
+    if (this.coordinator)
+      send(this.coordinator, { type: "permission", request_id, behavior });
+    else
+      this.handlers.log("link: permission verdict with no coordinator", request_id);
+  }
+  accept(socket) {
+    socket.on("error", (e) => this.handlers.log("link: socket error", e.message));
+    socket.on("close", () => {
+      if (this.coordinator !== socket)
+        return;
+      this.coordinator = undefined;
+      this.handlers.log("link: coordinator disconnected");
+    });
+    readLines(socket, (m) => {
+      if (m.type === "hello")
+        return void this.hello(socket);
+      if (m.type === "permission_request")
+        return void this.handlers.permissionRequest(m.params).catch((e) => this.handlers.log("link: permission request failed", e?.message ?? e));
+      if (m.type === "request")
+        this.handlers.request(m.request, m.args).then((result) => send(socket, { type: "response", id: m.id, result }), (e) => send(socket, { type: "response", id: m.id, error: String(e?.message ?? e) }));
+    });
+  }
+  async hello(socket) {
+    const greeting = await this.handlers.greeting?.().catch(() => []) ?? [];
+    if (socket.destroyed)
+      return;
+    if (this.coordinator && this.coordinator !== socket) {
+      this.handlers.log("link: a newer coordinator connected; closing the old one");
+      this.coordinator.end(JSON.stringify({ type: "replaced" }) + `
+`);
+    }
+    this.coordinator = socket;
+    const held = this.held;
+    this.held = [];
+    this.handlers.log("link: coordinator connected", held.length ? `delivering ${held.length} held` : "");
+    for (const event of [...greeting, ...held])
+      send(socket, { type: "event", event });
+    if (held.length)
+      this.handlers.held?.(this.held);
+  }
+}
+
+class LinkClient {
+  path;
+  handlers;
+  retryMs;
+  socket;
+  nextId = 1;
+  pending = new Map;
+  closed = false;
+  constructor(path, handlers, retryMs = 2000) {
+    this.path = path;
+    this.handlers = handlers;
+    this.retryMs = retryMs;
+  }
+  get connected() {
+    return !!this.socket;
+  }
+  start() {
+    this.connect();
+    return this;
+  }
+  async connectedWithin(ms) {
+    for (const until = Date.now() + ms;!this.socket && Date.now() < until; )
+      await Bun.sleep(50);
+    return this.connected;
+  }
+  close() {
+    this.closed = true;
+    this.socket?.destroy();
+  }
+  connect() {
+    if (this.closed)
+      return;
+    const s = createConnection(this.path);
+    s.on("connect", () => {
+      this.socket = s;
+      send(s, { type: "hello" });
+      this.handlers.state?.(true);
+    });
+    s.on("error", () => {});
+    s.on("close", () => {
+      const wasUp = this.socket === s;
+      if (wasUp)
+        this.socket = undefined;
+      for (const p of this.pending.values())
+        p.reject(new Error("the remy daemon went away"));
+      this.pending.clear();
+      if (wasUp)
+        this.handlers.state?.(false);
+      if (!this.closed)
+        setTimeout(() => this.connect(), this.retryMs);
+    });
+    readLines(s, (m) => {
+      if (m.type === "event")
+        return void Promise.resolve(this.handlers.event(m.event)).catch((e) => this.handlers.log("link: event failed", e?.message ?? e));
+      if (m.type === "permission")
+        return void Promise.resolve(this.handlers.permission(m.request_id, m.behavior)).catch(() => {});
+      if (m.type === "replaced") {
+        this.closed = true;
+        return this.handlers.replaced?.();
+      }
+      if (m.type === "response") {
+        const p = this.pending.get(m.id);
+        this.pending.delete(m.id);
+        if (m.error !== undefined)
+          p?.reject(new Error(m.error));
+        else
+          p?.resolve(m.result);
+      }
+    });
+  }
+  request(request, args, timeoutMs = 60000) {
+    const s = this.socket;
+    if (!s)
+      return Promise.reject(new Error("the remy daemon isn't running"));
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`the remy daemon didn't answer within ${timeoutMs / 1000} s`));
+      }, timeoutMs);
+      const settle = (fn) => (clearTimeout(timer), fn());
+      this.pending.set(id, { resolve: (v) => settle(() => resolve(v)), reject: (e) => settle(() => reject(e)) });
+      send(s, { type: "request", id, request, args });
+    });
+  }
+  permissionRequest(params) {
+    if (!this.socket)
+      return false;
+    send(this.socket, { type: "permission_request", params });
+    return true;
+  }
+}
+function askDaemon(path, request, args, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const s = createConnection(path);
+    let settled = false;
+    const done = (fn) => {
+      if (settled)
+        return;
+      settled = true;
+      s.destroy();
+      fn();
+    };
+    s.setTimeout(timeoutMs, () => done(() => resolve(undefined)));
+    s.on("error", () => done(() => resolve(undefined)));
+    s.on("close", () => done(() => resolve(undefined)));
+    s.on("connect", () => send(s, { type: "request", id: 1, request, args }));
+    readLines(s, (m) => {
+      if (m.type !== "response")
+        return;
+      done(() => m.error !== undefined ? reject(new Error(m.error)) : resolve(m.result));
+    });
+  });
+}
+
+// src/merged.ts
+var runSync = (cmd) => {
+  const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
+  return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
+};
+function closeSession(id, run = runSync) {
+  const rm = run(["claude", "rm", id]);
+  return rm.ok ? "session and worktree removed" : run(["claude", "stop", id]).ok ? `stopped; worktree kept (${rm.out})` : `not removed (${rm.out})`;
+}
+function closeAndRecord(spawned, s, merged, run = runSync) {
+  const spawn = spawnedEntry(spawned, s.name, s.sessionId);
+  const id = spawn?.id ?? s.sessionId;
+  const cleanup = closeSession(id, run);
+  if (spawn && merged)
+    Object.assign(spawn, { id, merged: { at: Date.now(), pr: merged.url, number: merged.number, cleanup } });
+  return cleanup;
+}
+var closedAsMerged = (spawned, sessionId) => Object.values(spawned).some((s) => s.merged && s.id && sessionId.startsWith(s.id));
+function formatMerged(spawned) {
+  const rows = Object.entries(spawned).filter(([, s]) => s.merged).sort(([, a], [, b]) => b.merged.at - a.merged.at);
+  if (!rows.length)
+    return "No merged agents.";
+  return rows.map(([name, s]) => `${name} \xB7 ${s.label ?? s.repo} \xB7 PR #${s.merged.number} merged ${new Date(s.merged.at).toLocaleString()} \xB7 ${s.merged.cleanup} ${s.merged.pr}`).join(`
+`);
+}
+
 // src/daemon.ts
 var log = (...a) => {
   try {
@@ -2479,13 +2857,24 @@ async function push(kind, content, meta = {}) {
     lastActive = meta.workspace;
   if (kind === "user_message")
     scheduleQueue(QUEUE_AFTER_USER_MS);
+  if (kind === "user_message" || kind === "task_request") {
+    if (kind === "user_message" && meta.session && host.answer(meta.session, content))
+      return log("answer for an extension", meta.session);
+    host.emit("message", { workspace: meta.workspace ?? "", text: content, kind, session: meta.session || undefined, thread: meta.thread || undefined, meta: clean });
+    if (kind === "task_request")
+      return;
+  }
+  tell(kind, content, clean);
+}
+function tell(kind, content, meta) {
   log("push", kind, meta.workspace ?? "", content.slice(0, 120).replace(/\n/g, " "), link2.connected ? "" : "(held)");
-  link2.push({ kind, content, meta: { kind, ...clean } });
+  link2.push({ kind, content, meta: { ...meta, kind } });
 }
 var sink = {
   push,
   permission: async (request_id, behavior) => link2.permission(request_id, behavior),
-  queue: async (workspace) => queueText(await takeSnapshot(), workspace),
+  command: (workspace, text) => host.command(text, { workspace }),
+  commands: () => host.commandList(),
   log
 };
 var bridges = new Map;
@@ -2524,14 +2913,18 @@ function status() {
     supervised,
     coordinator: link2.connected,
     held: link2.heldEvents.length,
-    workspaces: [...bridges.keys()]
+    workspaces: [...bridges.keys()],
+    extensions: host.loaded
   };
 }
-async function callTool(name, a) {
+async function route(a) {
   const origin = a.session && !a.thread ? await spawnOrigin(a.session) : undefined;
   if (origin)
     Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
-  const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+  return bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+}
+async function callTool(name, a) {
+  const bridge = await route(a);
   const rerouted = a.workspace && a.workspace !== bridge.workspace ? ` ("${a.workspace}" is off, so this went to "${bridge.workspace}")` : "";
   try {
     if (name === "post") {
@@ -2570,7 +2963,7 @@ async function sessionInfo(sessionId) {
   const row = (await agents()).find((r) => r.sessionId === sessionId);
   const spawned = readJson(PATHS.spawned, {});
   const spawn = row && spawnedEntry(spawned, row.name, sessionId);
-  return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, unattended: !!spawn || row?.kind === "background", merged: !!spawn?.merged };
+  return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, spawned: !!spawn, unattended: !!spawn || row?.kind === "background", merged: !!spawn?.merged };
 }
 var lastPushed = new Map;
 function debounced(key, ms = 60000) {
@@ -2580,6 +2973,13 @@ function debounced(key, ms = 60000) {
   return false;
 }
 var NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitation_dialog"]);
+async function refOf(sessionId, cwd) {
+  const seen = lastSnapshot?.sessions.find((s) => s.sessionId === sessionId);
+  if (seen)
+    return sessionRef({ ...seen, cwd: cwd ?? seen.cwd }, workspaceOf(cwd ?? seen.cwd, cwd ? undefined : seen.repo));
+  const s = await sessionInfo(sessionId);
+  return { name: s.name, sessionId, cwd: cwd ?? "", spawned: s.spawned, status: s.status ?? "", workspace: workspaceOf(cwd) };
+}
 async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
@@ -2594,11 +2994,14 @@ async function onEvent(e) {
         return;
       if (debounced(`input:${e.session_id}`))
         return;
+      const reason = e.type === "permission_prompt" ? "permission_prompt" : "input";
+      emit([{ name: "session.asks", payload: { session: await refOf(e.session_id, e.cwd), question: e.message ?? "waiting for input", reason } }]);
       await push("agent_needs_input", e.message ?? "waiting for input", { workspace, session: s.name, reason: e.type ?? "", cwd: e.cwd ?? "" });
     }, 45000);
     return;
   }
   if (e.event === "Stop" || e.event === "SessionEnd") {
+    refOf(e.session_id, e.cwd).then((ref) => emit(hookEvents(e, ref)));
     const s = await sessionInfo(e.session_id);
     if (!s.unattended || s.merged)
       return;
@@ -2616,13 +3019,13 @@ ${e.last ?? "(none)"}`, { workspace, session: s.name, cwd: e.cwd ?? "" });
 function tailEvents() {
   let offset = 0;
   try {
-    offset = statSync3(PATHS.events).size;
+    offset = statSync5(PATHS.events).size;
   } catch {}
   let partial = "";
   setInterval(() => {
     let size = 0;
     try {
-      size = statSync3(PATHS.events).size;
+      size = statSync5(PATHS.events).size;
     } catch {
       return;
     }
@@ -2649,16 +3052,12 @@ function tailEvents() {
 }
 async function digest() {
   try {
-    const { snapshot: taken, changes: diffed, first } = await snapshotDiff();
-    const merged = closeMerged(taken);
-    const closed = new Set(merged.map((c) => c.sessionId));
-    const snapshot = { ...taken, sessions: taken.sessions.filter((s) => !closed.has(s.sessionId)) };
-    if (closed.size)
-      writeJson(PATHS.snapshot, snapshot);
+    const { snapshot, changes: diffed, first } = await snapshotDiff();
     await refreshQueue(snapshot);
     if (first)
       return;
-    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged];
+    const spawned = readJson(PATHS.spawned, {});
+    const changes = diffed.filter((c) => !closedAsMerged(spawned, c.sessionId));
     for (const [name, b] of bridges) {
       const text = formatNotice(changes.filter((c) => workspaceOf(c.cwd, c.repo) === name));
       if (text)
@@ -2677,7 +3076,15 @@ function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
 }
 function queueText(snap, workspace) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
-  return formatQueue(queueOf({ ...snap, sessions }), sessions);
+  const fromExtensions = host.queueEntries().flatMap((e) => {
+    const of = e.session ? sessions.find((s) => s.name === e.session) : undefined;
+    const where = e.workspace ?? (of ? workspace : undefined);
+    if (where && where !== workspace)
+      return [];
+    return [{ session: e.label, sessionId: `extension:${e.key}`, cwd: "", rank: e.rank, why: e.why, action: e.action, pr: e.url }];
+  });
+  const items = [...queueOf({ ...snap, sessions }), ...fromExtensions].sort((a, b) => a.rank - b.rank);
+  return formatQueue(items, sessions);
 }
 function refreshQueue(snapshot) {
   queueRun = queueRun.then(async () => {
@@ -2714,6 +3121,61 @@ async function greeting() {
   }
   return notes;
 }
+var host;
+var lastSnapshot;
+var ended = new Set;
+async function emit(events) {
+  for (const ev of events) {
+    if (ev.name === "session.ended") {
+      if (ended.has(ev.payload.session.sessionId))
+        continue;
+      ended.add(ev.payload.session.sessionId);
+      const spawned = readJson(PATHS.spawned, {});
+      if (closedAsMerged(spawned, ev.payload.session.sessionId))
+        ev.payload.merged = true;
+    }
+    await host.emit(ev.name, ev.payload);
+  }
+}
+var viewWorkspace = (s) => workspaceOf(s.cwd, s.repo);
+async function observe() {
+  try {
+    const next = await takeSnapshot();
+    const prev = lastSnapshot;
+    lastSnapshot = next;
+    await emit(snapshotEvents(prev, next, viewWorkspace));
+    if (prev)
+      await host.emit("tick", { at: next.takenAt });
+    await refreshQueue(next);
+  } catch (e) {
+    log("observe error", e?.message ?? e);
+  }
+}
+function newHost() {
+  return new ExtensionHost({
+    post: async (text, opts) => (await route({ ...opts })).post(text, { thread: opts.thread, session: opts.session, expect_reply: opts.expect_reply }),
+    spawn: (opts) => spawnAgent(opts),
+    close: async (name, opts) => {
+      const s = lastSnapshot?.sessions.find((x) => x.name === name) ?? (await agents(0)).find((r) => r.name === name);
+      if (!s)
+        throw new Error(`no session named "${name}"`);
+      const spawned = readJson(PATHS.spawned, {});
+      const cleanup = closeAndRecord(spawned, s, opts?.merged);
+      writeJson(PATHS.spawned, spawned);
+      agentsCache.at = 0;
+      if (lastSnapshot)
+        lastSnapshot = { ...lastSnapshot, sessions: lastSnapshot.sessions.filter((x) => x.sessionId !== s.sessionId) };
+      log("closed", name, cleanup);
+      return cleanup;
+    },
+    tell: (text, meta) => tell(meta.kind ?? "extension", text, meta),
+    sessions: () => (lastSnapshot?.sessions ?? []).map((s) => sessionRef(s, viewWorkspace(s))),
+    queueChanged: () => scheduleQueue(1000),
+    queueText: async (workspace) => queueText(await takeSnapshot(), workspace),
+    log,
+    stateDir: join6(REMY_DIR, "state")
+  });
+}
 var stopping = false;
 function shutdown(code) {
   if (stopping)
@@ -2742,6 +3204,7 @@ async function runDaemon() {
   stamp = configStamp();
   config = loadConfig();
   active = { ...config, workspaces: [] };
+  host = newHost();
   link2 = new LinkServer(PATHS.socket, {
     request,
     permissionRequest: async (params) => {
@@ -2761,11 +3224,16 @@ async function runDaemon() {
   bridges = r.bridges;
   off = r.off;
   active = { ...config, workspaces: config.workspaces.filter((w) => bridges.has(w.name)) };
+  await loadExtensions(host, config);
+  for (const l of host.loaded)
+    log(l.error ? `extension ${l.name} (${l.from}) failed: ${l.error}` : `extension ${l.name} loaded (${l.from})`);
   opened();
   log("started", VERSION, [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => `${o.workspace}/${o.messenger}`).join(",")}` : "");
   for (const b of bridges.values())
     b.start().catch((e) => push("system", `Workspace "${b.workspace}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
   tailEvents();
+  await observe();
+  setInterval(observe, Math.max(15, config.tickSeconds) * 1000);
   await digest();
   setInterval(digest, config.digestMinutes * 60000);
 }
@@ -2790,9 +3258,16 @@ async function doctor() {
   const [major = 0, minor = 0, patch = 0] = v ? v.slice(1).map(Number) : [];
   rows.push({ label: `Claude Code ${v?.[0] ?? "missing"}`, ok: major > 2 || major === 2 && (minor > 1 || patch >= 224), hint: "need 2.1.224+ (`claude update`)" });
   rows.push({ label: "gh authenticated", ok: sh(["gh", "auth", "status"]).ok, hint: "run `gh auth login`" });
-  rows.push(daemonCheck(await askDaemon(PATHS.socket, "status").catch(() => {
+  const daemon = await askDaemon(PATHS.socket, "status").catch(() => {
     return;
-  })));
+  });
+  rows.push(daemonCheck(daemon));
+  for (const e of daemon?.extensions ?? [])
+    if (e.error)
+      rows.push({ label: `extension ${e.name}`, ok: false, optional: true, hint: `${e.error} (${e.from})` });
+  const loaded = daemon?.extensions?.filter((e) => !e.error && !e.name.startsWith("builtin:")) ?? [];
+  if (loaded.length)
+    rows.push({ label: `extensions: ${loaded.map((e) => e.name).join(", ")}`, ok: true });
   const c = loadConfig();
   rows.push({ label: "at least one workspace", ok: c.workspaces.length > 0, hint: "run `remy setup`" });
   const perWorkspace = await Promise.all(c.workspaces.map(async (ws) => (await checkWorkspace(ws)).map((r) => ({ ...r, workspace: ws.name }))));
@@ -4161,9 +4636,9 @@ ${i}
 }).prompt();
 
 // src/setup.ts
-import { chmodSync as chmodSync2, mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "fs";
+import { chmodSync as chmodSync2, mkdirSync as mkdirSync4, writeFileSync as writeFileSync3 } from "fs";
 import { homedir as homedir2 } from "os";
-import { join as join3, resolve as resolve2 } from "path";
+import { join as join7, resolve as resolve3 } from "path";
 
 // src/ui.ts
 var import_picocolors = __toESM(require_picocolors(), 1);
@@ -4189,7 +4664,7 @@ function formatHelp(title, rows) {
 }
 
 // src/setup.ts
-var ROOT = resolve2(import.meta.dir, "..");
+var ROOT = resolve3(import.meta.dir, "..");
 async function answer(prompt) {
   const v = await prompt;
   if (isCancel(v)) {
@@ -4478,9 +4953,9 @@ async function pairTelegram(tg, username, workspace) {
   throw new Error(`No message reached @${username}; run \`remy setup ${workspace}\` again.`);
 }
 function installShim() {
-  const bin = join3(homedir2(), ".local", "bin");
-  mkdirSync3(bin, { recursive: true });
-  const shim = join3(bin, "remy");
+  const bin = join7(homedir2(), ".local", "bin");
+  mkdirSync4(bin, { recursive: true });
+  const shim = join7(bin, "remy");
   writeFileSync3(shim, `#!/bin/sh
 # Installed by \`remy setup\`. Uses the installed remy plugin, falling back to the copy setup ran from.
 root=$(bun -e 'try{const p=require(process.env.HOME+"/.claude/plugins/installed_plugins.json").plugins["remy@remy"];console.log(p?.[p.length-1]?.installPath??"")}catch{}')
@@ -4490,73 +4965,6 @@ exec "$root/bin/remy" "$@"
   chmodSync2(shim, 493);
   const onPath = (process.env.PATH ?? "").split(":").includes(bin);
   return `Installed the ${import_picocolors.default.cyan("remy")} command${onPath ? "" : import_picocolors.default.yellow(` (add ${bin} to your PATH)`)}`;
-}
-
-// src/spawn.ts
-import { existsSync as existsSync3, statSync as statSync4 } from "fs";
-import { basename, join as join4, resolve as resolve3 } from "path";
-function resolveRepo(repo, roots) {
-  const direct = resolve3(repo.replace(/^~(?=\/)/, process.env.HOME ?? "~"));
-  if (existsSync3(join4(direct, ".git")))
-    return direct;
-  for (const root of roots) {
-    const p = join4(root, repo);
-    if (existsSync3(p) && statSync4(p).isDirectory() && existsSync3(join4(p, ".git")))
-      return p;
-  }
-  throw new Error(`No git repo "${repo}" (checked it as a path and under ${roots.join(", ")})`);
-}
-var SESSION_ENV = new Set([
-  "REMY_ROLE",
-  "CLAUDECODE",
-  "CLAUDE_PID",
-  "CLAUDE_EFFORT",
-  "CLAUDE_CODE_ENTRYPOINT",
-  "CLAUDE_CODE_SESSION_ID",
-  "CLAUDE_CODE_CHILD_SESSION",
-  "CLAUDE_CODE_SESSION_ATTENDED",
-  "CLAUDE_CODE_MESSAGING_SOCKET",
-  "CLAUDE_CODE_MESSAGING_TOKEN"
-]);
-function slug(s) {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
-}
-async function spawnAgent(opts) {
-  const config = loadConfig();
-  const cwd = resolveRepo(opts.repo, config.repoRoots);
-  const live = (await listAgents()).map((a) => a.name);
-  const taken = takenNames(live, readJson(PATHS.nicknames, {}), readJson(PATHS.spawned, {}));
-  let name = opts.name ? slug(opts.name) : pickNickname(taken);
-  for (let i = 2;taken.has(name); i++)
-    name = `${slug(opts.name)}-${i}`;
-  let label = slug(`${basename(cwd)}-${opts.task.split(/\s+/).slice(0, 4).join(" ")}`);
-  const base = label;
-  for (let i = 2;existsSync3(join4(cwd, ".claude", "worktrees", label)); i++)
-    label = `${base}-${i}`;
-  const slack = opts.slackTask ? loadTask(opts.slackTask) : undefined;
-  const prompt = config.spawnTemplate.replaceAll("{task}", slack ? taskPrompt(slack, opts.task) : opts.task);
-  const worktree = opts.worktree ?? config.spawnWorktree;
-  const cmd = ["claude", "--bg", "-n", name, "--permission-mode", opts.permissionMode ?? config.spawnPermissionMode];
-  if (worktree)
-    cmd.push("-w", label);
-  cmd.push(prompt);
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_ENV.has(k)));
-  const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env });
-  const out = (r.stdout.toString() + r.stderr.toString()).trim();
-  if (r.exitCode !== 0)
-    throw new Error(`claude --bg failed (${r.exitCode}): ${out}`);
-  const id = out.match(/\b([0-9a-f]{6,}(?:-[0-9a-f-]+)?)\b/i)?.[1];
-  const spawned = readJson(PATHS.spawned, {});
-  spawned[name] = {
-    id,
-    repo: cwd,
-    label,
-    task: opts.task,
-    startedAt: Date.now(),
-    slack: slack && { workspace: slack.workspace, channel: slack.channel, threadTs: slack.threadTs, task: slack.id }
-  };
-  writeJson(PATHS.spawned, spawned);
-  return { name, label, id, cwd, worktree, output: out };
 }
 
 // src/cli.ts
@@ -4603,7 +5011,7 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
   }
   await ensureDaemon(c.repoRoots[0] ?? homedir3());
   writeJson(PATHS.mcpConfig, {
-    mcpServers: { remy: { command: process.execPath, args: [join5(ROOT2, "dist", "channel.js")] } }
+    mcpServers: { remy: { command: process.execPath, args: [join8(ROOT2, "dist", "channel.js")] } }
   });
   const cwd = c.repoRoots[0] ?? homedir3();
   const args = [
@@ -4617,7 +5025,7 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
     "--dangerously-load-development-channels",
     "server:remy",
     "--append-system-prompt-file",
-    join5(ROOT2, "coordinator.md"),
+    join8(ROOT2, "coordinator.md"),
     ...extra,
     "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention."
   ];
@@ -4653,7 +5061,7 @@ async function ensureDaemon(cwd) {
   }
   const out = openSync2(PATHS.log, "a");
   const env = { ...process.env, REMY_DAEMON_SERVICE: "0" };
-  spawn(process.execPath, [join5(ROOT2, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
+  spawn(process.execPath, [join8(ROOT2, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
   if (!await daemonWithin(15000, (s) => s.pid !== running?.pid))
     throw new Error(`the remy daemon didn't start; see ${PATHS.log}`);
   console.log(import_picocolors.default.dim(`Started the remy daemon; it keeps running after the coordinator exits (log: ${PATHS.log}).`));

@@ -47,7 +47,7 @@ function bridge() {
     {
       push: async (kind, content, meta = {}) => void pushed.push({ kind, content, meta }),
       permission: async (id, behavior) => void verdicts.push([id, behavior]),
-      queue: async (workspace) => `*Waiting on you (1)* in ${workspace}`,
+      command: async (workspace, text) => (/^\/queue(@\w+)?$/.test(text) ? `*Waiting on you (1)* in ${workspace}` : undefined),
       log: () => {},
     },
     join(dir, `state-${++n}.json`),

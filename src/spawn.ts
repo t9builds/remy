@@ -74,3 +74,6 @@ export async function spawnAgent(opts: { repo: string; task: string; name?: stri
   writeJson(PATHS.spawned, spawned);
   return { name, label, id, cwd, worktree, output: out };
 }
+
+/** What `spawnAgent` reports: the agent's name, its worktree label, session id and folder. */
+export type SpawnResult = Awaited<ReturnType<typeof spawnAgent>>;

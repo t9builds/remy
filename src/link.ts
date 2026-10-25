@@ -27,6 +27,8 @@ export type DaemonStatus = {
   coordinator: boolean;
   held: number;
   workspaces: string[];
+  /** Extensions it loaded, and why any failed. */
+  extensions: { name: string; from: string; error?: string }[];
 };
 
 /** `restart` exits with this code, so launchd or systemd start the daemon again; `stop` exits with 0, so they don't. */

@@ -111,6 +111,17 @@ export type Config = {
   coordinatorCompactPct: number;
   /** Reacting with this emoji (Slack name, no colons) to a message starts a task, like mentioning the bot. */
   triggerEmoji: string;
+  /** Seconds between looks at the sessions and their PRs, which raise extension events; also the `tick` interval. */
+  tickSeconds: number;
+  /** Extensions beyond your own in ~/.remy/extensions (extensions/load.ts). */
+  extensions?: {
+    /** Repos whose .remy/extensions run in your daemon: paths, or names under `repoRoots`. */
+    repos?: string[];
+    /** npm packages installed in ~/.remy. */
+    packages?: string[];
+    /** Extensions not to load, by name: a built-in ("merged-cleanup", "slack-tasks", "queue"), a file name, "<repo>/<file>" or a package. */
+    disabled?: string[];
+  };
 };
 
 export const DEFAULTS: Config = {
@@ -123,6 +134,7 @@ export const DEFAULTS: Config = {
   coordinatorName: "remy",
   coordinatorCompactPct: 50,
   triggerEmoji: "mouse",
+  tickSeconds: 60,
 };
 
 /** `coordinatorCompactPct` as a whole percentage from 1 to 100, else undefined: Claude Code's default. */

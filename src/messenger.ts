@@ -37,8 +37,10 @@ export interface Messenger {
 export type Sink = {
   push(kind: string, content: string, meta?: Record<string, string>): Promise<void>;
   permission(requestId: string, behavior: "allow" | "deny"): Promise<void>;
-  /** The workspace's waiting-on-you list as it is now (queue.ts), for a bot command that asks for it. */
-  queue?(workspace: string): Promise<string>;
+  /** The answer when `text` is a command an extension registered (`/queue`), "" for one with no answer; else undefined. */
+  command?(workspace: string, text: string): Promise<string | undefined>;
+  /** The registered commands, for an app that lists them (Telegram's `/` menu). */
+  commands?(): { name: string; description: string }[];
   log(...a: unknown[]): void;
 };
 

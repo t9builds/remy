@@ -3,8 +3,11 @@
  * - Reads your messages in each configured workspace and pushes them to the coordinator. A workspace is a Slack
  *   workspace (slack-bridge.ts, which also starts tasks from channel threads) or a Telegram chat (telegram-bridge.ts).
  * - Tails ~/.remy/events.jsonl and pushes an agent that needs input, or that ended its turn on a question, right away.
+ * - Every `tickSeconds`, looks at the sessions and their PRs again; with the hook events, that raises the events
+ *   extensions get (extensions/). Everything beyond the relay is an extension: closing merged agents, tasks from
+ *   Slack threads and `/queue` are built-in ones (extensions/builtin/).
  * - Every `digestMinutes`, diffs the session/PR snapshot and posts a notice of merged PRs and ended sessions, if
- *   any, itself (notices.ts). Spawned agents whose PR merged are closed then (merged.ts) and reported as merged.
+ *   any, itself (notices.ts).
  * - Keeps one pinned "waiting on you" message per workspace (queue.ts), edited in place after each session event.
  * - Answers the coordinator's post / update, and relays the coordinator's own permission prompts.
  * The coordinator's channel (channel.ts) reaches all this over the link (link.ts); what's pushed while no
@@ -12,16 +15,22 @@
  * (see `workspaceFor`).
  */
 import { appendFileSync, openSync, readSync, closeSync, statSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { describeMessengers, openWorkspaces, type Off } from "./bridges";
-import { configStamp, ensureDir, loadConfig, PATHS, readJson, workspaceFor, writeJson, type Config } from "./config";
+import { configStamp, ensureDir, loadConfig, PATHS, readJson, REMY_DIR, workspaceFor, writeJson, type Config } from "./config";
+import type { EventName, Events, PostOptions, SessionRef } from "./extensions/api";
+import { ExtensionHost } from "./extensions/host";
+import { loadExtensions } from "./extensions/load";
+import { hookEvents, sessionRef, snapshotEvents, type Emitted } from "./extensions/observe";
 import type { RemyEvent } from "./hook";
 import { coordinatorTools, LinkServer, RESTART_EXIT, VERSION, type DaemonStatus, type LinkEvent, type Request } from "./link";
-import { closeMerged } from "./merged";
+import { closeAndRecord, closedAsMerged } from "./merged";
 import type { Messenger, Sink } from "./messenger";
 import { formatNotice } from "./notices";
-import { coalesce, formatQueue, queueOf, questionOf, showQueue } from "./queue";
+import { coalesce, formatQueue, queueOf, questionOf, showQueue, type QueueItem } from "./queue";
 import { threadRef } from "./slack-bridge";
-import { githubRepoOf, listAgents, snapshotDiff, spawnedEntry, takeSnapshot, type Snapshot, type Spawned } from "./snapshot";
+import { githubRepoOf, listAgents, snapshotDiff, spawnedEntry, takeSnapshot, type SessionView, type Snapshot, type Spawned } from "./snapshot";
+import { spawnAgent } from "./spawn";
 
 const log = (...a: unknown[]) => {
   try {
@@ -39,18 +48,32 @@ const supervised = process.env.REMY_DAEMON_SERVICE === "1";
 /** The workspace the user last wrote from; the coordinator's permission prompts go there. */
 let lastActive = "";
 
+/** What a bridge hands over: the user's messages go to extensions first, then to the coordinator. */
 async function push(kind: string, content: string, meta: Record<string, string> = {}) {
   const clean = Object.fromEntries(Object.entries(meta).filter(([, v]) => v));
   if (kind === "user_message" && meta.workspace) lastActive = meta.workspace;
   if (kind === "user_message") scheduleQueue(QUEUE_AFTER_USER_MS);
+  if (kind === "user_message" || kind === "task_request") {
+    // A reply to an extension's question answers it, not the coordinator.
+    if (kind === "user_message" && meta.session && host.answer(meta.session, content)) return log("answer for an extension", meta.session);
+    void host.emit("message", { workspace: meta.workspace ?? "", text: content, kind, session: meta.session || undefined, thread: meta.thread || undefined, meta: clean });
+    // Task requests go to the coordinator only through an extension (builtin/slack-tasks.ts).
+    if (kind === "task_request") return;
+  }
+  tell(kind, content, clean);
+}
+
+/** Push to the coordinator, or hold it until one connects. */
+function tell(kind: string, content: string, meta: Record<string, string>) {
   log("push", kind, meta.workspace ?? "", content.slice(0, 120).replace(/\n/g, " "), link.connected ? "" : "(held)");
-  link.push({ kind, content, meta: { kind, ...clean } });
+  link.push({ kind, content, meta: { ...meta, kind } });
 }
 
 const sink: Sink = {
   push,
   permission: async (request_id, behavior) => link.permission(request_id, behavior),
-  queue: async (workspace) => queueText(await takeSnapshot(), workspace),
+  command: (workspace, text) => host.command(text, { workspace }),
+  commands: () => host.commandList(),
   log,
 };
 
@@ -95,14 +118,19 @@ function status(): DaemonStatus {
     coordinator: link.connected,
     held: link.heldEvents.length,
     workspaces: [...bridges.keys()],
+    extensions: host.loaded,
   };
 }
 
-async function callTool(name: string, a: Record<string, any>) {
-  // An agent started from a Slack channel thread reports in that thread.
+/** Where a post goes: an agent started from a Slack channel thread reports in that thread, else the session's workspace. */
+async function route(a: { workspace?: string; session?: string; thread?: string }) {
   const origin = a.session && !a.thread ? await spawnOrigin(a.session) : undefined;
   if (origin) Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
-  const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+  return bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+}
+
+async function callTool(name: string, a: Record<string, any>) {
+  const bridge = await route(a);
   const rerouted = a.workspace && a.workspace !== bridge.workspace ? ` ("${a.workspace}" is off, so this went to "${bridge.workspace}")` : "";
   try {
     if (name === "post") {
@@ -150,7 +178,7 @@ async function sessionInfo(sessionId: string) {
   const row = (await agents()).find((r) => r.sessionId === sessionId);
   const spawned = readJson<Spawned>(PATHS.spawned, {});
   const spawn = row && spawnedEntry(spawned, row.name, sessionId);
-  return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, unattended: !!spawn || row?.kind === "background", merged: !!spawn?.merged };
+  return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, spawned: !!spawn, unattended: !!spawn || row?.kind === "background", merged: !!spawn?.merged };
 }
 
 const lastPushed = new Map<string, number>();
@@ -161,6 +189,14 @@ function debounced(key: string, ms = 60_000) {
 }
 
 const NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitation_dialog"]);
+
+/** The session as extensions see it, from the last look at the sessions, else from what the hook event says. */
+async function refOf(sessionId: string, cwd?: string): Promise<SessionRef> {
+  const seen = lastSnapshot?.sessions.find((s) => s.sessionId === sessionId);
+  if (seen) return sessionRef({ ...seen, cwd: cwd ?? seen.cwd }, workspaceOf(cwd ?? seen.cwd, cwd ? undefined : seen.repo));
+  const s = await sessionInfo(sessionId);
+  return { name: s.name, sessionId, cwd: cwd ?? "", spawned: s.spawned, status: s.status ?? "", workspace: workspaceOf(cwd) };
+}
 
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
@@ -174,11 +210,14 @@ async function onEvent(e: RemyEvent) {
       const s = await sessionInfo(e.session_id);
       if (s.status && s.status !== "waiting") return;
       if (debounced(`input:${e.session_id}`)) return;
+      const reason = e.type === "permission_prompt" ? "permission_prompt" : "input";
+      void emit([{ name: "session.asks", payload: { session: await refOf(e.session_id, e.cwd), question: e.message ?? "waiting for input", reason } }]);
       await push("agent_needs_input", e.message ?? "waiting for input", { workspace, session: s.name, reason: e.type ?? "", cwd: e.cwd ?? "" });
     }, 45_000);
     return;
   }
   if (e.event === "Stop" || e.event === "SessionEnd") {
+    void refOf(e.session_id, e.cwd).then((ref) => emit(hookEvents(e, ref)));
     const s = await sessionInfo(e.session_id);
     // A session remy closed because its PR merged is reported in the notice, not as finished.
     if (!s.unattended || s.merged) return;
@@ -225,15 +264,12 @@ function tailEvents() {
 
 async function digest() {
   try {
-    const { snapshot: taken, changes: diffed, first } = await snapshotDiff();
-    // Merged agents are closed now: they leave the stored snapshot and get one "merged" line instead of their other changes.
-    const merged = closeMerged(taken);
-    const closed = new Set(merged.map((c) => c.sessionId));
-    const snapshot = { ...taken, sessions: taken.sessions.filter((s) => !closed.has(s.sessionId)) };
-    if (closed.size) writeJson(PATHS.snapshot, snapshot);
+    const { snapshot, changes: diffed, first } = await snapshotDiff();
     await refreshQueue(snapshot);
     if (first) return;
-    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged];
+    // An agent closed because its PR merged was announced when it was closed (builtin/merged-cleanup.ts).
+    const spawned = readJson<Spawned>(PATHS.spawned, {});
+    const changes = diffed.filter((c) => !closedAsMerged(spawned, c.sessionId));
     // One notice per workspace, each with only that workspace's sessions.
     for (const [name, b] of bridges) {
       const text = formatNotice(changes.filter((c) => workspaceOf(c.cwd, c.repo) === name));
@@ -259,10 +295,18 @@ function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
   queueAfter(ms);
 }
 
-/** The workspace's list, with only its own sessions. */
+/** The workspace's list, with only its own sessions, and what extensions put on it. */
 function queueText(snap: Snapshot, workspace: string) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
-  return formatQueue(queueOf({ ...snap, sessions }), sessions);
+  const fromExtensions: QueueItem[] = host.queueEntries().flatMap((e) => {
+    const of = e.session ? sessions.find((s) => s.name === e.session) : undefined;
+    const where = e.workspace ?? (of ? workspace : undefined);
+    if (where && where !== workspace) return [];
+    return [{ session: e.label, sessionId: `extension:${e.key}`, cwd: "", rank: e.rank, why: e.why, action: e.action, pr: e.url }];
+  });
+  // Stable: within a rank, sessions first, then extensions' entries in the order they came.
+  const items = [...queueOf({ ...snap, sessions }), ...fromExtensions].sort((a, b) => a.rank - b.rank);
+  return formatQueue(items, sessions);
 }
 
 /** Keep each workspace's "waiting on you" message current: edit it in place, or post and pin one when there is none. */
@@ -309,6 +353,66 @@ async function greeting(): Promise<LinkEvent[]> {
   return notes;
 }
 
+// ---------- Extensions ----------
+
+let host: ExtensionHost;
+let lastSnapshot: Snapshot | undefined;
+const ended = new Set<string>();
+
+/** Hand events to extensions in order. A session ends once, whether a hook or a look at the sessions saw it first. */
+async function emit(events: Emitted[]) {
+  for (const ev of events) {
+    if (ev.name === "session.ended") {
+      if (ended.has(ev.payload.session.sessionId)) continue;
+      ended.add(ev.payload.session.sessionId);
+      const spawned = readJson<Spawned>(PATHS.spawned, {});
+      if (closedAsMerged(spawned, ev.payload.session.sessionId)) ev.payload.merged = true;
+    }
+    await host.emit(ev.name as EventName, ev.payload as Events[EventName]);
+  }
+}
+
+const viewWorkspace = (s: SessionView) => workspaceOf(s.cwd, s.repo);
+
+/** Look at the sessions again: raise what changed, then `tick`. */
+async function observe() {
+  try {
+    const next = await takeSnapshot();
+    const prev = lastSnapshot;
+    lastSnapshot = next;
+    await emit(snapshotEvents(prev, next, viewWorkspace));
+    if (prev) await host.emit("tick", { at: next.takenAt });
+    await refreshQueue(next);
+  } catch (e: any) {
+    log("observe error", e?.message ?? e);
+  }
+}
+
+function newHost() {
+  return new ExtensionHost({
+    post: async (text, opts: PostOptions & { expect_reply?: boolean }) => (await route({ ...opts })).post(text, { thread: opts.thread, session: opts.session, expect_reply: opts.expect_reply }),
+    spawn: (opts) => spawnAgent(opts),
+    close: async (name, opts) => {
+      const s = lastSnapshot?.sessions.find((x) => x.name === name) ?? (await agents(0)).find((r) => r.name === name);
+      if (!s) throw new Error(`no session named "${name}"`);
+      const spawned = readJson<Spawned>(PATHS.spawned, {});
+      const cleanup = closeAndRecord(spawned, s, opts?.merged);
+      writeJson(PATHS.spawned, spawned);
+      agentsCache.at = 0;
+      if (lastSnapshot) lastSnapshot = { ...lastSnapshot, sessions: lastSnapshot.sessions.filter((x) => x.sessionId !== s.sessionId) };
+      log("closed", name, cleanup);
+      return cleanup;
+    },
+    tell: (text, meta) => tell(meta.kind ?? "extension", text, meta),
+    sessions: () => (lastSnapshot?.sessions ?? []).map((s) => sessionRef(s, viewWorkspace(s))),
+    queueChanged: () => scheduleQueue(1_000),
+    // Asked for by the user (`/queue`): as it is now, not as of the last look.
+    queueText: async (workspace) => queueText(await takeSnapshot(), workspace),
+    log,
+    stateDir: join(REMY_DIR, "state"),
+  });
+}
+
 let stopping = false;
 /** Stop; what's still held for the coordinator is kept for the next daemon. */
 function shutdown(code: number) {
@@ -340,6 +444,7 @@ export async function runDaemon() {
   stamp = configStamp();
   config = loadConfig();
   active = { ...config, workspaces: [] };
+  host = newHost();
   link = new LinkServer(PATHS.socket, {
     request,
     permissionRequest: async (params) => {
@@ -360,11 +465,16 @@ export async function runDaemon() {
   bridges = r.bridges;
   off = r.off;
   active = { ...config, workspaces: config.workspaces.filter((w) => bridges.has(w.name)) };
+  // Before the bridges start, so the commands extensions register are there for Telegram's menu.
+  await loadExtensions(host, config);
+  for (const l of host.loaded) log(l.error ? `extension ${l.name} (${l.from}) failed: ${l.error}` : `extension ${l.name} loaded (${l.from})`);
   opened();
   log("started", VERSION, [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => `${o.workspace}/${o.messenger}`).join(",")}` : "");
   for (const b of bridges.values())
     b.start().catch((e) => push("system", `Workspace "${b.workspace}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
   tailEvents();
+  await observe(); // the baseline extension events are measured against
+  setInterval(observe, Math.max(15, config.tickSeconds) * 1000);
   await digest(); // stores the baseline on first run
   setInterval(digest, config.digestMinutes * 60_000);
 }
