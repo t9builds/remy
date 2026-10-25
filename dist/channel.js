@@ -17055,7 +17055,7 @@ var INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel sour
 - kind="digest": sessions or PRs changed since the last digest. Post one compact summary to that workspace.
 - kind="system": a note from the remy server itself.
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
-var mcp = new Server({ name: "remy", version: "0.6.0" }, {
+var mcp = new Server({ name: "remy", version: "0.7.0" }, {
   capabilities: {
     experimental: { "claude/channel": {}, "claude/channel/permission": {} },
     tools: {}
