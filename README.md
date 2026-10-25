@@ -150,7 +150,7 @@ remy start
 
 `remy setup` walks you through it: your repo folders, the prompt for spawned agents and the digest interval, then each workspace. For a workspace you pick Slack or Telegram and which repos or folders report there. Then either your Slack member ID (Slack → profile → ⋮ → Copy member ID), how to read your DMs and the bot token, or your Telegram bot token and a pairing message. Tokens are checked with Slack or Telegram before they're saved to the macOS keychain (`~/.remy/*-token.<workspace>` on Linux). Setup sends you a test message in each workspace, installs `~/.local/bin/remy` and ends with `remy doctor`. `remy setup <workspace>` edits one workspace.
 
-`remy start` opens the coordinator. Accept the development-channel warning; custom channels need it during the research preview. Keep the terminal open.
+`remy start` opens the coordinator. Accept the development-channel warning; custom channels need it during the research preview. Keep the terminal open. If one workspace is broken (say a Slack app still waiting for approval), Remy starts with the ones that work, warns you, and sends the broken one's sessions to a working workspace until you fix it.
 
 ## Use
 

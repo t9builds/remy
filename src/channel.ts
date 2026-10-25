@@ -13,8 +13,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { createMessenger, messengerName } from "./bridges";
-import { loadConfig, PATHS, readJson, workspaceFor } from "./config";
+import { messengerName, openWorkspaces } from "./bridges";
+import { loadConfig, PATHS, readJson, workspaceFor, type Config } from "./config";
 import type { RemyEvent } from "./hook";
 import type { Messenger, Sink } from "./messenger";
 import { threadRef } from "./slack-bridge";
@@ -63,18 +63,17 @@ const sink: Sink = {
   log,
 };
 
-const bridges = new Map<string, Messenger>();
-const setupProblems: string[] = [];
-for (const ws of config.workspaces) {
-  try {
-    bridges.set(ws.name, createMessenger(ws, sink, { triggerEmoji: config.triggerEmoji }));
-  } catch (e: any) {
-    setupProblems.push(e?.message ?? String(e));
-  }
-}
-if (!config.workspaces.length) setupProblems.push("no workspace is configured");
+let bridges = new Map<string, Messenger>();
+let off: { name: string; reason: string }[] = [];
+/** The config with only the workspaces that work, so sessions of a broken one route to a working one. */
+let active: Config = { ...config, workspaces: [] };
+const ready = openWorkspaces(config.workspaces, sink, { triggerEmoji: config.triggerEmoji }).then((r) => {
+  bridges = r.bridges;
+  off = r.off;
+  active = { ...config, workspaces: config.workspaces.filter((w) => bridges.has(w.name)) };
+});
 
-const workspaceOf = (cwd?: string, repo?: string) => workspaceFor({ cwd, repo: repo ?? githubRepoOf(cwd) }, config)?.name ?? "";
+const workspaceOf = (cwd?: string, repo?: string) => workspaceFor({ cwd, repo: repo ?? githubRepoOf(cwd) }, active)?.name ?? "";
 
 function bridgeFor(workspace?: string, cwd?: string): Messenger {
   const b = (workspace && bridges.get(workspace)) || bridges.get(workspaceOf(cwd)) || bridges.values().next().value;
@@ -84,7 +83,7 @@ function bridgeFor(workspace?: string, cwd?: string): Messenger {
 
 // ---------- Tools ----------
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+mcp.setRequestHandler(ListToolsRequestSchema, async () => (await ready, {
   tools: [
     {
       name: "post",
@@ -96,7 +95,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
           workspace: {
             type: "string",
-            description: `Workspace from the event tag. Configured: ${config.workspaces.map((w) => `${w.name} (${messengerName(w)})`).join(", ") || "none"}`,
+            description: `Workspace from the event tag. Working: ${active.workspaces.map((w) => `${w.name} (${messengerName(w)})`).join(", ") || "none"}`,
           },
           thread: { type: "string", description: "Answer in this thread: thread or id from the event tag, or an id post returned" },
           session: {
@@ -126,15 +125,17 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+  await ready;
   const a = (req.params.arguments ?? {}) as Record<string, any>;
   // An agent started from a Slack channel thread reports in that thread.
   const origin = a.session && !a.thread ? readJson<Spawned>(PATHS.spawned, {})[a.session]?.slack : undefined;
   if (origin) Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
   const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+  const rerouted = a.workspace && a.workspace !== bridge.ws.name ? ` ("${a.workspace}" is off, so this went to "${bridge.ws.name}")` : "";
   try {
     if (req.params.name === "post") {
       const id = await bridge.post(String(a.text), { thread: a.thread, session: a.session, expect_reply: a.expect_reply });
-      return { content: [{ type: "text", text: `posted to ${bridge.ws.name} id=${id}` }] };
+      return { content: [{ type: "text", text: `posted to ${bridge.ws.name} id=${id}${rerouted}` }] };
     }
     if (req.params.name === "update") {
       await bridge.update(String(a.id), String(a.text));
@@ -153,6 +154,7 @@ const PermissionRequestNotification = z.object({
   params: z.object({ request_id: z.string(), tool_name: z.string(), description: z.string(), input_preview: z.string() }),
 });
 mcp.setNotificationHandler(PermissionRequestNotification, async ({ params }) => {
+  await ready;
   await bridgeFor(lastActive).askPermission(params);
 });
 
@@ -251,7 +253,7 @@ async function digest() {
     const { snapshot, changes, first } = await snapshotDiff();
     if (first || !changes.length) return;
     // One digest per workspace, each listing only that workspace's sessions.
-    const names = new Set(config.workspaces.map((w) => w.name));
+    const names = new Set(bridges.keys());
     if (!names.size) names.add("");
     for (const name of names) {
       const mine = changes.filter((c) => workspaceOf(c.cwd, c.repo) === name);
@@ -276,9 +278,19 @@ mcp.onclose = () => process.exit(0);
 process.stdin.on("close", () => process.exit(0));
 await mcp.connect(new StdioServerTransport());
 await initialized;
-log("started", [...bridges.keys()].join(","));
+await ready;
+log("started", [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => o.name).join(",")}` : "");
 
-if (setupProblems.length) await push("system", `remy setup is incomplete: ${setupProblems.join("; ")}. Tell the user to run \`remy setup\` in a terminal, then restart with \`remy start\`.`);
+if (!config.workspaces.length) await push("system", "No workspace is configured. Tell the user in this terminal to run `remy setup`, then `remy start`.");
+else if (!bridges.size) await push("system", `No workspace works: ${off.map((o) => `"${o.name}" (${o.reason})`).join("; ")}. Tell the user in this terminal; \`remy doctor\` shows what to fix.`);
+else {
+  const fallback = workspaceFor({}, active)?.name;
+  for (const o of off)
+    await push(
+      "system",
+      `Workspace "${o.name}" is off: ${o.reason}. Until it's fixed (\`remy setup ${o.name}\`, then restart), its sessions report to "${fallback}" and posts to "${o.name}" go there too. Don't post a separate hello for "${o.name}"; mention it in the hello to "${fallback}".`,
+    );
+}
 for (const b of bridges.values())
   b.start().catch((e) => push("system", `Workspace "${b.ws.name}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
 tailEvents();

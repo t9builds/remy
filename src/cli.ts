@@ -3,9 +3,10 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { createMessenger, quietSink } from "./bridges";
-import { loadConfig, PATHS, REMY_DIR, writeJson } from "./config";
+import { loadConfig, PATHS, REMY_DIR, workspaceFor, writeJson } from "./config";
 import { doctor } from "./doctor";
 import { runHook } from "./hook";
+import { blocking } from "./messenger";
 import { setup } from "./setup";
 import { formatTable, snapshotDiff, takeSnapshot } from "./snapshot";
 import { spawnAgent } from "./spawn";
@@ -29,14 +30,25 @@ function parse<O extends NonNullable<ParseArgsConfig["options"]>>(args: string[]
   return parseArgs({ args, options: { ...options, help: { type: "boolean", short: "h" } }, allowPositionals: true, strict: true });
 }
 
+/** Start when the basics pass and at least one workspace works; a broken workspace only warns. */
 async function start(extra: string[]) {
-  const { ok, rows } = await doctor();
-  if (!ok) {
+  const { rows } = await doctor();
+  const c = loadConfig();
+  const problems = blocking(rows);
+  const broken = new Set(problems.map((r) => r.workspace).filter((w) => w !== undefined));
+  const working = c.workspaces.filter((w) => !broken.has(w.name));
+  if (problems.some((r) => !r.workspace) || !working.length) {
     console.log(formatChecks(rows));
     console.error(`\n${errorLine(`fix the ${pc.red("✗")} items first (${pc.cyan("remy setup")}).`)}`);
     process.exit(1);
   }
-  const c = loadConfig();
+  if (broken.size) {
+    const fallback = workspaceFor({}, { ...c, workspaces: working })?.name;
+    console.log(formatChecks(rows.filter((r) => r.workspace && broken.has(r.workspace))));
+    for (const name of broken)
+      console.log(pc.yellow(`! ${pc.bold(name)} is off until fixed (${pc.cyan(`remy setup ${name}`)}); its sessions report to ${pc.bold(fallback ?? "")} meanwhile.`));
+    console.log("");
+  }
   writeJson(PATHS.mcpConfig, {
     mcpServers: { remy: { command: process.execPath, args: [join(ROOT, "dist", "channel.js")] } },
   });
@@ -49,7 +61,7 @@ async function start(extra: string[]) {
     "--dangerously-load-development-channels", "server:remy",
     "--append-system-prompt-file", join(ROOT, "coordinator.md"),
     ...extra,
-    "Coordinator started. Run `remy status`, then post a short hello to each workspace with how many of its sessions are running and which need attention.",
+    "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention.",
   ];
   const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, REMY_ROLE: "coordinator" } });
   process.exit(r.exitCode ?? 0);

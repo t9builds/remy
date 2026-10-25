@@ -39,6 +39,9 @@ export type Sink = {
 /** One line of `remy doctor`. A failing `optional` check warns instead of failing. */
 export type Check = { label: string; ok: boolean; hint?: string; optional?: boolean };
 
+/** The checks that keep something from working. */
+export const blocking = <C extends Check>(checks: C[]) => checks.filter((c) => !c.ok && !c.optional);
+
 /** How long an agent's question counts as open, so a plain message may be its answer. */
 export const AWAIT_ANSWER_MS = 30 * 60_000;
 

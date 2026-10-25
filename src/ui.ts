@@ -8,14 +8,14 @@ import type { Ci } from "./snapshot";
 
 export { pc };
 
-/** A `remy doctor` line, ready to style. */
-export type CheckRow = Check & { group?: string };
+/** A `remy doctor` line, ready to style. `workspace` is set for a workspace's own checks. */
+export type CheckRow = Check & { workspace?: string };
 
 export function formatChecks(rows: CheckRow[]) {
   return rows
     .map((r) => {
       const mark = r.ok ? pc.green("✓") : r.optional ? pc.yellow("!") : pc.red("✗");
-      const label = `${r.group ? pc.dim(`${r.group} `) : ""}${r.label}`;
+      const label = `${r.workspace ? pc.dim(`[${r.workspace}] `) : ""}${r.label}`;
       return `${mark} ${label}${r.ok || !r.hint ? "" : pc.dim(` — ${r.hint}`)}`;
     })
     .join("\n");

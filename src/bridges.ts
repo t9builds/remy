@@ -1,6 +1,6 @@
 /** The one place that picks Slack or Telegram for a workspace; everything else talks to a `Messenger`. */
 import { isTelegram, readToken, type Workspace } from "./config";
-import type { Check, Messenger, Sink } from "./messenger";
+import { blocking, type Check, type Messenger, type Sink } from "./messenger";
 import { SlackBridge, slackChecks } from "./slack-bridge";
 import { Telegram } from "./telegram";
 import { TelegramBridge, telegramChecks } from "./telegram-bridge";
@@ -20,7 +20,27 @@ export function createMessenger(ws: Workspace, sink: Sink, opts: { triggerEmoji:
   return new SlackBridge(ws, { bot, app: readToken(ws.name, "slack-app") }, sink, opts.triggerEmoji);
 }
 
-export const checkWorkspace = (ws: Workspace): Promise<Check[]> => (isTelegram(ws) ? telegramChecks(ws) : slackChecks(ws));
+export const checkWorkspace = (ws: Workspace): Promise<Check[]> =>
+  (isTelegram(ws) ? telegramChecks(ws) : slackChecks(ws)).catch((e) => [{ label: "checks", ok: false, hint: String(e?.message ?? e) }]);
+
+/**
+ * Bridges for the workspaces that pass their checks. The rest are off, with the reason, so one broken workspace
+ * (say a Slack app still waiting for approval) doesn't stop the others.
+ */
+export async function openWorkspaces(workspaces: Workspace[], sink: Sink, opts: { triggerEmoji: string }) {
+  const bridges = new Map<string, Messenger>();
+  const off: { name: string; reason: string }[] = [];
+  const checked = await Promise.all(workspaces.map(async (ws) => ({ ws, problems: blocking(await checkWorkspace(ws)) })));
+  for (const { ws, problems } of checked) {
+    try {
+      if (problems.length) throw new Error(problems.map((p) => `${p.label}: ${p.hint}`).join("; "));
+      bridges.set(ws.name, createMessenger(ws, sink, opts));
+    } catch (e: any) {
+      off.push({ name: ws.name, reason: e?.message ?? String(e) });
+    }
+  }
+  return { bridges, off };
+}
 
 /** For one-off posts outside the coordinator (`remy post`, setup's test message). */
 export const quietSink: Sink = { push: async () => {}, permission: async () => {}, log: () => {} };

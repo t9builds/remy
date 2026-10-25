@@ -289,11 +289,8 @@ function storeToken(workspace, kind, token) {
 `, { mode: 384 });
 }
 
-// src/slack-bridge.ts
-import { mkdirSync as mkdirSync2 } from "fs";
-import { join as join2 } from "path";
-
 // src/messenger.ts
+var blocking = (checks) => checks.filter((c) => !c.ok && !c.optional);
 var AWAIT_ANSWER_MS = 30 * 60000;
 var VERDICT = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i;
 function parseVerdict(text) {
@@ -305,6 +302,10 @@ function permissionText(p) {
   return `\uD83D\uDD12 *remy wants to run ${p.tool_name}*: ${p.description}
 \`\`\`${preview}\`\`\``;
 }
+
+// src/slack-bridge.ts
+import { mkdirSync as mkdirSync2 } from "fs";
+import { join as join2 } from "path";
 
 // src/slack.ts
 class Slack {
@@ -1223,7 +1224,22 @@ function createMessenger(ws, sink, opts) {
     throw missing("Slack bot token or user ID");
   return new SlackBridge(ws, { bot, app: readToken(ws.name, "slack-app") }, sink, opts.triggerEmoji);
 }
-var checkWorkspace = (ws) => isTelegram(ws) ? telegramChecks(ws) : slackChecks(ws);
+var checkWorkspace = (ws) => (isTelegram(ws) ? telegramChecks(ws) : slackChecks(ws)).catch((e) => [{ label: "checks", ok: false, hint: String(e?.message ?? e) }]);
+async function openWorkspaces(workspaces, sink, opts) {
+  const bridges = new Map;
+  const off = [];
+  const checked = await Promise.all(workspaces.map(async (ws) => ({ ws, problems: blocking(await checkWorkspace(ws)) })));
+  for (const { ws, problems } of checked) {
+    try {
+      if (problems.length)
+        throw new Error(problems.map((p) => `${p.label}: ${p.hint}`).join("; "));
+      bridges.set(ws.name, createMessenger(ws, sink, opts));
+    } catch (e) {
+      off.push({ name: ws.name, reason: e?.message ?? String(e) });
+    }
+  }
+  return { bridges, off };
+}
 var quietSink = { push: async () => {}, permission: async () => {}, log: () => {} };
 
 // src/doctor.ts
@@ -1239,12 +1255,12 @@ async function doctor() {
   rows.push({ label: "gh authenticated", ok: sh(["gh", "auth", "status"]).ok, hint: "run `gh auth login`" });
   const c = loadConfig();
   rows.push({ label: "at least one workspace", ok: c.workspaces.length > 0, hint: "run `remy setup`" });
-  const perWorkspace = await Promise.all(c.workspaces.map(async (ws) => (await checkWorkspace(ws)).map((r) => ({ ...r, group: `[${ws.name}]` }))));
+  const perWorkspace = await Promise.all(c.workspaces.map(async (ws) => (await checkWorkspace(ws)).map((r) => ({ ...r, workspace: ws.name }))));
   rows.push(...perWorkspace.flat());
   const catchAll = c.workspaces.filter((w) => !w.repos?.length && !w.paths?.length);
   if (catchAll.length > 1)
     rows.push({ label: "one catch-all workspace", ok: false, optional: true, hint: `${catchAll.length} have no repos or paths; "${catchAll[0].name}" gets every unmatched session` });
-  return { ok: rows.every((r) => r.ok || r.optional), rows };
+  return { ok: !blocking(rows).length, rows };
 }
 
 // src/hook.ts
@@ -2540,7 +2556,7 @@ var import_picocolors = __toESM(require_picocolors(), 1);
 function formatChecks(rows) {
   return rows.map((r) => {
     const mark = r.ok ? import_picocolors.default.green("\u2713") : r.optional ? import_picocolors.default.yellow("!") : import_picocolors.default.red("\u2717");
-    const label = `${r.group ? import_picocolors.default.dim(`${r.group} `) : ""}${r.label}`;
+    const label = `${r.workspace ? import_picocolors.default.dim(`[${r.workspace}] `) : ""}${r.label}`;
     return `${mark} ${label}${r.ok || !r.hint ? "" : import_picocolors.default.dim(` \u2014 ${r.hint}`)}`;
   }).join(`
 `);
@@ -3047,14 +3063,24 @@ function parse(args, options) {
   return parseArgs({ args, options: { ...options, help: { type: "boolean", short: "h" } }, allowPositionals: true, strict: true });
 }
 async function start(extra) {
-  const { ok, rows } = await doctor();
-  if (!ok) {
+  const { rows } = await doctor();
+  const c = loadConfig();
+  const problems = blocking(rows);
+  const broken = new Set(problems.map((r) => r.workspace).filter((w) => w !== undefined));
+  const working = c.workspaces.filter((w) => !broken.has(w.name));
+  if (problems.some((r) => !r.workspace) || !working.length) {
     console.log(formatChecks(rows));
     console.error(`
 ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${import_picocolors.default.cyan("remy setup")}).`)}`);
     process.exit(1);
   }
-  const c = loadConfig();
+  if (broken.size) {
+    const fallback = workspaceFor({}, { ...c, workspaces: working })?.name;
+    console.log(formatChecks(rows.filter((r) => r.workspace && broken.has(r.workspace))));
+    for (const name of broken)
+      console.log(import_picocolors.default.yellow(`! ${import_picocolors.default.bold(name)} is off until fixed (${import_picocolors.default.cyan(`remy setup ${name}`)}); its sessions report to ${import_picocolors.default.bold(fallback ?? "")} meanwhile.`));
+    console.log("");
+  }
   writeJson(PATHS.mcpConfig, {
     mcpServers: { remy: { command: process.execPath, args: [join5(ROOT2, "dist", "channel.js")] } }
   });
@@ -3072,7 +3098,7 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
     "--append-system-prompt-file",
     join5(ROOT2, "coordinator.md"),
     ...extra,
-    "Coordinator started. Run `remy status`, then post a short hello to each workspace with how many of its sessions are running and which need attention."
+    "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention."
   ];
   const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, REMY_ROLE: "coordinator" } });
   process.exit(r.exitCode ?? 0);

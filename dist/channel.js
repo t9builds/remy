@@ -15441,11 +15441,8 @@ function storeToken(workspace, kind, token) {
 `, { mode: 384 });
 }
 
-// src/slack-bridge.ts
-import { mkdirSync as mkdirSync2 } from "fs";
-import { join as join2 } from "path";
-
 // src/messenger.ts
+var blocking = (checks) => checks.filter((c) => !c.ok && !c.optional);
 var AWAIT_ANSWER_MS = 30 * 60000;
 var VERDICT = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i;
 function parseVerdict(text) {
@@ -15457,6 +15454,10 @@ function permissionText(p) {
   return `\uD83D\uDD12 *remy wants to run ${p.tool_name}*: ${p.description}
 \`\`\`${preview}\`\`\``;
 }
+
+// src/slack-bridge.ts
+import { mkdirSync as mkdirSync2 } from "fs";
+import { join as join2 } from "path";
 
 // src/slack.ts
 class Slack {
@@ -16375,7 +16376,22 @@ function createMessenger(ws, sink, opts) {
     throw missing("Slack bot token or user ID");
   return new SlackBridge(ws, { bot, app: readToken(ws.name, "slack-app") }, sink, opts.triggerEmoji);
 }
-var checkWorkspace = (ws) => isTelegram(ws) ? telegramChecks(ws) : slackChecks(ws);
+var checkWorkspace = (ws) => (isTelegram(ws) ? telegramChecks(ws) : slackChecks(ws)).catch((e) => [{ label: "checks", ok: false, hint: String(e?.message ?? e) }]);
+async function openWorkspaces(workspaces, sink, opts) {
+  const bridges = new Map;
+  const off = [];
+  const checked = await Promise.all(workspaces.map(async (ws) => ({ ws, problems: blocking(await checkWorkspace(ws)) })));
+  for (const { ws, problems } of checked) {
+    try {
+      if (problems.length)
+        throw new Error(problems.map((p) => `${p.label}: ${p.hint}`).join("; "));
+      bridges.set(ws.name, createMessenger(ws, sink, opts));
+    } catch (e) {
+      off.push({ name: ws.name, reason: e?.message ?? String(e) });
+    }
+  }
+  return { bridges, off };
+}
 var quietSink = { push: async () => {}, permission: async () => {}, log: () => {} };
 
 // src/hook.ts
@@ -16631,24 +16647,21 @@ var sink = {
   log
 };
 var bridges = new Map;
-var setupProblems = [];
-for (const ws of config2.workspaces) {
-  try {
-    bridges.set(ws.name, createMessenger(ws, sink, { triggerEmoji: config2.triggerEmoji }));
-  } catch (e) {
-    setupProblems.push(e?.message ?? String(e));
-  }
-}
-if (!config2.workspaces.length)
-  setupProblems.push("no workspace is configured");
-var workspaceOf = (cwd, repo) => workspaceFor({ cwd, repo: repo ?? githubRepoOf(cwd) }, config2)?.name ?? "";
+var off = [];
+var active = { ...config2, workspaces: [] };
+var ready = openWorkspaces(config2.workspaces, sink, { triggerEmoji: config2.triggerEmoji }).then((r) => {
+  bridges = r.bridges;
+  off = r.off;
+  active = { ...config2, workspaces: config2.workspaces.filter((w) => bridges.has(w.name)) };
+});
+var workspaceOf = (cwd, repo) => workspaceFor({ cwd, repo: repo ?? githubRepoOf(cwd) }, active)?.name ?? "";
 function bridgeFor(workspace, cwd) {
   const b = workspace && bridges.get(workspace) || bridges.get(workspaceOf(cwd)) || bridges.values().next().value;
   if (!b)
     throw new Error("No workspace is set up. Tell the user to run `remy setup` in a terminal.");
   return b;
 }
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+mcp.setRequestHandler(ListToolsRequestSchema, async () => (await ready, {
   tools: [
     {
       name: "post",
@@ -16659,7 +16672,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
           workspace: {
             type: "string",
-            description: `Workspace from the event tag. Configured: ${config2.workspaces.map((w) => `${w.name} (${messengerName(w)})`).join(", ") || "none"}`
+            description: `Workspace from the event tag. Working: ${active.workspaces.map((w) => `${w.name} (${messengerName(w)})`).join(", ") || "none"}`
           },
           thread: { type: "string", description: "Answer in this thread: thread or id from the event tag, or an id post returned" },
           session: {
@@ -16687,15 +16700,17 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   ]
 }));
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+  await ready;
   const a = req.params.arguments ?? {};
   const origin = a.session && !a.thread ? readJson(PATHS.spawned, {})[a.session]?.slack : undefined;
   if (origin)
     Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
   const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+  const rerouted = a.workspace && a.workspace !== bridge.ws.name ? ` ("${a.workspace}" is off, so this went to "${bridge.ws.name}")` : "";
   try {
     if (req.params.name === "post") {
       const id = await bridge.post(String(a.text), { thread: a.thread, session: a.session, expect_reply: a.expect_reply });
-      return { content: [{ type: "text", text: `posted to ${bridge.ws.name} id=${id}` }] };
+      return { content: [{ type: "text", text: `posted to ${bridge.ws.name} id=${id}${rerouted}` }] };
     }
     if (req.params.name === "update") {
       await bridge.update(String(a.id), String(a.text));
@@ -16711,6 +16726,7 @@ var PermissionRequestNotification = object2({
   params: object2({ request_id: string2(), tool_name: string2(), description: string2(), input_preview: string2() })
 });
 mcp.setNotificationHandler(PermissionRequestNotification, async ({ params }) => {
+  await ready;
   await bridgeFor(lastActive).askPermission(params);
 });
 var agentsCache = { at: 0, rows: [] };
@@ -16807,7 +16823,7 @@ async function digest() {
     const { snapshot, changes, first } = await snapshotDiff();
     if (first || !changes.length)
       return;
-    const names = new Set(config2.workspaces.map((w) => w.name));
+    const names = new Set(bridges.keys());
     if (!names.size)
       names.add("");
     for (const name of names) {
@@ -16834,9 +16850,17 @@ mcp.onclose = () => process.exit(0);
 process.stdin.on("close", () => process.exit(0));
 await mcp.connect(new StdioServerTransport);
 await initialized;
-log("started", [...bridges.keys()].join(","));
-if (setupProblems.length)
-  await push("system", `remy setup is incomplete: ${setupProblems.join("; ")}. Tell the user to run \`remy setup\` in a terminal, then restart with \`remy start\`.`);
+await ready;
+log("started", [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => o.name).join(",")}` : "");
+if (!config2.workspaces.length)
+  await push("system", "No workspace is configured. Tell the user in this terminal to run `remy setup`, then `remy start`.");
+else if (!bridges.size)
+  await push("system", `No workspace works: ${off.map((o) => `"${o.name}" (${o.reason})`).join("; ")}. Tell the user in this terminal; \`remy doctor\` shows what to fix.`);
+else {
+  const fallback = workspaceFor({}, active)?.name;
+  for (const o of off)
+    await push("system", `Workspace "${o.name}" is off: ${o.reason}. Until it's fixed (\`remy setup ${o.name}\`, then restart), its sessions report to "${fallback}" and posts to "${o.name}" go there too. Don't post a separate hello for "${o.name}"; mention it in the hello to "${fallback}".`);
+}
 for (const b of bridges.values())
   b.start().catch((e) => push("system", `Workspace "${b.ws.name}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
 tailEvents();
