@@ -147,9 +147,9 @@ export async function takeSnapshot(): Promise<Snapshot> {
   return { takenAt: Date.now(), sessions };
 }
 
-function prLabel(pr: Pr) {
+function prLabel(pr: Pr, paint: Paint = PLAIN) {
   const state = pr.state === "OPEN" ? (pr.draft ? "draft" : "open") : pr.state.toLowerCase();
-  return `#${pr.number} ${state}, CI ${pr.ci}${pr.review ? `, ${pr.review.toLowerCase().replace(/_/g, " ")}` : ""}`;
+  return `#${pr.number} ${state}, ${paint.ci(pr.ci, `CI ${pr.ci}`)}${pr.review ? `, ${pr.review.toLowerCase().replace(/_/g, " ")}` : ""}`;
 }
 
 export function diff(prev: Snapshot | undefined, next: Snapshot): Change[] {
@@ -187,14 +187,24 @@ export async function snapshotDiff(): Promise<{ snapshot: Snapshot; changes: Cha
   return { snapshot, changes: diff(prev, snapshot), first: !prev };
 }
 
-export function formatTable(s: Snapshot): string {
+/** Optional styling for `formatTable`; the CLI passes colors, the coordinator gets plain text. */
+export type Paint = {
+  name(s: string): string;
+  status(status: string, s: string): string;
+  ci(ci: Ci, s: string): string;
+  dim(s: string): string;
+};
+const same = (s: string) => s;
+const PLAIN: Paint = { name: same, status: (_, s) => s, ci: (_, s) => s, dim: same };
+
+export function formatTable(s: Snapshot, paint: Paint = PLAIN): string {
   if (!s.sessions.length) return "No sessions running.";
   return s.sessions
     .sort((a, b) => b.startedAt - a.startedAt)
     .map((x) => {
       const where = x.repo ? `${x.repo}${x.branch ? `@${x.branch}` : ""}` : x.cwd;
-      const pr = x.pr ? ` · PR ${prLabel(x.pr)} ${x.pr.url}` : "";
-      return `${x.name} [${x.status}${x.spawned ? ", spawned" : ""}] ${where}${pr}`;
+      const pr = x.pr ? ` · PR ${prLabel(x.pr, paint)} ${paint.dim(x.pr.url)}` : "";
+      return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}`;
     })
     .join("\n");
 }

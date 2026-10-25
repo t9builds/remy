@@ -168,20 +168,23 @@ export function readToken(workspace: string, kind: TokenKind): string | undefine
   }
 }
 
-/** Store a token, asking for it without echo. macOS: keychain. Elsewhere: a 0600 file in ~/.remy. */
-export function storeTokenInteractive(workspace: string, kind: TokenKind): boolean {
+/** What each kind of token looks like, to catch a paste of the wrong one. */
+export const TOKEN_FORMAT: Record<TokenKind, { pattern: RegExp; example: string }> = {
+  "slack-bot": { pattern: /^xoxb-[\w-]+$/, example: "xoxb-…" },
+  "slack-app": { pattern: /^xapp-[\w-]+$/, example: "xapp-…" },
+  "telegram-bot": { pattern: /^\d+:[\w-]{30,}$/, example: "123456789:AA…" },
+};
+
+/** Store a token. macOS: keychain, handed over on stdin so it never shows in the process list. Elsewhere: a 0600 file in ~/.remy. */
+export function storeToken(workspace: string, kind: TokenKind, token: string) {
   ensureDir();
+  if (!TOKEN_FORMAT[kind].pattern.test(token)) throw new Error(`That doesn't look like a ${kind} token (${TOKEN_FORMAT[kind].example})`);
   if (process.platform === "darwin") {
-    // `security … -w` with no value prompts for it without echoing.
-    const r = Bun.spawnSync(["security", "add-generic-password", "-U", "-a", "remy", "-s", keychainService(workspace, kind), "-w"], {
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    return r.exitCode === 0;
+    const cmd = `add-generic-password -U -a remy -s "${keychainService(workspace, kind)}" -w "${token}"\n`;
+    const r = Bun.spawnSync(["security", "-i"], { stdin: new TextEncoder().encode(cmd), stdout: "pipe", stderr: "pipe" });
+    const saved = Bun.spawnSync(["security", "find-generic-password", "-s", keychainService(workspace, kind), "-w"]).stdout.toString().trim();
+    if (r.exitCode !== 0 || saved !== token) throw new Error(`Saving the ${kind} token to the keychain failed: ${r.stderr.toString().trim()}`);
+    return;
   }
-  const t = prompt(`${kind} token:`)?.trim();
-  if (!t) return false;
-  writeFileSync(PATHS.tokenFile(workspace, kind), t + "\n", { mode: 0o600 });
-  return true;
+  writeFileSync(PATHS.tokenFile(workspace, kind), token + "\n", { mode: 0o600 });
 }

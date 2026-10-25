@@ -1,4 +1,5 @@
 #!/bin/sh
 # Entry point for hooks, the Bash tool (plugin bin/ is on PATH) and the ~/.local/bin shim.
+# Runs the bundle: an installed plugin has no node_modules. While developing, `bun src/cli.ts` runs the source.
 here=$(cd "$(dirname "$0")/.." && pwd)
-exec bun "$here/src/cli.ts" "$@"
+exec bun "$here/dist/cli.js" "$@"
