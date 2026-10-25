@@ -4,20 +4,23 @@ status: accepted
 
 # Agents verify changes; humans make judgment calls, not code reviews
 
-By default, no person reviews code. A change reaches production when the system has verified it:
-- deterministic checks (tests, typecheck, CI)
-- review by an agent that didn't write the change, repeated with a fresh agent after every fix until one finds nothing
-- checks of the running change on dev, then on production
+By default, no person reviews code. Agents that didn't write a change verify it, at every point where it moves on:
 
-Humans are asked only for judgment calls: a low-confidence verdict, a protected path, a failed verification, a product question an agent can't answer, or a rollback that didn't recover. Reviewing every PR by hand doesn't scale with parallel agents; people find they can keep up with only two or three. The verification that replaces review has to be stronger than a skim of the diff, not weaker.
+1. **Verifier.** A verifier agent runs the checks (tests, typecheck, CI) and reviews the change against what it claims to do. It fixes what it finds. After every fix a fresh verifier takes over, until one finds nothing.
+2. **Dev check.** After the merge and the dev deploy, an agent checks the running change on dev.
+3. **Release check.** An agent decides whether the change can go to production on its own, or whether it needs a person to look first. It weighs what the change touches, what the verifiers and the dev check found, and how risky the change is.
+4. **Production check.** Once the change is live, another agent checks it on production. If it doesn't work, Remy tells the change's author in their messaging channel, with what failed.
+
+Humans are asked only for judgment calls: the release check asking for a human review, a low-confidence verdict, a protected path, a failed check, or a product question an agent can't answer. Reviewing every PR by hand doesn't scale with parallel agents; people find they can keep up with only two or three. The verification that replaces review has to be stronger than a skim of the diff, not weaker.
 
 ## Considered Options
 
-- **The author agent verifies its own work.** Rejected as the only check. The author shares its own blind spots. It still runs the checks before it says it's done, but the verdict that gates a merge comes from a fresh agent and from deterministic checks.
-- **Human review as the merge gate.** Kept only where a team marks paths as protected (auth, money, migrations, infrastructure), or where the stakes justify it.
+- **The author agent verifies its own work.** Rejected. The author shares its own blind spots. A separate verification agent decides.
+- **Human review as the merge gate.** Rejected as the default. The release check asks for it when a change warrants it, and teams can mark paths that always need it (auth, money, migrations, infrastructure).
+- **Automatic rollback when the production check fails.** Rejected. Deciding whether to roll back, fix forward or accept is a judgment call. The release check is what keeps risky changes from reaching production on their own.
 
 ## Consequences
 
-- Production verification needs a way back. Every pipeline that deploys to production must define a rollback action or an automatic revert, and Remy reports what it did.
+- A failed production check stays live until someone acts. It goes to the author at once as the most urgent judgment call, with an offer to start a fix.
 - Verification is only as good as what agents can check. Teams get the most from end-to-end scenarios and environment checks, and from holdout scenarios agents never see (as in StrongDM's software factory), not from diff review alone.
 - The waiting list becomes the list of judgment calls.
