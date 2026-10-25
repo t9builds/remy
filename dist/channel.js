@@ -17137,9 +17137,11 @@ function formatMerged(spawned) {
 // src/queue.ts
 var MARK = ["\uD83D\uDD34", "\uD83D\uDFE0", "\uD83D\uDFE1", "\uD83D\uDFE2", "\u26AA"];
 var short = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}\u2026` : s).replace(/\s+/g, " ").trim();
+var unwrap = (l) => l.trim().replace(/^(?:(?:[#>]+|[-+*](?=\s)|[*_]+)\s*)+/, "").replace(/[*_]+$/, "").trim();
+var asks = (l) => /\?["'\u201D)]*$/.test(l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, "").trim());
 function questionOf(last) {
   const line = last?.split(`
-`).map((l) => l.replace(/[*_`#>]/g, "").trim()).findLast((l) => l.includes("?"));
+`).map(unwrap).findLast(asks);
   return line ? short(line) : undefined;
 }
 function itemOf(s) {
@@ -17189,6 +17191,41 @@ _${busy} more working on their own_` : "";
 ${lines.join(`
 `)}${tail}`;
 }
+async function showQueue(m, prev, text, log) {
+  if (prev?.text === text)
+    return prev;
+  if (prev) {
+    try {
+      await m.update(prev.id, text);
+      return { id: prev.id, text };
+    } catch (e) {
+      const why = String(e?.message ?? e);
+      if (/message is not modified/i.test(why))
+        return { id: prev.id, text };
+      if (!MESSAGE_GONE.test(why)) {
+        log("queue edit failed, will retry", why);
+        return prev;
+      }
+      log("queue message gone, posting a new one", why);
+    }
+  }
+  const id = await m.post(text);
+  await m.pin?.(id).catch((e) => log("queue pin failed", e?.message ?? e));
+  return { id, text };
+}
+var MESSAGE_GONE = /message to edit not found|message can't be edited|message_not_found|cant_update_message/i;
+function coalesce(run) {
+  const timers = new Map;
+  return (ms) => {
+    if (timers.has(ms))
+      return;
+    timers.set(ms, setTimeout(() => {
+      timers.delete(ms);
+      run();
+    }, ms));
+  };
+}
+var digestWorthy = (c) => c.what === "merged" || c.what === "ended" || c.what === "pr_state" && /\u2192 #\d+ merged/.test(c.detail);
 
 // src/channel.ts
 var config2 = loadConfig();
@@ -17219,7 +17256,7 @@ async function push(kind, content, meta = {}) {
   if (kind === "user_message" && meta.workspace)
     lastActive = meta.workspace;
   if (kind === "user_message")
-    scheduleQueue(30000);
+    scheduleQueue(QUEUE_AFTER_USER_MS);
   log("push", kind, meta.workspace ?? "", content.slice(0, 120).replace(/\n/g, " "));
   await mcp.notification({ method: "notifications/claude/channel", params: { content, meta: { kind, ...clean } } });
 }
@@ -17365,7 +17402,11 @@ async function onEvent(e) {
   }
   if (e.event === "Stop" || e.event === "SessionEnd") {
     const s = await sessionInfo(e.session_id);
-    if (!s.unattended || s.merged || debounced(`done:${e.session_id}`, 30000))
+    if (!s.unattended || s.merged)
+      return;
+    if (e.event === "Stop" && !questionOf(e.last))
+      return;
+    if (debounced(`done:${e.session_id}`, 30000))
       return;
     const what = e.event === "Stop" ? "finished its turn" : `ended (${e.type ?? "exit"})`;
     await push("agent_finished", `${s.name} ${what}.
@@ -17417,7 +17458,7 @@ async function digest() {
     if (closed.size)
       writeJson(PATHS.snapshot, snapshot);
     await refreshQueue(snapshot);
-    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged];
+    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged].filter(digestWorthy);
     if (first || !changes.length)
       return;
     const names = new Set(bridges.keys());
@@ -17442,15 +17483,12 @@ ${formatTable({ ...snapshot, sessions })}`, {
     log("digest error", e?.message ?? e);
   }
 }
-var queueTimer;
 var queueRun = Promise.resolve();
-function scheduleQueue(ms = 1e4) {
-  if (queueTimer)
-    return;
-  queueTimer = setTimeout(() => {
-    queueTimer = undefined;
-    refreshQueue();
-  }, ms);
+var QUEUE_AFTER_EVENT_MS = 1e4;
+var QUEUE_AFTER_USER_MS = 30000;
+var queueAfter = coalesce(() => void refreshQueue());
+function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
+  queueAfter(ms);
 }
 function queueText(snap, workspace) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
@@ -17462,22 +17500,7 @@ function refreshQueue(snapshot) {
       const snap = snapshot ?? await takeSnapshot();
       const state = readJson(PATHS.queue, {});
       for (const [name, b] of bridges) {
-        const text = queueText(snap, name);
-        const prev = state[name];
-        if (prev?.text === text)
-          continue;
-        if (prev) {
-          try {
-            await b.update(prev.id, text);
-            state[name] = { id: prev.id, text };
-            continue;
-          } catch (e) {
-            log("queue edit failed, posting a new one", name, e?.message ?? e);
-          }
-        }
-        const id = await b.post(text);
-        await b.pin?.(id).catch((e) => log("queue pin failed", name, e?.message ?? e));
-        state[name] = { id, text };
+        state[name] = await showQueue(b, state[name], queueText(snap, name), (...a) => log(...a, name));
       }
       writeJson(PATHS.queue, state);
     } catch (e) {

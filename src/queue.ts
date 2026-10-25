@@ -2,8 +2,9 @@
  * What waits on the user, most urgent first: the one list to read instead of a stream of messages. Built from a
  * snapshot, so it holds only what is true now; the channel keeps it as one message per workspace, edited in place.
  */
+import type { Messenger } from "./messenger";
 import { aboutOf } from "./nickname";
-import type { SessionView, Snapshot } from "./snapshot";
+import type { Change, SessionView, Snapshot } from "./snapshot";
 
 export type QueueItem = {
   session: string;
@@ -23,9 +24,15 @@ const MARK = ["🔴", "🟠", "🟡", "🟢", "⚪"];
 
 const short = (s: string, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}…` : s).replace(/\s+/g, " ").trim();
 
-/** The question a turn ended on: its last line with a question mark. */
+/** A line without the Markdown around it: heading, quote and list marks, and emphasis at either end. */
+const unwrap = (l: string) => l.trim().replace(/^(?:(?:[#>]+|[-+*](?=\s)|[*_]+)\s*)+/, "").replace(/[*_]+$/, "").trim();
+
+/** Whether a line asks something: it ends in a question mark that isn't part of a URL or of code. */
+const asks = (l: string) => /\?["'”)]*$/.test(l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, "").trim());
+
+/** The question a turn ended on: its last line that ends in a question mark. */
 export function questionOf(last: string | undefined): string | undefined {
-  const line = last?.split("\n").map((l) => l.replace(/[*_`#>]/g, "").trim()).findLast((l) => l.includes("?"));
+  const line = last?.split("\n").map(unwrap).findLast(asks);
   return line ? short(line) : undefined;
 }
 
@@ -67,3 +74,50 @@ export function formatQueue(items: QueueItem[], sessions: SessionView[] = [], pl
   });
   return `*Waiting on you (${items.length})*\n${lines.join("\n")}${tail}`;
 }
+
+/**
+ * Show `text` in the message `prev` points to, or post and pin a new one when that message is gone. Returns what to
+ * remember: still `prev` after an edit that failed for another reason (offline, rate limited), so the next refresh retries.
+ */
+export async function showQueue(m: Messenger, prev: { id: string; text: string } | undefined, text: string, log: (...a: unknown[]) => void) {
+  if (prev?.text === text) return prev;
+  if (prev) {
+    try {
+      await m.update(prev.id, text);
+      return { id: prev.id, text };
+    } catch (e: any) {
+      const why = String(e?.message ?? e);
+      if (/message is not modified/i.test(why)) return { id: prev.id, text };
+      if (!MESSAGE_GONE.test(why)) {
+        log("queue edit failed, will retry", why);
+        return prev;
+      }
+      log("queue message gone, posting a new one", why);
+    }
+  }
+  const id = await m.post(text);
+  await m.pin?.(id).catch((e: any) => log("queue pin failed", e?.message ?? e));
+  return { id, text };
+}
+
+/** Errors that mean the message can't be edited any more: Telegram's, then Slack's. */
+const MESSAGE_GONE = /message to edit not found|message can't be edited|message_not_found|cant_update_message/i;
+
+/** Calls `run` `ms` after the first call for that delay; calls with the same delay in between share it. */
+export function coalesce(run: () => void) {
+  const timers = new Map<number, ReturnType<typeof setTimeout>>();
+  return (ms: number) => {
+    if (timers.has(ms)) return;
+    timers.set(
+      ms,
+      setTimeout(() => {
+        timers.delete(ms);
+        run();
+      }, ms),
+    );
+  };
+}
+
+/** Changes a digest still reports: merges and ended sessions. The pinned list shows the rest. */
+export const digestWorthy = (c: Change) =>
+  c.what === "merged" || c.what === "ended" || (c.what === "pr_state" && /→ #\d+ merged/.test(c.detail));

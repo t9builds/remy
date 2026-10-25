@@ -2015,9 +2015,11 @@ function formatMerged(spawned) {
 // src/queue.ts
 var MARK = ["\uD83D\uDD34", "\uD83D\uDFE0", "\uD83D\uDFE1", "\uD83D\uDFE2", "\u26AA"];
 var short = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}\u2026` : s).replace(/\s+/g, " ").trim();
+var unwrap = (l) => l.trim().replace(/^(?:(?:[#>]+|[-+*](?=\s)|[*_]+)\s*)+/, "").replace(/[*_]+$/, "").trim();
+var asks = (l) => /\?["'\u201D)]*$/.test(l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, "").trim());
 function questionOf(last) {
   const line = last?.split(`
-`).map((l) => l.replace(/[*_`#>]/g, "").trim()).findLast((l) => l.includes("?"));
+`).map(unwrap).findLast(asks);
   return line ? short(line) : undefined;
 }
 function itemOf(s) {
@@ -2067,6 +2069,41 @@ _${busy} more working on their own_` : "";
 ${lines.join(`
 `)}${tail}`;
 }
+async function showQueue(m, prev, text, log) {
+  if (prev?.text === text)
+    return prev;
+  if (prev) {
+    try {
+      await m.update(prev.id, text);
+      return { id: prev.id, text };
+    } catch (e) {
+      const why = String(e?.message ?? e);
+      if (/message is not modified/i.test(why))
+        return { id: prev.id, text };
+      if (!MESSAGE_GONE.test(why)) {
+        log("queue edit failed, will retry", why);
+        return prev;
+      }
+      log("queue message gone, posting a new one", why);
+    }
+  }
+  const id = await m.post(text);
+  await m.pin?.(id).catch((e) => log("queue pin failed", e?.message ?? e));
+  return { id, text };
+}
+var MESSAGE_GONE = /message to edit not found|message can't be edited|message_not_found|cant_update_message/i;
+function coalesce(run) {
+  const timers = new Map;
+  return (ms) => {
+    if (timers.has(ms))
+      return;
+    timers.set(ms, setTimeout(() => {
+      timers.delete(ms);
+      run();
+    }, ms));
+  };
+}
+var digestWorthy = (c) => c.what === "merged" || c.what === "ended" || c.what === "pr_state" && /\u2192 #\d+ merged/.test(c.detail);
 
 // node_modules/@clack/core/dist/index.mjs
 import { styleText } from "util";
