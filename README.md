@@ -1,5 +1,7 @@
 # Remy
 
+<p align="center"><img src="assets/remy-cooking.svg" alt="A rat chef watching four pots on a stove, each pot an agent session: one bubbling, one with a PR ready, one waiting for input, one smoking with failed CI" width="900"></p>
+
 Remy is a coordinator for people who run many Claude Code sessions at once. One long-running Claude Code session (named `remy`) tracks every session on your machine and talks to you in a Slack DM. It can:
 
 - start new background agents, each in its own worktree
