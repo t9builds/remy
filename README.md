@@ -148,7 +148,7 @@ Restart your Claude Code sessions so they load the hooks. Then, in a terminal:
 remy start
 ```
 
-`remy setup` asks for your repo folders, the prompt template for spawned agents and the digest interval, then for each workspace: Slack or Telegram, which repos or folders report there, and then either your Slack member ID (Slack → profile → ⋮ → Copy member ID), transport and tokens, or your Telegram bot token and a pairing message. Tokens go to the macOS keychain (`~/.remy/*-token.<workspace>` on Linux). It installs `~/.local/bin/remy` and sends you a test message in each workspace. `remy setup <workspace>` edits one workspace.
+`remy setup` walks you through it: your repo folders, the prompt for spawned agents and the digest interval, then each workspace. For a workspace you pick Slack or Telegram and which repos or folders report there. Then either your Slack member ID (Slack → profile → ⋮ → Copy member ID), how to read your DMs and the bot token, or your Telegram bot token and a pairing message. Tokens are checked with Slack or Telegram before they're saved to the macOS keychain (`~/.remy/*-token.<workspace>` on Linux). Setup sends you a test message in each workspace, installs `~/.local/bin/remy` and ends with `remy doctor`. `remy setup <workspace>` edits one workspace.
 
 `remy start` opens the coordinator. Accept the development-channel warning; custom channels need it during the research preview. Keep the terminal open.
 
@@ -232,5 +232,6 @@ A path covers the folder and everything inside it, not sibling folders that shar
 ```sh
 bun install
 bun test && bun run typecheck
-bun run build   # bundles src/channel.ts into dist/channel.js, which is committed
+bun run build   # bundles src/channel.ts and src/cli.ts into dist/, which is committed
+bun src/cli.ts status   # run the CLI from source
 ```
