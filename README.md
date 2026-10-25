@@ -28,16 +28,16 @@ Run `remy start` in the morning and leave that terminal open. Remy posts what's 
 
 ```
 remy: Morning. 3 sessions running:
-      • web-onboarding · web · idle · PR #212 · CI ✓
-      • api-rate-limits · api · busy · no PR
-      • docs-cli · docs · waiting for you
+      • brioche · web · idle · PR #212 · CI ✓
+      • risotto · api · busy · no PR
+      • pesto · docs · waiting for you
 ```
 
 Give it work and get on with yours:
 
 ```
 you:  start an agent in api: the invoice export times out for big accounts, fix it and open a PR
-remy: Started api-invoice-export in api. I'll report here.
+remy: Started saffron in api. I'll report here.
 ```
 
 Someone posts a bug in `#bugs`. React with 🐭, or reply in the thread mentioning the bot (`@remy fix this`, using your bot's name). Remy adds 👀 and starts an agent. Updates go in the same thread, so whoever reported the bug sees the PR too:
@@ -52,18 +52,18 @@ remy: bugs-login-timeout · web · done · PR #219 · CI ✓
 When an agent has a question, it comes to you. Your answer goes straight to the agent:
 
 ```
-remy: api-invoice-export is asking: stream the CSV, or generate it in a background job and email a link?
+remy: saffron is asking: stream the CSV, or generate it in a background job and email a link?
 you:  stream it, accounts are under 50k rows
-remy: Sent to api-invoice-export.
+remy: Sent to saffron.
 ```
 
 Every 15 minutes you get a summary, if anything changed. If nothing did, you get nothing:
 
 ```
 remy: Since 10:30
-      • api-invoice-export opened PR #88 · CI running
-      • web-onboarding: PR #212 approved
-      • api-rate-limits: CI failed
+      • saffron opened PR #88 · CI running
+      • brioche: PR #212 approved
+      • risotto: CI failed
 ```
 
 Finished PRs come with their link and CI status. You review and merge them like you always do.
@@ -74,8 +74,9 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 
 - Put your usual routine in `spawnTemplate`, e.g. `/start-feature {task}`. Every agent Remy starts then branches, tests and opens a PR the way you would.
 - Sessions you start yourself show up too. Remy only pings you about one if it's been stuck for about a minute, so it won't bother you about a session you're watching.
+- Every session gets a short kitchen name, like `saffron` or `risotto`, that's easy to type from your phone. A session you named yourself (`claude -n`, `/rename`) keeps its name.
 - Each agent gets its own Slack thread, or reply chain in Telegram. Reply there to talk to that agent.
-- Ask things like "what's api-rate-limits doing?" and Remy checks with the agent or reads its log.
+- Ask things like "what's risotto doing?" and Remy checks with the agent or reads its log.
 - Teammates can install it too. Each person runs their own Remy on their own Claude subscription, and only your own messages and 🐭 reactions reach yours.
 
 ## How it works
@@ -83,12 +84,13 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | Piece | What it does |
 |---|---|
 | Plugin hooks (`Stop`, `Notification`, `SessionEnd`) | Every session appends its events to `~/.remy/events.jsonl` |
+| Plugin hook (`UserPromptSubmit`) | Names a session that has no name yet after a dish or ingredient (`src/kitchen-names.ts`), on its first prompt, and keeps that prompt in `~/.remy/nicknames.json` as what the session is about |
 | `remy status` | Joins `claude agents --json`, each session's git branch and `gh pr view` |
 | `remy` channel (`src/channel.ts`) | Runs inside the `remy` session only. Reads your messages in each workspace, pushes them, agent events and digests into the session, and gives Claude `post` / `update` |
 | `src/bridges.ts` | Picks the Slack or Telegram bridge for each workspace; both implement `Messenger` (`src/messenger.ts`) |
 | `src/slack-bridge.ts` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in (`src/watch.ts`) |
 | `src/telegram-bridge.ts` | Telegram: your chat with your bot, read by long polling, with Slack-style formatting converted to Telegram's (`src/telegram-format.ts`) |
-| `remy spawn` | `claude --bg -n <name> -w <name> --permission-mode auto "<task>"` in the chosen repo |
+| `remy spawn` | `claude --bg -n <kitchen-name> -w <repo-and-task> --permission-mode auto "<task>"` in the chosen repo |
 | `coordinator.md` | The coordinator's instructions, appended to its system prompt |
 
 Messages to other sessions go through Claude Code's built-in `SendMessage`.
@@ -170,7 +172,7 @@ Message the bot, in Slack or Telegram:
 
 - "what's running?" / "which PRs need me?"
 - "start an agent in api-server: fix the flaky auth test, open a PR"
-- "ask api-fix-login whether it's blocked"
+- "ask basil whether it's blocked"
 - "stop docs-cli" (Remy only stops, merges or closes things when you ask like this)
 - reply in an agent's thread to answer its question
 

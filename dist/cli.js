@@ -177,6 +177,7 @@ var PATHS = {
   events: join(REMY_DIR, "events.jsonl"),
   snapshot: join(REMY_DIR, "snapshot.json"),
   spawned: join(REMY_DIR, "spawned.json"),
+  nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
   log: join(REMY_DIR, "channel.log"),
   taskDir: (id) => join(REMY_DIR, "tasks", id),
@@ -1449,6 +1450,404 @@ async function doctor() {
 
 // src/hook.ts
 import { appendFileSync, statSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
+
+// src/kitchen-names.ts
+var KITCHEN_NAMES = [
+  "basil",
+  "saffron",
+  "garlic",
+  "ginger",
+  "pepper",
+  "paprika",
+  "cumin",
+  "nutmeg",
+  "cinnamon",
+  "vanilla",
+  "mint",
+  "thyme",
+  "rosemary",
+  "oregano",
+  "parsley",
+  "dill",
+  "sage",
+  "chili",
+  "wasabi",
+  "turmeric",
+  "lemon",
+  "lime",
+  "orange",
+  "mango",
+  "banana",
+  "cherry",
+  "apple",
+  "pear",
+  "peach",
+  "plum",
+  "grape",
+  "kiwi",
+  "coconut",
+  "papaya",
+  "apricot",
+  "raspberry",
+  "blueberry",
+  "strawberry",
+  "fig",
+  "melon",
+  "tomato",
+  "potato",
+  "onion",
+  "carrot",
+  "celery",
+  "spinach",
+  "kale",
+  "cabbage",
+  "broccoli",
+  "pumpkin",
+  "zucchini",
+  "eggplant",
+  "avocado",
+  "olive",
+  "radish",
+  "beetroot",
+  "artichoke",
+  "asparagus",
+  "leek",
+  "truffle",
+  "almond",
+  "walnut",
+  "pecan",
+  "cashew",
+  "pistachio",
+  "hazelnut",
+  "peanut",
+  "chestnut",
+  "sesame",
+  "lentil",
+  "chickpea",
+  "quinoa",
+  "honey",
+  "butter",
+  "maple",
+  "cocoa",
+  "coffee",
+  "espresso",
+  "mocha",
+  "matcha",
+  "mozzarella",
+  "parmesan",
+  "feta",
+  "brie",
+  "gouda",
+  "cheddar",
+  "burrata",
+  "ricotta",
+  "pizza",
+  "pasta",
+  "lasagna",
+  "ravioli",
+  "risotto",
+  "gnocchi",
+  "paella",
+  "sushi",
+  "ramen",
+  "udon",
+  "tempura",
+  "curry",
+  "taco",
+  "burrito",
+  "nachos",
+  "falafel",
+  "hummus",
+  "kebab",
+  "goulash",
+  "pierogi",
+  "dumpling",
+  "omelette",
+  "quiche",
+  "fondue",
+  "ratatouille",
+  "bruschetta",
+  "focaccia",
+  "tortilla",
+  "burger",
+  "sandwich",
+  "pesto",
+  "salsa",
+  "guacamole",
+  "polenta",
+  "couscous",
+  "biryani",
+  "samosa",
+  "naan",
+  "kimchi",
+  "bibimbap",
+  "pho",
+  "tofu",
+  "miso",
+  "teriyaki",
+  "edamame",
+  "wonton",
+  "noodle",
+  "meatball",
+  "schnitzel",
+  "chowder",
+  "gumbo",
+  "jambalaya",
+  "gazpacho",
+  "minestrone",
+  "carbonara",
+  "pickle",
+  "croissant",
+  "baguette",
+  "brioche",
+  "pretzel",
+  "bagel",
+  "waffle",
+  "pancake",
+  "crepe",
+  "muffin",
+  "cookie",
+  "brownie",
+  "cupcake",
+  "donut",
+  "cheesecake",
+  "tiramisu",
+  "macaron",
+  "eclair",
+  "strudel",
+  "souffle",
+  "churro",
+  "flan",
+  "baklava",
+  "cannoli",
+  "gelato",
+  "sorbet",
+  "pudding",
+  "scone",
+  "biscuit",
+  "nougat",
+  "praline",
+  "marzipan",
+  "meringue",
+  "custard",
+  "caramel",
+  "toffee",
+  "fudge",
+  "granola",
+  "yogurt",
+  "popsicle",
+  "panettone"
+];
+
+// src/nickname.ts
+var RESERVE_MS = 3 * 24 * 3600000;
+var KEEP_MS2 = 30 * 24 * 3600000;
+function takenNames(live, nicknames, spawned, now = Date.now()) {
+  const taken = new Set(live);
+  for (const n of Object.values(nicknames))
+    if (now - n.at < RESERVE_MS)
+      taken.add(n.name);
+  for (const [name, s] of Object.entries(spawned))
+    if (now - s.startedAt < RESERVE_MS)
+      taken.add(name);
+  return taken;
+}
+function pickNickname(taken, random = Math.random) {
+  const free = KITCHEN_NAMES.filter((n) => !taken.has(n));
+  if (free.length)
+    return free[Math.floor(random() * free.length)];
+  const base = KITCHEN_NAMES[Math.floor(random() * KITCHEN_NAMES.length)];
+  let i = 2;
+  while (taken.has(`${base}-${i}`))
+    i++;
+  return `${base}-${i}`;
+}
+function aboutOf(text, max = 160) {
+  const line = text?.replace(/\s+/g, " ").trim();
+  if (!line)
+    return;
+  return line.length > max ? line.slice(0, max) + "\u2026" : line;
+}
+async function nameSession(input, live) {
+  if (!input.session_id || input.session_title || input.agent_id)
+    return;
+  const nicknames = readJson(PATHS.nicknames, {});
+  const known = nicknames[input.session_id];
+  if (known)
+    return known.name;
+  const names = await live().catch(() => []);
+  const now = Date.now();
+  const name = pickNickname(takenNames(names, nicknames, readJson(PATHS.spawned, {}), now));
+  for (const [id, n] of Object.entries(nicknames))
+    if (now - n.at > KEEP_MS2)
+      delete nicknames[id];
+  nicknames[input.session_id] = { name, about: aboutOf(input.prompt), cwd: input.cwd, at: now };
+  writeJson(PATHS.nicknames, nicknames);
+  return name;
+}
+
+// src/snapshot.ts
+function spawnedEntry(spawned, name, sessionId) {
+  const byId = Object.values(spawned).find((s) => s.id && sessionId.startsWith(s.id));
+  if (byId)
+    return byId;
+  const s = spawned[name];
+  return s && !s.id ? s : undefined;
+}
+async function run(cmd, cwd) {
+  try {
+    const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "ignore" });
+    const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
+    return code === 0 ? out.trim() : undefined;
+  } catch {
+    return;
+  }
+}
+async function listAgents() {
+  const out = await run(["claude", "agents", "--json"]);
+  if (!out)
+    throw new Error("`claude agents --json` failed; is Claude Code \u2265 2.1.224 on PATH?");
+  return JSON.parse(out);
+}
+function ciOf(rollup) {
+  if (!rollup?.length)
+    return { ci: "none", failing: [] };
+  const failing = [];
+  let pending = false;
+  for (const c of rollup) {
+    const verdict = (c.conclusion || c.state || "").toUpperCase();
+    const status = (c.status || "").toUpperCase();
+    if (["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(verdict)) {
+      failing.push(c.name || c.context || "check");
+    } else if (verdict === "PENDING" || status && status !== "COMPLETED") {
+      pending = true;
+    }
+  }
+  return { ci: failing.length ? "fail" : pending ? "pending" : "pass", failing };
+}
+var GITHUB_REMOTE = /github\.com[:/](.+?)(\.git)?$/;
+var repoCache = new Map;
+function githubRepoOf(cwd) {
+  if (!cwd)
+    return;
+  if (!repoCache.has(cwd)) {
+    const r = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd, stdout: "pipe", stderr: "ignore" });
+    repoCache.set(cwd, r.exitCode === 0 ? r.stdout.toString().trim().match(GITHUB_REMOTE)?.[1] : undefined);
+  }
+  return repoCache.get(cwd);
+}
+async function gitInfo(cwd) {
+  const branch = await run(["git", "branch", "--show-current"], cwd);
+  if (branch === undefined)
+    return {};
+  const top = await run(["git", "rev-parse", "--show-toplevel"], cwd);
+  const remote = await run(["git", "remote", "get-url", "origin"], cwd);
+  const repo = remote?.match(GITHUB_REMOTE)?.[1] ?? top?.split("/").pop();
+  return { branch: branch || undefined, repo };
+}
+async function prInfo(cwd, branch) {
+  const out = await run(["gh", "pr", "view", branch, "--json", "number,url,title,state,isDraft,reviewDecision,statusCheckRollup"], cwd);
+  if (!out)
+    return;
+  const j = JSON.parse(out);
+  return {
+    number: j.number,
+    url: j.url,
+    title: j.title,
+    state: j.state,
+    draft: !!j.isDraft,
+    review: j.reviewDecision ?? "",
+    ...ciOf(j.statusCheckRollup)
+  };
+}
+var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
+async function takeSnapshot() {
+  const config = loadConfig();
+  const spawned = readJson(PATHS.spawned, {});
+  const nicknames = readJson(PATHS.nicknames, {});
+  const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName);
+  const latest = new Map;
+  for (const e of readEvents())
+    latest.set(e.session_id, e);
+  const sessions = await Promise.all(agents.map(async (a) => {
+    const ev = latest.get(a.sessionId);
+    const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
+    const { branch, repo } = await gitInfo(cwd);
+    const pr = branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
+    const spawn = spawnedEntry(spawned, a.name, a.sessionId);
+    return {
+      sessionId: a.sessionId,
+      name: a.name,
+      kind: a.kind,
+      status: a.status,
+      cwd,
+      startedAt: a.startedAt,
+      spawned: !!spawn,
+      about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
+      repo,
+      branch,
+      pr,
+      lastEvent: ev && { event: ev.event, type: ev.type, ts: ev.ts, text: ev.message ?? ev.last }
+    };
+  }));
+  return { takenAt: Date.now(), sessions };
+}
+function prLabel(pr, paint = PLAIN) {
+  const state = pr.state === "OPEN" ? pr.draft ? "draft" : "open" : pr.state.toLowerCase();
+  return `#${pr.number} ${state}, ${paint.ci(pr.ci, `CI ${pr.ci}`)}${pr.review ? `, ${pr.review.toLowerCase().replace(/_/g, " ")}` : ""}`;
+}
+function diff(prev, next) {
+  if (!prev)
+    return [];
+  const changes = [];
+  const before = new Map(prev.sessions.map((s) => [s.sessionId, s]));
+  const after = new Map(next.sessions.map((s) => [s.sessionId, s]));
+  const add = (s, what, detail) => changes.push({ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what, detail, pr: s.pr?.url });
+  for (const s of next.sessions) {
+    const p = before.get(s.sessionId);
+    if (!p) {
+      add(s, "started", `${s.kind} session in ${s.repo ?? s.cwd}`);
+      continue;
+    }
+    if (p.status !== s.status)
+      add(s, "status", `${p.status} \u2192 ${s.status}`);
+    if (!p.pr && s.pr)
+      add(s, "pr_opened", prLabel(s.pr));
+    else if (p.pr && s.pr) {
+      if (p.pr.state !== s.pr.state || p.pr.draft !== s.pr.draft)
+        add(s, "pr_state", `${prLabel(p.pr)} \u2192 ${prLabel(s.pr)}`);
+      if (p.pr.ci !== s.pr.ci && s.pr.ci !== "pending")
+        add(s, "ci", `CI ${s.pr.ci}${s.pr.failing.length ? `: ${s.pr.failing.join(", ")}` : ""}`);
+      if (p.pr.review !== s.pr.review && s.pr.review)
+        add(s, "review", s.pr.review.toLowerCase().replace(/_/g, " "));
+    }
+  }
+  for (const p of prev.sessions)
+    if (!after.has(p.sessionId))
+      add(p, "ended", p.pr ? `last PR ${prLabel(p.pr)}` : "session closed");
+  return changes;
+}
+async function snapshotDiff() {
+  const prev = readJson(PATHS.snapshot, undefined);
+  const snapshot = await takeSnapshot();
+  writeJson(PATHS.snapshot, snapshot);
+  return { snapshot, changes: diff(prev, snapshot), first: !prev };
+}
+var same = (s) => s;
+var PLAIN = { name: same, status: (_, s) => s, ci: (_, s) => s, dim: same };
+function formatTable(s, paint = PLAIN) {
+  if (!s.sessions.length)
+    return "No sessions running.";
+  return s.sessions.sort((a, b) => b.startedAt - a.startedAt).map((x) => {
+    const where = x.repo ? `${x.repo}${x.branch ? `@${x.branch}` : ""}` : x.cwd;
+    const pr = x.pr ? ` \xB7 PR ${prLabel(x.pr, paint)} ${paint.dim(x.pr.url)}` : "";
+    const about = x.about ? paint.dim(` \u2014 ${aboutOf(x.about, 80)}`) : "";
+    return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}${about}`;
+  }).join(`
+`);
+}
+
+// src/hook.ts
 var MAX_BYTES = 5 * 1024 * 1024;
 var KEEP_LINES = 2000;
 async function runHook() {
@@ -1463,6 +1862,12 @@ async function runHook() {
   }
   if (input.agent_id)
     return;
+  if (input.hook_event_name === "UserPromptSubmit") {
+    const name = await nameSession(input, async () => (await listAgents()).map((a) => a.name));
+    if (name)
+      console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", sessionTitle: name } }));
+    return;
+  }
   const ev = {
     ts: Date.now(),
     event: input.hook_event_name,
@@ -3190,157 +3595,6 @@ exec "$root/bin/remy" "$@"
   return `Installed the ${import_picocolors.default.cyan("remy")} command${onPath ? "" : import_picocolors.default.yellow(` (add ${bin} to your PATH)`)}`;
 }
 
-// src/snapshot.ts
-async function run(cmd, cwd) {
-  try {
-    const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "ignore" });
-    const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
-    return code === 0 ? out.trim() : undefined;
-  } catch {
-    return;
-  }
-}
-async function listAgents() {
-  const out = await run(["claude", "agents", "--json"]);
-  if (!out)
-    throw new Error("`claude agents --json` failed; is Claude Code \u2265 2.1.224 on PATH?");
-  return JSON.parse(out);
-}
-function ciOf(rollup) {
-  if (!rollup?.length)
-    return { ci: "none", failing: [] };
-  const failing = [];
-  let pending = false;
-  for (const c of rollup) {
-    const verdict = (c.conclusion || c.state || "").toUpperCase();
-    const status = (c.status || "").toUpperCase();
-    if (["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(verdict)) {
-      failing.push(c.name || c.context || "check");
-    } else if (verdict === "PENDING" || status && status !== "COMPLETED") {
-      pending = true;
-    }
-  }
-  return { ci: failing.length ? "fail" : pending ? "pending" : "pass", failing };
-}
-var GITHUB_REMOTE = /github\.com[:/](.+?)(\.git)?$/;
-var repoCache = new Map;
-function githubRepoOf(cwd) {
-  if (!cwd)
-    return;
-  if (!repoCache.has(cwd)) {
-    const r = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd, stdout: "pipe", stderr: "ignore" });
-    repoCache.set(cwd, r.exitCode === 0 ? r.stdout.toString().trim().match(GITHUB_REMOTE)?.[1] : undefined);
-  }
-  return repoCache.get(cwd);
-}
-async function gitInfo(cwd) {
-  const branch = await run(["git", "branch", "--show-current"], cwd);
-  if (branch === undefined)
-    return {};
-  const top = await run(["git", "rev-parse", "--show-toplevel"], cwd);
-  const remote = await run(["git", "remote", "get-url", "origin"], cwd);
-  const repo = remote?.match(GITHUB_REMOTE)?.[1] ?? top?.split("/").pop();
-  return { branch: branch || undefined, repo };
-}
-async function prInfo(cwd, branch) {
-  const out = await run(["gh", "pr", "view", branch, "--json", "number,url,title,state,isDraft,reviewDecision,statusCheckRollup"], cwd);
-  if (!out)
-    return;
-  const j = JSON.parse(out);
-  return {
-    number: j.number,
-    url: j.url,
-    title: j.title,
-    state: j.state,
-    draft: !!j.isDraft,
-    review: j.reviewDecision ?? "",
-    ...ciOf(j.statusCheckRollup)
-  };
-}
-var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
-async function takeSnapshot() {
-  const config = loadConfig();
-  const spawned = readJson(PATHS.spawned, {});
-  const spawnedIds = new Set(Object.values(spawned).map((s) => s.id).filter(Boolean));
-  const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName);
-  const latest = new Map;
-  for (const e of readEvents())
-    latest.set(e.session_id, e);
-  const sessions = await Promise.all(agents.map(async (a) => {
-    const ev = latest.get(a.sessionId);
-    const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
-    const { branch, repo } = await gitInfo(cwd);
-    const pr = branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
-    return {
-      sessionId: a.sessionId,
-      name: a.name,
-      kind: a.kind,
-      status: a.status,
-      cwd,
-      startedAt: a.startedAt,
-      spawned: a.name in spawned || spawnedIds.has(a.sessionId),
-      repo,
-      branch,
-      pr,
-      lastEvent: ev && { event: ev.event, type: ev.type, ts: ev.ts, text: ev.message ?? ev.last }
-    };
-  }));
-  return { takenAt: Date.now(), sessions };
-}
-function prLabel(pr, paint = PLAIN) {
-  const state = pr.state === "OPEN" ? pr.draft ? "draft" : "open" : pr.state.toLowerCase();
-  return `#${pr.number} ${state}, ${paint.ci(pr.ci, `CI ${pr.ci}`)}${pr.review ? `, ${pr.review.toLowerCase().replace(/_/g, " ")}` : ""}`;
-}
-function diff(prev, next) {
-  if (!prev)
-    return [];
-  const changes = [];
-  const before = new Map(prev.sessions.map((s) => [s.sessionId, s]));
-  const after = new Map(next.sessions.map((s) => [s.sessionId, s]));
-  const add = (s, what, detail) => changes.push({ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what, detail, pr: s.pr?.url });
-  for (const s of next.sessions) {
-    const p = before.get(s.sessionId);
-    if (!p) {
-      add(s, "started", `${s.kind} session in ${s.repo ?? s.cwd}`);
-      continue;
-    }
-    if (p.status !== s.status)
-      add(s, "status", `${p.status} \u2192 ${s.status}`);
-    if (!p.pr && s.pr)
-      add(s, "pr_opened", prLabel(s.pr));
-    else if (p.pr && s.pr) {
-      if (p.pr.state !== s.pr.state || p.pr.draft !== s.pr.draft)
-        add(s, "pr_state", `${prLabel(p.pr)} \u2192 ${prLabel(s.pr)}`);
-      if (p.pr.ci !== s.pr.ci && s.pr.ci !== "pending")
-        add(s, "ci", `CI ${s.pr.ci}${s.pr.failing.length ? `: ${s.pr.failing.join(", ")}` : ""}`);
-      if (p.pr.review !== s.pr.review && s.pr.review)
-        add(s, "review", s.pr.review.toLowerCase().replace(/_/g, " "));
-    }
-  }
-  for (const p of prev.sessions)
-    if (!after.has(p.sessionId))
-      add(p, "ended", p.pr ? `last PR ${prLabel(p.pr)}` : "session closed");
-  return changes;
-}
-async function snapshotDiff() {
-  const prev = readJson(PATHS.snapshot, undefined);
-  const snapshot = await takeSnapshot();
-  writeJson(PATHS.snapshot, snapshot);
-  return { snapshot, changes: diff(prev, snapshot), first: !prev };
-}
-var same = (s) => s;
-var PLAIN = { name: same, status: (_, s) => s, ci: (_, s) => s, dim: same };
-function formatTable(s, paint = PLAIN) {
-  if (!s.sessions.length)
-    return "No sessions running.";
-  return s.sessions.sort((a, b) => b.startedAt - a.startedAt).map((x) => {
-    const where = x.repo ? `${x.repo}${x.branch ? `@${x.branch}` : ""}` : x.cwd;
-    const pr = x.pr ? ` \xB7 PR ${prLabel(x.pr, paint)} ${paint.dim(x.pr.url)}` : "";
-    return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}`;
-  }).join(`
-`);
-}
-
 // src/spawn.ts
 import { existsSync as existsSync2, statSync as statSync2 } from "fs";
 import { basename, join as join4, resolve as resolve3 } from "path";
@@ -3373,16 +3627,21 @@ function slug(s) {
 async function spawnAgent(opts) {
   const config = loadConfig();
   const cwd = resolveRepo(opts.repo, config.repoRoots);
-  const taken = new Set((await listAgents()).map((a) => a.name));
-  let name = slug(opts.name ?? `${basename(cwd)}-${opts.task.split(/\s+/).slice(0, 4).join(" ")}`);
+  const live = (await listAgents()).map((a) => a.name);
+  const taken = takenNames(live, readJson(PATHS.nicknames, {}), readJson(PATHS.spawned, {}));
+  let name = opts.name ? slug(opts.name) : pickNickname(taken);
   for (let i = 2;taken.has(name); i++)
-    name = `${slug(opts.name ?? name)}-${i}`;
+    name = `${slug(opts.name)}-${i}`;
+  let label = slug(`${basename(cwd)}-${opts.task.split(/\s+/).slice(0, 4).join(" ")}`);
+  const base = label;
+  for (let i = 2;existsSync2(join4(cwd, ".claude", "worktrees", label)); i++)
+    label = `${base}-${i}`;
   const slack = opts.slackTask ? loadTask(opts.slackTask) : undefined;
   const prompt = config.spawnTemplate.replaceAll("{task}", slack ? taskPrompt(slack, opts.task) : opts.task);
   const worktree = opts.worktree ?? config.spawnWorktree;
   const cmd = ["claude", "--bg", "-n", name, "--permission-mode", opts.permissionMode ?? config.spawnPermissionMode];
   if (worktree)
-    cmd.push("-w", name);
+    cmd.push("-w", label);
   cmd.push(prompt);
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_ENV.has(k)));
   const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env });
@@ -3394,12 +3653,13 @@ async function spawnAgent(opts) {
   spawned[name] = {
     id,
     repo: cwd,
+    label,
     task: opts.task,
     startedAt: Date.now(),
     slack: slack && { workspace: slack.workspace, channel: slack.channel, threadTs: slack.threadTs, task: slack.id }
   };
   writeJson(PATHS.spawned, spawned);
-  return { name, id, cwd, worktree, output: out };
+  return { name, label, id, cwd, worktree, output: out };
 }
 
 // src/cli.ts

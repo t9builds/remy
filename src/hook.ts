@@ -1,7 +1,12 @@
 import { appendFileSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { ensureDir, PATHS } from "./config";
+import { nameSession } from "./nickname";
+import { listAgents } from "./snapshot";
 
-/** One line of ~/.remy/events.jsonl, written by the Stop/Notification/SessionEnd hooks of every session. */
+/**
+ * One line of ~/.remy/events.jsonl, written by the Stop/Notification/SessionEnd hooks of every session.
+ * The UserPromptSubmit hook only names the session (nickname.ts) and writes no event.
+ */
 export type RemyEvent = {
   ts: number;
   event: string; // Stop | Notification | SessionEnd
@@ -29,6 +34,12 @@ export async function runHook() {
   }
   // Subagent stops are part of their parent's turn, not a session event.
   if (input.agent_id) return;
+  // On a prompt: give a session without a name a kitchen name. Claude Code renames it to `sessionTitle`.
+  if (input.hook_event_name === "UserPromptSubmit") {
+    const name = await nameSession(input, async () => (await listAgents()).map((a) => a.name));
+    if (name) console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", sessionTitle: name } }));
+    return;
+  }
   const ev: RemyEvent = {
     ts: Date.now(),
     event: input.hook_event_name,

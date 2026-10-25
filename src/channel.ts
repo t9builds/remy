@@ -18,7 +18,7 @@ import { loadConfig, PATHS, readJson, workspaceFor, type Config } from "./config
 import type { RemyEvent } from "./hook";
 import type { Messenger, Sink } from "./messenger";
 import { threadRef } from "./slack-bridge";
-import { formatTable, githubRepoOf, listAgents, snapshotDiff, type Spawned } from "./snapshot";
+import { formatTable, githubRepoOf, listAgents, snapshotDiff, spawnedEntry, type Spawned } from "./snapshot";
 
 const config = loadConfig();
 const log = (...a: unknown[]) => {
@@ -128,7 +128,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   await ready;
   const a = (req.params.arguments ?? {}) as Record<string, any>;
   // An agent started from a Slack channel thread reports in that thread.
-  const origin = a.session && !a.thread ? readJson<Spawned>(PATHS.spawned, {})[a.session]?.slack : undefined;
+  const origin = a.session && !a.thread ? await spawnOrigin(a.session) : undefined;
   if (origin) Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
   const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
   const rerouted = a.workspace && a.workspace !== bridge.workspace ? ` ("${a.workspace}" is off, so this went to "${bridge.workspace}")` : "";
@@ -177,10 +177,17 @@ async function cwdOfSession(name: string) {
   return row ? cwdById.get(row.sessionId) ?? row.cwd : undefined;
 }
 
+/** The Slack thread a spawned agent was started from. A live session must be the spawned one: kitchen names get reused. */
+async function spawnOrigin(name: string) {
+  const row = (await agents()).find((r) => r.name === name);
+  const spawned = readJson<Spawned>(PATHS.spawned, {});
+  return (row ? spawnedEntry(spawned, name, row.sessionId) : spawned[name])?.slack;
+}
+
 async function sessionInfo(sessionId: string) {
   const row = (await agents()).find((r) => r.sessionId === sessionId);
   const spawned = readJson<Spawned>(PATHS.spawned, {});
-  const isSpawned = !!row && (row.name in spawned || Object.values(spawned).some((s) => s.id && sessionId.startsWith(s.id)));
+  const isSpawned = !!row && !!spawnedEntry(spawned, row.name, sessionId);
   return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, unattended: isSpawned || row?.kind === "background" };
 }
 

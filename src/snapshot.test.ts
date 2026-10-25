@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ciOf, diff, type Snapshot, type SessionView } from "./snapshot";
+import { ciOf, diff, spawnedEntry, type Snapshot, type SessionView } from "./snapshot";
 
 const session = (over: Partial<SessionView> = {}): SessionView => ({
   sessionId: "s1", name: "api-fix", kind: "background", status: "busy", cwd: "/r", startedAt: 1, spawned: true, ...over,
@@ -26,6 +26,15 @@ test("reports PR opened, CI result and ended sessions", () => {
 
   const c = snap(session({ status: "idle", pr: { ...pr, ci: "pass" } }));
   expect(diff(b, c).map((x) => x.what)).toEqual(["ci"]);
+});
+
+test("a reused name is not the spawned agent that had it", () => {
+  const spawned = { basil: { id: "cc7d4336", repo: "/r", task: "t", startedAt: 1 }, sage: { repo: "/r", task: "t", startedAt: 1 } };
+  expect(spawnedEntry(spawned, "basil", "cc7d4336-1f91-4e70")).toBe(spawned.basil);
+  expect(spawnedEntry(spawned, "renamed", "cc7d4336-1f91-4e70")).toBe(spawned.basil);
+  expect(spawnedEntry(spawned, "basil", "59833c56-7822-4c45")).toBeUndefined();
+  expect(spawnedEntry(spawned, "sage", "59833c56-7822-4c45")).toBe(spawned.sage);
+  expect(spawnedEntry(spawned, "mint", "59833c56-7822-4c45")).toBeUndefined();
 });
 
 test("pending CI is not a change on its own", () => {
