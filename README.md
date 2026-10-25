@@ -57,16 +57,21 @@ you:  stream it, accounts are under 50k rows
 remy: Sent to saffron.
 ```
 
-Every 15 minutes you get a summary, if anything changed. If nothing did, you get nothing:
+Instead of a message per finished agent, Remy keeps one pinned message that lists what waits on you, most urgent first, and edits it in place as things change. Read the top line and do that:
 
 ```
-remy: Since 10:30
-      • saffron opened PR #88 · CI running
-      • brioche: PR #212 approved
-      • risotto: CI failed
+Waiting on you (3)
+🔴 saffron · asks: "stream the CSV, or a background job?" → reply to its thread
+🟠 risotto · CI failing: unit-tests → reply "fix CI"
+🟢 brioche · PR ready for you → review it
+2 more working on their own
 ```
 
-Finished PRs come with their link and CI status. You review and merge them like you always do. Once an agent's PR is merged, Remy closes that agent at the next digest: `claude rm` deletes the session and its worktree, or, if the worktree still has uncommitted or unpushed work, `claude stop` ends the session and the worktree stays. The agent then counts as merged: it's left out of `remy status`, and `remy status --merged` lists it. Remy only does this for agents it started (`remy spawn`), never for sessions you started yourself, and waits while an agent is mid-turn.
+🔴 is a question or permission, 🟠 red CI, 🟡 requested changes, 🟢 a PR ready for review, ⚪ an agent that stopped without a PR. Edits don't notify you; only questions do. Telegram pins the message; in Slack it stays where it was first posted. Send `/queue` to the bot to get the list as a fresh message at the bottom of the chat; `remy queue` prints it in a terminal.
+
+Every 15 minutes you get a short note about merged PRs and ended sessions, if there were any. Everything else is on the list.
+
+You review and merge PRs like you always do. Once an agent's PR is merged, Remy closes that agent at the next digest: `claude rm` deletes the session and its worktree, or, if the worktree still has uncommitted or unpushed work, `claude stop` ends the session and the worktree stays. The agent then counts as merged: it's left out of `remy status`, and `remy status --merged` lists it. Remy only does this for agents it started (`remy spawn`), never for sessions you started yourself, and waits while an agent is mid-turn.
 
 Telegram works the same way, in your chat with your bot. Telegram has no threads there, so each agent's messages come as a reply chain: reply to any of them to talk to that agent. Right after an agent asks you something, a plain message works too. When the coordinator itself needs a permission, you get Allow / Deny buttons.
 
@@ -86,6 +91,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | Plugin hooks (`Stop`, `Notification`, `SessionEnd`) | Every session appends its events to `~/.remy/events.jsonl` |
 | Plugin hook (`UserPromptSubmit`) | Names a session that has no name yet after a dish or ingredient (`src/kitchen-names.ts`), on its first prompt, and keeps that prompt in `~/.remy/nicknames.json` as what the session is about |
 | `remy status` | Joins `claude agents --json`, each session's git branch and `gh pr view` |
+| `src/queue.ts` | Ranks what waits on you from that snapshot; the channel keeps it as one message per workspace (`~/.remy/queue.json`) |
 | `remy` channel (`src/channel.ts`) | Runs inside the `remy` session only. Reads your messages in each workspace, pushes them, agent events and digests into the session, and gives Claude `post` / `update` |
 | `src/bridges.ts` | Picks the Slack or Telegram bridge for each workspace; both implement `Messenger` (`src/messenger.ts`) |
 | `src/slack-bridge.ts` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in (`src/watch.ts`) |
@@ -187,7 +193,7 @@ In any channel the bot is in, mention it in a thread (`@bot fix this, it's in ap
 
 Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
 
-From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`.
+From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`.
 
 ## Config
 

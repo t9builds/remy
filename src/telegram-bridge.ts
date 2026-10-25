@@ -17,7 +17,7 @@ const CONFLICT_PAUSE_MS = 30_000;
 /** Messages that belong to a session, by message id: remy's own (`mine`) and the user's replies. */
 type Mapped = { session: string; at: number; mine: boolean; expectReply?: boolean; answered?: boolean };
 type State = { offset?: number; threads: Record<string, Mapped> };
-type TelegramApi = Pick<Telegram, "getUpdates" | "send" | "edit" | "answerCallback">;
+type TelegramApi = Pick<Telegram, "getUpdates" | "send" | "edit" | "pin" | "setCommands" | "answerCallback">;
 
 export class TelegramBridge implements Messenger {
   private state: State;
@@ -70,6 +70,10 @@ export class TelegramBridge implements Messenger {
     await this.api.edit(this.settings.userId, Number(id), text);
   }
 
+  async pin(id: string) {
+    await this.api.pin(this.settings.userId, Number(id));
+  }
+
   answered(session: string) {
     for (const t of Object.values(this.state.threads)) if (t.session === session) t.answered = true;
     this.save();
@@ -82,6 +86,9 @@ export class TelegramBridge implements Messenger {
   }
 
   async start() {
+    await this.api
+      .setCommands([{ command: "queue", description: "What waits on you, most urgent first" }])
+      .catch((e) => this.sink.log(`[${this.workspace}] setMyCommands failed`, e?.message ?? e));
     void (async () => {
       let failures = 0;
       for (;;) {
@@ -136,6 +143,7 @@ export class TelegramBridge implements Messenger {
     const text = (m.text ?? m.caption ?? "").trim();
     if (!text) return void (await this.api.send(m.chat.id, "I can only read text for now.", { replyTo: m.message_id }));
     if (text === "/start") return;
+    if (/^\/queue(@\w+)?$/.test(text)) return this.sendQueue(m.chat.id);
     const v = parseVerdict(text);
     if (v) return this.sink.permission(v.requestId, v.behavior);
 
@@ -152,6 +160,12 @@ export class TelegramBridge implements Messenger {
       session: session ?? "",
       awaiting: repliedTo ? "" : this.awaiting() ?? "",
     });
+  }
+
+  /** `/queue`: the list as a fresh message at the bottom of the chat, answered here without the coordinator. */
+  private async sendQueue(chatId: number) {
+    const text = this.sink.queue ? await this.sink.queue(this.workspace).catch((e) => `Couldn't build the list: ${e?.message ?? e}`) : "The list isn't available yet.";
+    await this.api.send(chatId, text);
   }
 
   private async onButton(q: NonNullable<TgUpdate["callback_query"]>) {

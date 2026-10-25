@@ -28,6 +28,8 @@ function fakeApi() {
         return [nextId];
       },
       edit: async (_chat: number, id: number, text: string) => void edits.push({ id, text }),
+      pin: async () => {},
+      setCommands: async () => {},
       answerCallback: async () => {},
     },
   };
@@ -45,6 +47,7 @@ function bridge() {
     {
       push: async (kind, content, meta = {}) => void pushed.push({ kind, content, meta }),
       permission: async (id, behavior) => void verdicts.push([id, behavior]),
+      queue: async (workspace) => `*Waiting on you (1)* in ${workspace}`,
       log: () => {},
     },
     join(dir, `state-${++n}.json`),
@@ -139,4 +142,13 @@ test("a plain message while an agent's question is open names that agent, until 
   await b.pollOnce(0);
   expect(pushed[1]!.meta.session).toBe("api-export");
   expect(pushed[2]!.meta.awaiting).toBe("");
+});
+
+test("/queue answers with the list itself, without the coordinator", async () => {
+  const { b, tg, pushed, msg } = bridge();
+  tg.queue.push([]);
+  tg.queue.push([msg("/queue"), msg("/queue@remy_bot")]);
+  await b.pollOnce(0);
+  expect(pushed).toEqual([]);
+  expect(tg.sent.map((s) => s.text)).toEqual(["*Waiting on you (1)* in personal", "*Waiting on you (1)* in personal"]);
 });

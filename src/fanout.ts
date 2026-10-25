@@ -113,6 +113,10 @@ export class Fanout implements Messenger {
     for (const [k, part] of Object.entries(decodeId(id)) as [MessengerKind, string][]) await this.members.get(k)?.update(part, text);
   }
 
+  async pin(id: string) {
+    for (const [k, part] of Object.entries(decodeId(id)) as [MessengerKind, string][]) await this.members.get(k)?.pin?.(part);
+  }
+
   async askPermission(p: PermissionRequest) {
     const to = this.mode === "follow" ? this.targets({}, {}) : this.kinds;
     for (const k of to) await this.members.get(k)!.askPermission(p);

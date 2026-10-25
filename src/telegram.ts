@@ -86,6 +86,15 @@ export class Telegram {
     await this.withHtml("editMessageText", { chat_id: chatId, message_id: messageId }, splitText(text)[0]!);
   }
 
+  /** The commands Telegram offers in the chat's `/` menu. */
+  async setCommands(commands: { command: string; description: string }[]) {
+    await this.call("setMyCommands", { commands, scope: { type: "all_private_chats" } });
+  }
+
+  async pin(chatId: number, messageId: number) {
+    await this.call("pinChatMessage", { chat_id: chatId, message_id: messageId, disable_notification: true });
+  }
+
   async answerCallback(id: string, text: string) {
     await this.call("answerCallbackQuery", { callback_query_id: id, text });
   }

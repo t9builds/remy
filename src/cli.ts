@@ -7,6 +7,7 @@ import { compactEnv, compactPct, loadConfig, messengerLabel, messengersOf, PATHS
 import { doctor } from "./doctor";
 import { runHook } from "./hook";
 import { formatMerged } from "./merged";
+import { formatQueue, queueOf } from "./queue";
 import { blocking } from "./messenger";
 import { setup } from "./setup";
 import { findSession, formatSession, formatTable, snapshotDiff, takeSnapshot, type Spawned } from "./snapshot";
@@ -19,6 +20,7 @@ const HELP = formatHelp("remy — a coordinator for your Claude Code sessions, i
   ["setup [workspace]", "Set up repo folders and workspaces (interactive)"],
   ["start", "Start the coordinator; keep the terminal open"],
   ["status [name] [--json] [--merged]", "Every session with repo, branch, PR and CI; a name shows that one in detail; --merged lists closed agents"],
+  ["queue [--json]", "What waits on you, most urgent first"],
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task…>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
@@ -110,6 +112,13 @@ try {
         break;
       }
       console.log(values.json ? JSON.stringify(s, null, 2) : formatTable(s, statusPaint));
+      break;
+    }
+    case "queue": {
+      const { values } = parse(args, { json: { type: "boolean" } });
+      const s = await takeSnapshot();
+      const items = queueOf(s);
+      console.log(values.json ? JSON.stringify(items, null, 2) : formatQueue(items, s.sessions, true));
       break;
     }
     case "changes": {

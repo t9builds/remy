@@ -7,6 +7,8 @@ export const PATHS = {
   config: join(REMY_DIR, "config.json"),
   events: join(REMY_DIR, "events.jsonl"),
   snapshot: join(REMY_DIR, "snapshot.json"),
+  /** Per workspace, the pinned "waiting on you" message: its id and what it says. */
+  queue: join(REMY_DIR, "queue.json"),
   spawned: join(REMY_DIR, "spawned.json"),
   nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),

@@ -24,6 +24,8 @@ export interface Messenger {
   /** Returns the new message's id. */
   post(text: string, opts?: PostOptions): Promise<string>;
   update(id: string, text: string): Promise<void>;
+  /** Keep a message at the top of the chat, where the app can; quietly. */
+  pin?(id: string): Promise<void>;
   askPermission(p: PermissionRequest): Promise<void>;
   /** The user answered `session`'s question somewhere else; stop treating it as open here. */
   answered(session: string): void;
@@ -35,6 +37,8 @@ export interface Messenger {
 export type Sink = {
   push(kind: string, content: string, meta?: Record<string, string>): Promise<void>;
   permission(requestId: string, behavior: "allow" | "deny"): Promise<void>;
+  /** The workspace's waiting-on-you list as it is now (queue.ts), for a bot command that asks for it. */
+  queue?(workspace: string): Promise<string>;
   log(...a: unknown[]): void;
 };
 

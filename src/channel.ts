@@ -6,6 +6,7 @@
  * - Tails ~/.remy/events.jsonl and pushes "agent needs input" / "background agent finished" right away.
  * - Every `digestMinutes`, diffs the session/PR snapshot and pushes the changes, if any. Spawned agents whose PR
  *   merged are closed then (merged.ts) and reported as merged.
+ * - Keeps one pinned "waiting on you" message per workspace (queue.ts), edited in place after each session event.
  * - Exposes post / update so Claude can answer, and relays the coordinator's own permission prompts.
  * Sessions are routed to a workspace by GitHub repo or folder (see `workspaceFor`).
  */
@@ -19,8 +20,9 @@ import { loadConfig, PATHS, readJson, workspaceFor, writeJson, type Config } fro
 import type { RemyEvent } from "./hook";
 import { closeMerged } from "./merged";
 import type { Messenger, Sink } from "./messenger";
+import { formatQueue, queueOf } from "./queue";
 import { threadRef } from "./slack-bridge";
-import { formatTable, githubRepoOf, listAgents, snapshotDiff, spawnedEntry, type Spawned } from "./snapshot";
+import { formatTable, githubRepoOf, listAgents, snapshotDiff, spawnedEntry, takeSnapshot, type Snapshot, type Spawned } from "./snapshot";
 
 const config = loadConfig();
 const log = (...a: unknown[]) => {
@@ -33,8 +35,8 @@ const INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel so
 - kind="user_message": the user wrote to you. Answer with post, passing the same workspace, and thread when the tag has it. If it has session, the user is replying to that agent. If it has awaiting instead, that agent asked the user a question recently: if the message reads like the answer, treat it as a reply to that agent.
 - kind="task_request": the user mentioned you, or reacted with the trigger emoji, in a Slack channel thread. Follow "Tasks from Slack threads" in your instructions.
 - kind="agent_needs_input": a session is blocked waiting for the user. Post it with post(workspace, session=<name>, expect_reply=true).
-- kind="agent_finished": a background agent ended its turn. Report it (name, PR link, status) with post(workspace, session=<name>).
-- kind="digest": sessions or PRs changed since the last digest. Post one compact summary to that workspace.
+- kind="agent_finished": a background agent ended its turn. Post only if it ended asking something; remy's pinned waiting-on-you list shows the rest.
+- kind="digest": sessions or PRs changed since the last digest. Post only merges and ended sessions; the pinned list shows the rest.
 - kind="system": a note from the remy server itself.
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
 
@@ -55,6 +57,7 @@ let lastActive = "";
 async function push(kind: string, content: string, meta: Record<string, string> = {}) {
   const clean = Object.fromEntries(Object.entries(meta).filter(([, v]) => v));
   if (kind === "user_message" && meta.workspace) lastActive = meta.workspace;
+  if (kind === "user_message") scheduleQueue(30_000); // an answered agent is busy again by then
   log("push", kind, meta.workspace ?? "", content.slice(0, 120).replace(/\n/g, " "));
   await mcp.notification({ method: "notifications/claude/channel", params: { content, meta: { kind, ...clean } } });
 }
@@ -62,6 +65,7 @@ async function push(kind: string, content: string, meta: Record<string, string> 
 const sink: Sink = {
   push,
   permission: (request_id, behavior) => mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id, behavior } }),
+  queue: async (workspace) => queueText(await takeSnapshot(), workspace),
   log,
 };
 
@@ -204,11 +208,13 @@ const NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitat
 
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
+  scheduleQueue();
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
     // Give whoever sits at that terminal a chance first; ping only if it's still blocked.
     setTimeout(async () => {
       agentsCache.at = 0;
+      scheduleQueue();
       const s = await sessionInfo(e.session_id);
       if (s.status && s.status !== "waiting") return;
       if (debounced(`input:${e.session_id}`)) return;
@@ -266,6 +272,7 @@ async function digest() {
     const closed = new Set(merged.map((c) => c.sessionId));
     const snapshot = { ...taken, sessions: taken.sessions.filter((s) => !closed.has(s.sessionId)) };
     if (closed.size) writeJson(PATHS.snapshot, snapshot);
+    await refreshQueue(snapshot);
     const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged];
     if (first || !changes.length) return;
     // One digest per workspace, each listing only that workspace's sessions.
@@ -283,6 +290,58 @@ async function digest() {
   } catch (e: any) {
     log("digest error", e?.message ?? e);
   }
+}
+
+// ---------- Queue ----------
+
+type QueueState = Record<string, { id: string; text: string }>;
+let queueTimer: ReturnType<typeof setTimeout> | undefined;
+let queueRun = Promise.resolve();
+
+/** Refresh the queue soon; events that come close together share one refresh. */
+function scheduleQueue(ms = 10_000) {
+  if (queueTimer) return;
+  queueTimer = setTimeout(() => {
+    queueTimer = undefined;
+    void refreshQueue();
+  }, ms);
+}
+
+/** The workspace's list, with only its own sessions. */
+function queueText(snap: Snapshot, workspace: string) {
+  const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
+  return formatQueue(queueOf({ ...snap, sessions }), sessions);
+}
+
+/** Keep each workspace's "waiting on you" message current: edit it in place, or post and pin one when there is none. */
+function refreshQueue(snapshot?: Snapshot) {
+  queueRun = queueRun.then(async () => {
+    try {
+      const snap = snapshot ?? (await takeSnapshot());
+      const state = readJson<QueueState>(PATHS.queue, {});
+      for (const [name, b] of bridges) {
+        const text = queueText(snap, name);
+        const prev = state[name];
+        if (prev?.text === text) continue;
+        if (prev) {
+          try {
+            await b.update(prev.id, text);
+            state[name] = { id: prev.id, text };
+            continue;
+          } catch (e: any) {
+            log("queue edit failed, posting a new one", name, e?.message ?? e); // deleted, or too old to edit
+          }
+        }
+        const id = await b.post(text);
+        await b.pin?.(id).catch((e: any) => log("queue pin failed", name, e?.message ?? e));
+        state[name] = { id, text };
+      }
+      writeJson(PATHS.queue, state);
+    } catch (e: any) {
+      log("queue error", e?.message ?? e);
+    }
+  });
+  return queueRun;
 }
 
 // ---------- Start ----------
