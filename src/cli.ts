@@ -1,12 +1,16 @@
 #!/usr/bin/env bun
+import { spawn } from "node:child_process";
+import { openSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { createMessenger, quietSink } from "./bridges";
-import { compactEnv, compactPct, loadConfig, messengerLabel, messengersOf, PATHS, readJson, REMY_DIR, workspaceFor, writeJson, type Workspace } from "./config";
+import { compactEnv, compactPct, configStamp, loadConfig, messengerLabel, messengersOf, PATHS, readJson, REMY_DIR, workspaceFor, writeJson, type Workspace } from "./config";
+import { runDaemon } from "./daemon";
 import { doctor } from "./doctor";
 import { runHook } from "./hook";
 import { formatMerged } from "./merged";
+import { askDaemon, VERSION, type DaemonStatus } from "./link";
 import { formatQueue, queueOf } from "./queue";
 import { blocking } from "./messenger";
 import { setup } from "./setup";
@@ -18,7 +22,8 @@ const ROOT = resolve(import.meta.dir, "..");
 
 const HELP = formatHelp("remy — a coordinator for your Claude Code sessions, in Slack or Telegram", [
   ["setup [workspace]", "Set up repo folders and workspaces (interactive)"],
-  ["start", "Start the coordinator; keep the terminal open"],
+  ["start", "Start the coordinator (and the daemon, if it isn't running); keep the terminal open"],
+  ["daemon [stop]", "Run the daemon in the foreground, for launchd or systemd; stop stops a running one"],
   ["status [name] [--json] [--merged]", "Every session with repo, branch, PR and CI; a name shows that one in detail; --merged lists closed agents"],
   ["queue [--json]", "What waits on you, most urgent first"],
   ["changes", "What changed since the last snapshot (updates it)"],
@@ -64,6 +69,7 @@ async function start(extra: string[]) {
     }
     console.log("");
   }
+  await ensureDaemon(c.repoRoots[0] ?? homedir());
   writeJson(PATHS.mcpConfig, {
     mcpServers: { remy: { command: process.execPath, args: [join(ROOT, "dist", "channel.js")] } },
   });
@@ -84,6 +90,41 @@ async function start(extra: string[]) {
   const compact = compactEnv(c.coordinatorCompactPct);
   const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...compact, REMY_ROLE: "coordinator" } });
   process.exit(r.exitCode ?? 0);
+}
+
+const daemonStatus = () => askDaemon<DaemonStatus>(PATHS.socket, "status");
+
+/** The daemon once it answers within `ms` and passes `ok`. */
+async function daemonWithin(ms: number, ok: (s: DaemonStatus) => boolean = () => true) {
+  for (const until = Date.now() + ms; Date.now() < until; ) {
+    await Bun.sleep(250);
+    const s = await daemonStatus();
+    if (s && ok(s)) return s;
+  }
+}
+
+/**
+ * Use the running daemon, or start one in the background that outlives this terminal. A daemon of another version,
+ * or one started before the config last changed, is restarted: by its service when it has one, else here.
+ */
+async function ensureDaemon(cwd: string) {
+  const running = await daemonStatus();
+  if (running && running.version === VERSION && running.config === configStamp()) return;
+  if (running) {
+    const why = running.version !== VERSION ? `it runs ${running.version} and ${VERSION} is installed` : "the config changed";
+    console.log(pc.dim(`Restarting the remy daemon: ${why}.`));
+    await askDaemon(PATHS.socket, "restart");
+    if (running.supervised) {
+      if (await daemonWithin(20_000, (s) => s.pid !== running.pid)) return;
+      throw new Error(`the remy daemon's service didn't start it again; see ${PATHS.log}`);
+    }
+    // Let it hand over what it holds and release the socket.
+    for (const until = Date.now() + 5_000; Date.now() < until && (await daemonStatus()); ) await Bun.sleep(100);
+  }
+  const out = openSync(PATHS.log, "a");
+  spawn(process.execPath, [join(ROOT, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out] }).unref();
+  if (!(await daemonWithin(15_000, (s) => s.pid !== running?.pid))) throw new Error(`the remy daemon didn't start; see ${PATHS.log}`);
+  console.log(pc.dim(`Started the remy daemon; it keeps running after the coordinator exits (log: ${PATHS.log}).`));
 }
 
 const [cmd = "help", ...args] = process.argv.slice(2);
@@ -161,6 +202,16 @@ try {
     case "start":
       await start(args); // the rest goes to claude
       break;
+    case "daemon": {
+      const sub = parse(args, {}).positionals[0];
+      if (sub === "stop") {
+        console.log((await askDaemon(PATHS.socket, "stop")) ? "Stopped the remy daemon." : "No remy daemon is running.");
+        break;
+      }
+      if (sub) throw new Error(`usage: ${pc.cyan("remy daemon [stop]")}`);
+      await runDaemon(); // runs until stopped
+      break;
+    }
     case "doctor": {
       const { ok, rows } = await doctor();
       console.log(formatChecks(rows));

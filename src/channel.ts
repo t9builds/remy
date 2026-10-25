@@ -1,33 +1,22 @@
 #!/usr/bin/env bun
 /**
  * remy: the coordinator's channel. Runs only inside the coordinator session (loaded by `remy start`).
- * - Reads your messages in each configured workspace and pushes them into the session. A workspace is a Slack
- *   workspace (slack-bridge.ts, which also starts tasks from channel threads) or a Telegram chat (telegram-bridge.ts).
- * - Tails ~/.remy/events.jsonl and pushes "agent needs input" / "background agent finished" right away.
- * - Every `digestMinutes`, diffs the session/PR snapshot and pushes the changes, if any. Spawned agents whose PR
- *   merged are closed then (merged.ts) and reported as merged.
- * - Keeps one pinned "waiting on you" message per workspace (queue.ts), edited in place after each session event.
- * - Exposes post / update so Claude can answer, and relays the coordinator's own permission prompts.
- * Sessions are routed to a workspace by GitHub repo or folder (see `workspaceFor`).
+ * A thin client of the daemon (daemon.ts), which owns Slack, Telegram, session events, the waiting list and digests:
+ * it connects over the link (link.ts), pushes the daemon's events into the session, forwards Claude's post / update
+ * calls, and relays the coordinator's own permission prompts both ways. When the daemon goes away it reconnects;
+ * what the daemon pushed meanwhile arrives then.
  */
-import { appendFileSync, openSync, readSync, closeSync, statSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { describeMessengers, openWorkspaces, type Off } from "./bridges";
-import { loadConfig, PATHS, readJson, workspaceFor, writeJson, type Config } from "./config";
-import type { RemyEvent } from "./hook";
-import { closeMerged } from "./merged";
-import type { Messenger, Sink } from "./messenger";
-import { coalesce, digestWorthy, formatQueue, queueOf, questionOf, showQueue } from "./queue";
-import { threadRef } from "./slack-bridge";
-import { formatTable, githubRepoOf, listAgents, snapshotDiff, spawnedEntry, takeSnapshot, type Snapshot, type Spawned } from "./snapshot";
+import { PATHS } from "./config";
+import { coordinatorTools, LinkClient, VERSION } from "./link";
 
-const config = loadConfig();
 const log = (...a: unknown[]) => {
   try {
-    appendFileSync(PATHS.log, `${new Date().toISOString()} ${a.map(String).join(" ")}\n`);
+    appendFileSync(PATHS.log, `${new Date().toISOString()} channel ${a.map(String).join(" ")}\n`);
   } catch {}
 };
 
@@ -37,11 +26,12 @@ const INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel so
 - kind="agent_needs_input": a session is blocked waiting for the user. Post it with post(workspace, session=<name>, expect_reply=true).
 - kind="agent_finished": a background agent ended its turn. Post only if it ended asking something; remy's pinned waiting-on-you list shows the rest.
 - kind="digest": sessions or PRs changed since the last digest. Post only merges and ended sessions; the pinned list shows the rest.
-- kind="system": a note from the remy server itself.
+- kind="system": a note from the remy daemon itself.
+An event with queued_at waited in the daemon while no coordinator was connected; check \`remy status\` before acting on an old one.
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
 
 const mcp = new Server(
-  { name: "remy", version: "0.9.0" },
+  { name: "remy", version: VERSION },
   {
     capabilities: {
       experimental: { "claude/channel": {}, "claude/channel/permission": {} },
@@ -51,319 +41,80 @@ const mcp = new Server(
   },
 );
 
-/** The workspace the user last wrote from; the coordinator's permission prompts go there. */
-let lastActive = "";
+const notify = (kind: string, content: string, meta: Record<string, string> = {}) =>
+  mcp.notification({ method: "notifications/claude/channel", params: { content, meta: { kind, ...meta } } });
 
-async function push(kind: string, content: string, meta: Record<string, string> = {}) {
-  const clean = Object.fromEntries(Object.entries(meta).filter(([, v]) => v));
-  if (kind === "user_message" && meta.workspace) lastActive = meta.workspace;
-  if (kind === "user_message") scheduleQueue(QUEUE_AFTER_USER_MS);
-  log("push", kind, meta.workspace ?? "", content.slice(0, 120).replace(/\n/g, " "));
-  await mcp.notification({ method: "notifications/claude/channel", params: { content, meta: { kind, ...clean } } });
-}
+/** How long the daemon may be away before the coordinator hears about it; a restart takes less. */
+const DOWN_NOTICE_MS = 15_000;
+let downTimer: ReturnType<typeof setTimeout> | undefined;
+let toldDown = false;
+let replaced = false;
 
-const sink: Sink = {
-  push,
+const link = new LinkClient(PATHS.socket, {
+  event: (e) => notify(e.kind, e.content, e.meta),
   permission: (request_id, behavior) => mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id, behavior } }),
-  queue: async (workspace) => queueText(await takeSnapshot(), workspace),
+  state: (up) => {
+    log(up ? "connected to the daemon" : "lost the daemon");
+    clearTimeout(downTimer);
+    if (up && toldDown) {
+      toldDown = false;
+      void notify("system", "The remy daemon is back; Slack and Telegram work again.");
+    }
+    if (!up && !replaced) downTimer = setTimeout(daemonDown, DOWN_NOTICE_MS);
+  },
+  replaced: () => {
+    replaced = true;
+    log("replaced by a newer coordinator");
+    void notify("system", "Another coordinator connected to the remy daemon, so this session no longer gets messages or can post. Tell the user in this terminal.");
+  },
   log,
-};
-
-let bridges = new Map<string, Messenger>();
-let off: Off[] = [];
-/** The config with only the workspaces that work, so sessions of a broken one route to a working one. */
-let active: Config = { ...config, workspaces: [] };
-const ready = openWorkspaces(config.workspaces, sink, { triggerEmoji: config.triggerEmoji }).then((r) => {
-  bridges = r.bridges;
-  off = r.off;
-  active = { ...config, workspaces: config.workspaces.filter((w) => bridges.has(w.name)) };
 });
 
-const workspaceOf = (cwd?: string, repo?: string) => workspaceFor({ cwd, repo: repo ?? githubRepoOf(cwd) }, active)?.name ?? "";
-
-function bridgeFor(workspace?: string, cwd?: string): Messenger {
-  const b = (workspace && bridges.get(workspace)) || bridges.get(workspaceOf(cwd)) || bridges.values().next().value;
-  if (!b) throw new Error("No workspace is set up. Tell the user to run `remy setup` in a terminal.");
-  return b;
+function daemonDown() {
+  if (link.connected || toldDown) return;
+  toldDown = true;
+  void notify(
+    "system",
+    "The remy daemon isn't running, so Slack and Telegram are off; messages wait in it once it's back. Tell the user in this terminal: `remy daemon` starts it (or `remy start` in a new terminal), `remy doctor` checks it.",
+  );
 }
 
 // ---------- Tools ----------
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => (await ready, {
-  tools: [
-    {
-      name: "post",
-      description:
-        "Send the user a message in a workspace: their Slack DM with the bot (or a Slack channel thread), or their Telegram chat. Returns the message id.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
-          workspace: {
-            type: "string",
-            description: `Workspace from the event tag. Working: ${active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", ") || "none"}`,
-          },
-          thread: { type: "string", description: "Answer in this thread: thread or id from the event tag, or an id post returned" },
-          session: {
-            type: "string",
-            description:
-              "Agent session this message is about; the user's replies come back tagged with it. For an agent started from a Slack channel thread, leave thread out: the message goes to that thread.",
-          },
-          expect_reply: { type: "boolean", description: "A question: watch for the user's answer" },
-        },
-        required: ["text"],
-      },
-    },
-    {
-      name: "update",
-      description: "Edit a message the bot posted earlier.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "The id post returned" },
-          text: { type: "string" },
-          workspace: { type: "string" },
-        },
-        required: ["id", "text"],
-      },
-    },
-  ],
+// Claude asks for tools right after connecting, which can be before the link is up.
+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: (await link.connectedWithin(3_000))
+    ? await link.request("tools").catch(() => coordinatorTools("unknown (the remy daemon didn't answer)"))
+    : coordinatorTools("none (the remy daemon isn't running)"),
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-  await ready;
-  const a = (req.params.arguments ?? {}) as Record<string, any>;
-  // An agent started from a Slack channel thread reports in that thread.
-  const origin = a.session && !a.thread ? await spawnOrigin(a.session) : undefined;
-  if (origin) Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
-  const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
-  const rerouted = a.workspace && a.workspace !== bridge.workspace ? ` ("${a.workspace}" is off, so this went to "${bridge.workspace}")` : "";
   try {
-    if (req.params.name === "post") {
-      const id = await bridge.post(String(a.text), { thread: a.thread, session: a.session, expect_reply: a.expect_reply });
-      return { content: [{ type: "text", text: `posted to ${bridge.workspace} id=${id}${rerouted}` }] };
-    }
-    if (req.params.name === "update") {
-      await bridge.update(String(a.id), String(a.text));
-      return { content: [{ type: "text", text: "updated" }] };
-    }
+    await link.connectedWithin(3_000);
+    return await link.request<any>("call", { name: req.params.name, arguments: req.params.arguments ?? {} });
   } catch (e: any) {
-    // Slack and Telegram errors carry their own `code`, which isn't a JSON-RPC one: report them as a failed call.
-    return { isError: true, content: [{ type: "text", text: `${req.params.name} to ${bridge.workspace} failed: ${e?.message ?? e}` }] };
+    return { isError: true, content: [{ type: "text", text: `${req.params.name} failed: ${e?.message ?? e}` }] };
   }
-  throw new Error(`unknown tool: ${req.params.name}`);
 });
 
-// Permission relay: the coordinator's own tool prompts go where the user last wrote from; "yes abcde" / "no abcde" answers.
+// Permission relay: the daemon asks in the workspace the user last wrote from; "yes abcde" / "no abcde" answers.
 const PermissionRequestNotification = z.object({
   method: z.literal("notifications/claude/channel/permission_request"),
   params: z.object({ request_id: z.string(), tool_name: z.string(), description: z.string(), input_preview: z.string() }),
 });
 mcp.setNotificationHandler(PermissionRequestNotification, async ({ params }) => {
-  await ready;
-  await bridgeFor(lastActive).askPermission(params);
+  if (!link.permissionRequest(params)) log("permission request with no daemon", params.request_id);
 });
-
-// ---------- Session events ----------
-
-let agentsCache: { at: number; rows: Awaited<ReturnType<typeof listAgents>> } = { at: 0, rows: [] };
-const cwdById = new Map<string, string>(); // latest cwd seen in hook events (sessions move into worktrees)
-
-async function agents(maxAgeMs = 20_000) {
-  if (Date.now() - agentsCache.at > maxAgeMs) {
-    try {
-      agentsCache = { at: Date.now(), rows: await listAgents() };
-    } catch {}
-  }
-  return agentsCache.rows;
-}
-
-async function cwdOfSession(name: string) {
-  const row = (await agents()).find((r) => r.name === name);
-  return row ? cwdById.get(row.sessionId) ?? row.cwd : undefined;
-}
-
-/** The Slack thread a spawned agent was started from. A live session must be the spawned one: kitchen names get reused. */
-async function spawnOrigin(name: string) {
-  const row = (await agents()).find((r) => r.name === name);
-  const spawned = readJson<Spawned>(PATHS.spawned, {});
-  return (row ? spawnedEntry(spawned, name, row.sessionId) : spawned[name])?.slack;
-}
-
-async function sessionInfo(sessionId: string) {
-  const row = (await agents()).find((r) => r.sessionId === sessionId);
-  const spawned = readJson<Spawned>(PATHS.spawned, {});
-  const spawn = row && spawnedEntry(spawned, row.name, sessionId);
-  return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, unattended: !!spawn || row?.kind === "background", merged: !!spawn?.merged };
-}
-
-const lastPushed = new Map<string, number>();
-function debounced(key: string, ms = 60_000) {
-  if (Date.now() - (lastPushed.get(key) ?? 0) < ms) return true;
-  lastPushed.set(key, Date.now());
-  return false;
-}
-
-const NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitation_dialog"]);
-
-async function onEvent(e: RemyEvent) {
-  if (e.cwd) cwdById.set(e.session_id, e.cwd);
-  scheduleQueue();
-  const workspace = workspaceOf(e.cwd);
-  if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
-    // Give whoever sits at that terminal a chance first; ping only if it's still blocked.
-    setTimeout(async () => {
-      agentsCache.at = 0;
-      scheduleQueue();
-      const s = await sessionInfo(e.session_id);
-      if (s.status && s.status !== "waiting") return;
-      if (debounced(`input:${e.session_id}`)) return;
-      await push("agent_needs_input", e.message ?? "waiting for input", { workspace, session: s.name, reason: e.type ?? "", cwd: e.cwd ?? "" });
-    }, 45_000);
-    return;
-  }
-  if (e.event === "Stop" || e.event === "SessionEnd") {
-    const s = await sessionInfo(e.session_id);
-    // A session remy closed because its PR merged is reported in the digest, not as finished.
-    if (!s.unattended || s.merged) return;
-    // A turn that ended without a question is already on the pinned list; only questions and exits reach the coordinator.
-    if (e.event === "Stop" && !questionOf(e.last)) return;
-    if (debounced(`done:${e.session_id}`, 30_000)) return;
-    const what = e.event === "Stop" ? "finished its turn" : `ended (${e.type ?? "exit"})`;
-    await push("agent_finished", `${s.name} ${what}.\n\nLast message:\n${e.last ?? "(none)"}`, { workspace, session: s.name, cwd: e.cwd ?? "" });
-  }
-}
-
-function tailEvents() {
-  let offset = 0;
-  try {
-    offset = statSync(PATHS.events).size; // only events from now on
-  } catch {}
-  let partial = "";
-  setInterval(() => {
-    let size = 0;
-    try {
-      size = statSync(PATHS.events).size;
-    } catch {
-      return;
-    }
-    if (size < offset) offset = 0; // rotated
-    if (size === offset) return;
-    const fd = openSync(PATHS.events, "r");
-    const buf = Buffer.alloc(size - offset);
-    readSync(fd, buf, 0, buf.length, offset);
-    closeSync(fd);
-    offset = size;
-    const lines = (partial + buf.toString("utf8")).split("\n");
-    partial = lines.pop() ?? "";
-    for (const l of lines) {
-      if (!l) continue;
-      try {
-        onEvent(JSON.parse(l)).catch((err) => log("event error", err));
-      } catch {}
-    }
-  }, 2_000);
-}
-
-// ---------- Digest ----------
-
-async function digest() {
-  try {
-    const { snapshot: taken, changes: diffed, first } = await snapshotDiff();
-    // Merged agents are closed now: they leave the stored snapshot and get one "merged" line instead of their other changes.
-    const merged = closeMerged(taken);
-    const closed = new Set(merged.map((c) => c.sessionId));
-    const snapshot = { ...taken, sessions: taken.sessions.filter((s) => !closed.has(s.sessionId)) };
-    if (closed.size) writeJson(PATHS.snapshot, snapshot);
-    await refreshQueue(snapshot);
-    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged].filter(digestWorthy);
-    if (first || !changes.length) return;
-    // One digest per workspace, each listing only that workspace's sessions.
-    const names = new Set(bridges.keys());
-    if (!names.size) names.add("");
-    for (const name of names) {
-      const mine = changes.filter((c) => workspaceOf(c.cwd, c.repo) === name);
-      if (!mine.length) continue;
-      const sessions = snapshot.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === name);
-      const lines = mine.map((c) => `- ${c.session}: ${c.what} — ${c.detail}${c.pr ? ` (${c.pr})` : ""}`);
-      await push("digest", `Changes since last digest:\n${lines.join("\n")}\n\nSessions in this workspace:\n${formatTable({ ...snapshot, sessions })}`, {
-        workspace: name,
-      });
-    }
-  } catch (e: any) {
-    log("digest error", e?.message ?? e);
-  }
-}
-
-// ---------- Queue ----------
-
-type QueueState = Record<string, { id: string; text: string }>;
-let queueRun = Promise.resolve();
-
-const QUEUE_AFTER_EVENT_MS = 10_000;
-/** After the user writes, long enough for an agent they answered to be busy again. */
-const QUEUE_AFTER_USER_MS = 30_000;
-
-const queueAfter = coalesce(() => void refreshQueue());
-/** Refresh the queue after `ms`; events that come close together share one refresh, and each delay keeps its own. */
-function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
-  queueAfter(ms);
-}
-
-/** The workspace's list, with only its own sessions. */
-function queueText(snap: Snapshot, workspace: string) {
-  const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
-  return formatQueue(queueOf({ ...snap, sessions }), sessions);
-}
-
-/** Keep each workspace's "waiting on you" message current: edit it in place, or post and pin one when there is none. */
-function refreshQueue(snapshot?: Snapshot) {
-  queueRun = queueRun.then(async () => {
-    try {
-      const snap = snapshot ?? (await takeSnapshot());
-      const state = readJson<QueueState>(PATHS.queue, {});
-      for (const [name, b] of bridges) {
-        state[name] = await showQueue(b, state[name], queueText(snap, name), (...a) => log(...a, name));
-      }
-      writeJson(PATHS.queue, state);
-    } catch (e: any) {
-      log("queue error", e?.message ?? e);
-    }
-  });
-  return queueRun;
-}
 
 // ---------- Start ----------
 
-// Notifications sent before the client finishes initializing are dropped, so wait for it.
+// Notifications sent before the client finishes initializing are dropped, so connect to the daemon after it.
 const initialized = new Promise<void>((r) => (mcp.oninitialized = () => r()));
-// Stop polling as soon as the coordinator goes away.
+// Stop as soon as the coordinator goes away; the daemon holds what comes next.
 mcp.onclose = () => process.exit(0);
 process.stdin.on("close", () => process.exit(0));
 await mcp.connect(new StdioServerTransport());
 await initialized;
-await ready;
-log("started", [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => `${o.workspace}/${o.messenger}`).join(",")}` : "");
-
-if (!config.workspaces.length) await push("system", "No workspace is configured. Tell the user in this terminal to run `remy setup`, then `remy start`.");
-else if (!bridges.size) await push("system", `No workspace works: ${off.map((o) => `"${o.workspace}" ${o.messenger} (${o.reason})`).join("; ")}. Tell the user in this terminal; \`remy doctor\` shows what to fix.`);
-else {
-  const fallback = workspaceFor({}, active)?.name;
-  for (const name of new Set(off.map((o) => o.workspace))) {
-    const mine = off.filter((o) => o.workspace === name);
-    const why = mine.map((o) => `${o.messenger}: ${o.reason}`).join("; ");
-    const fix = `\`remy setup ${name}\`, then restart`;
-    if (bridges.has(name))
-      await push("system", `In workspace "${name}", ${mine.map((o) => o.messenger).join(" and ")} is off (${why}). Until it's fixed (${fix}), "${name}" works through its other app only. Mention it in your hello there.`);
-    else
-      await push(
-        "system",
-        `Workspace "${name}" is off (${why}). Until it's fixed (${fix}), its sessions report to "${fallback}" and posts to "${name}" go there too. Don't post a separate hello for "${name}"; mention it in the hello to "${fallback}".`,
-      );
-  }
-}
-for (const b of bridges.values())
-  b.start().catch((e) => push("system", `Workspace "${b.workspace}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
-tailEvents();
-await digest(); // stores the baseline on first run
-setInterval(digest, config.digestMinutes * 60_000);
+link.start();
+downTimer = setTimeout(daemonDown, DOWN_NOTICE_MS);
+log("started");

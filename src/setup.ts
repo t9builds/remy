@@ -14,6 +14,7 @@ import {
   loadConfig,
   messengerLabel,
   messengersOf,
+  PATHS,
   readToken,
   saveConfig,
   storeToken,
@@ -28,6 +29,7 @@ import {
   type Workspace,
 } from "./config";
 import { doctor } from "./doctor";
+import { askDaemon } from "./link";
 import { Slack, SlackError } from "./slack";
 import { Telegram, TelegramError } from "./telegram";
 import { formatChecks, pc } from "./ui";
@@ -55,6 +57,8 @@ export async function setup(only?: string) {
   ensureDir();
   const c = loadConfig();
   p.intro(pc.bgCyan(pc.black(" remy setup ")));
+  // A running daemon reads the Telegram bot that pairing reads too, and wouldn't see the new settings anyway.
+  if (await askDaemon(PATHS.socket, "stop")) p.log.info(`Stopped the remy daemon while you set up; ${pc.cyan("remy start")} starts it again with the new settings.`);
 
   if (only) {
     await setupWorkspace(c, only);

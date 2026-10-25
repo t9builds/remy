@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
@@ -12,7 +12,12 @@ export const PATHS = {
   spawned: join(REMY_DIR, "spawned.json"),
   nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
-  log: join(REMY_DIR, "channel.log"),
+  /** The daemon's log; the coordinator's channel writes here too. */
+  log: join(REMY_DIR, "daemon.log"),
+  /** Where the daemon listens for the coordinator's channel (link.ts). */
+  socket: join(REMY_DIR, "daemon.sock"),
+  /** Events held for the coordinator when the daemon stopped, delivered by the next daemon. */
+  held: join(REMY_DIR, "held.json"),
   /** One folder per Slack task: task.json plus files downloaded from the thread. */
   taskDir: (id: string) => join(REMY_DIR, "tasks", id),
   slackState: (workspace: string) => join(REMY_DIR, `slack-state.${workspace}.json`),
@@ -164,6 +169,15 @@ export function loadConfig(): Config {
   config.workspaces = config.workspaces.map(migrateWorkspace);
   delete (config as any).slackUserId;
   return config;
+}
+
+/** When the config was last written, so a daemon started before a change can be told apart. 0 when there is none. */
+export function configStamp() {
+  try {
+    return statSync(PATHS.config).mtimeMs;
+  } catch {
+    return 0;
+  }
 }
 
 export function saveConfig(config: Config) {

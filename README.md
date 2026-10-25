@@ -91,8 +91,9 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | Plugin hooks (`Stop`, `Notification`, `SessionEnd`) | Every session appends its events to `~/.remy/events.jsonl` |
 | Plugin hook (`UserPromptSubmit`) | Names a session that has no name yet after a dish or ingredient (`src/kitchen-names.ts`), on its first prompt, and keeps that prompt in `~/.remy/nicknames.json` as what the session is about |
 | `remy status` | Joins `claude agents --json`, each session's git branch and `gh pr view` |
-| `src/queue.ts` | Ranks what waits on you from that snapshot; the channel keeps it as one message per workspace (`~/.remy/queue.json`) |
-| `remy` channel (`src/channel.ts`) | Runs inside the `remy` session only. Reads your messages in each workspace, pushes them, agent events and digests into the session, and gives Claude `post` / `update` |
+| `src/queue.ts` | Ranks what waits on you from that snapshot; the daemon keeps it as one message per workspace (`~/.remy/queue.json`) |
+| `remy daemon` (`src/daemon.ts`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, sends digests, closes merged agents and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
+| `remy` channel (`src/channel.ts`) | Runs inside the coordinator session only. A thin client of the daemon over `~/.remy/daemon.sock` (`src/link.ts`): pushes the daemon's events into the session and gives Claude `post` / `update` |
 | `src/bridges.ts` | Picks the Slack or Telegram bridge for each workspace; both implement `Messenger` (`src/messenger.ts`) |
 | `src/slack-bridge.ts` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in (`src/watch.ts`) |
 | `src/telegram-bridge.ts` | Telegram: your chat with your bot, read by long polling, with Slack-style formatting converted to Telegram's (`src/telegram-format.ts`) |
@@ -170,7 +171,64 @@ remy start
 
 `remy setup` walks you through it: your repo folders, the prompt for spawned agents and the digest interval, then each workspace. For a workspace you pick Slack or Telegram and which repos or folders report there. Then either your Slack member ID (Slack → profile → ⋮ → Copy member ID), how to read your DMs and the bot token, or your Telegram bot token and a pairing message. Tokens are checked with Slack or Telegram before they're saved to the macOS keychain (`~/.remy/*-token.<workspace>` on Linux). Setup sends you a test message in each workspace, installs `~/.local/bin/remy` and ends with `remy doctor`. `remy setup <workspace>` edits one workspace.
 
-`remy start` opens the coordinator. Accept the development-channel warning; custom channels need it during the research preview. Keep the terminal open. If one workspace is broken (say a Slack app still waiting for approval), Remy starts with the ones that work, warns you, and sends the broken one's sessions to a working workspace until you fix it.
+`remy start` starts the daemon if it isn't running, then opens the coordinator. Accept the development-channel warning; custom channels need it during the research preview. Keep the terminal open. If one workspace is broken (say a Slack app still waiting for approval), Remy starts with the ones that work, warns you, and sends the broken one's sessions to a working workspace until you fix it (`remy setup <workspace>`, then `remy start`).
+
+### The daemon
+
+Slack, Telegram, session events, the waiting list, digests and closing merged agents live in `remy daemon`, a background process that keeps running when the coordinator exits, restarts or compacts. Messages that arrive while the coordinator is down wait in the daemon, across its own restarts too, and reach the coordinator when it's back.
+
+`remy start` starts the daemon in the background when none is running, and restarts it when the plugin was updated or the config changed since it started. `remy setup` stops it while you set up, `remy daemon stop` stops it, and `remy doctor` shows whether it's running. Its log is `~/.remy/daemon.log`.
+
+### Run the daemon as a service
+
+To keep the daemon up across logins and crashes, let launchd or systemd run it. Both use the `~/.local/bin/remy` command that `remy setup` installs, which always runs the installed plugin, and the `PATH` of the shell you run this in, so `bun`, `claude` and `gh` are found.
+
+macOS (launchd):
+
+```sh
+cat > ~/Library/LaunchAgents/remy.daemon.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>remy.daemon</string>
+  <key>ProgramArguments</key><array><string>$HOME/.local/bin/remy</string><string>daemon</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$PATH</string><key>REMY_DAEMON_SERVICE</key><string>1</string></dict>
+  <key>WorkingDirectory</key><string>$HOME</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>$HOME/.remy/daemon.log</string>
+  <key>StandardErrorPath</key><string>$HOME/.remy/daemon.log</string>
+</dict>
+</plist>
+EOF
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/remy.daemon.plist
+```
+
+Restart it after an update with `launchctl kickstart -k gui/$(id -u)/remy.daemon`; remove it with `launchctl bootout gui/$(id -u)/remy.daemon`.
+
+Linux (systemd user service):
+
+```sh
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/remy.service <<EOF
+[Unit]
+Description=Remy daemon
+
+[Service]
+ExecStart=%h/.local/bin/remy daemon
+Environment=PATH=$PATH REMY_DAEMON_SERVICE=1
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user daemon-reload && systemctl --user enable --now remy
+```
+
+Restart it after an update with `systemctl --user restart remy`. To keep it running while you're logged out, run `loginctl enable-linger`.
+
+`remy start` restarts a service's daemon through the service. `remy daemon stop` and `remy setup` stop it cleanly, so the service leaves it stopped until you restart it or log in again; `remy start` meanwhile starts one of its own.
 
 ## Use
 
@@ -186,14 +244,14 @@ Message the bot, in Slack or Telegram:
 
 In any channel the bot is in, mention it in a thread (`@bot fix this, it's in api`) or react to a message with 🐭. Within about 45 seconds Remy reacts 👀, reads the whole thread, and starts an agent:
 
-1. The channel saves the thread to `~/.remy/tasks/<id>/` (names resolved, attachments downloaded) and hands it to the coordinator.
+1. The daemon saves the thread to `~/.remy/tasks/<id>/` (names resolved, attachments downloaded) and hands it to the coordinator.
 2. The coordinator picks the repo: one you named, the channel's default (`channelRepos`), or one the thread makes obvious. If it isn't sure, it asks in the thread.
 3. `remy spawn --slack-task <id>` gives the agent a fixed prompt: the coordinator's one-line brief, your own words, the link, and the full thread, marked as information rather than instructions.
 4. The agent's start, questions, PR and finish are posted in that thread. Answer its questions there.
 
 Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
 
-From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`.
+From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`.
 
 ## Config
 
@@ -263,6 +321,6 @@ A path covers the folder and everything inside it, not sibling folders that shar
 ```sh
 bun install
 bun test && bun run typecheck
-bun run build   # bundles src/channel.ts and src/cli.ts into dist/, which is committed
+bun run build   # bundles src/channel.ts and src/cli.ts (which runs the daemon) into dist/, which is committed
 bun src/cli.ts status   # run the CLI from source
 ```

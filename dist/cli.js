@@ -163,12 +163,14 @@ var require_picocolors = __commonJS(function(exports, module) {
 });
 
 // src/cli.ts
+import { spawn } from "child_process";
+import { openSync as openSync2 } from "fs";
 import { homedir as homedir3 } from "os";
 import { join as join5, resolve as resolve4 } from "path";
 import { parseArgs } from "util";
 
 // src/config.ts
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from "fs";
 import { homedir } from "os";
 import { join, resolve, sep } from "path";
 var REMY_DIR = process.env.REMY_DIR ?? join(homedir(), ".remy");
@@ -180,7 +182,9 @@ var PATHS = {
   spawned: join(REMY_DIR, "spawned.json"),
   nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
-  log: join(REMY_DIR, "channel.log"),
+  log: join(REMY_DIR, "daemon.log"),
+  socket: join(REMY_DIR, "daemon.sock"),
+  held: join(REMY_DIR, "held.json"),
   taskDir: (id) => join(REMY_DIR, "tasks", id),
   slackState: (workspace) => join(REMY_DIR, `slack-state.${workspace}.json`),
   telegramState: (workspace) => join(REMY_DIR, `telegram-state.${workspace}.json`),
@@ -245,6 +249,13 @@ function loadConfig() {
   config.workspaces = config.workspaces.map(migrateWorkspace);
   delete config.slackUserId;
   return config;
+}
+function configStamp() {
+  try {
+    return statSync(PATHS.config).mtimeMs;
+  } catch {
+    return 0;
+  }
 }
 function saveConfig(config) {
   writeJson(PATHS.config, config);
@@ -1498,38 +1509,303 @@ async function openWorkspaces(workspaces, sink, opts) {
 }
 var quietSink = { push: async () => {}, permission: async () => {}, log: () => {} };
 
-// src/doctor.ts
-function sh(cmd) {
-  const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
-  return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
+// src/daemon.ts
+import { appendFileSync as appendFileSync2, openSync, readSync, closeSync, statSync as statSync3, unlinkSync as unlinkSync2 } from "fs";
+
+// src/link.ts
+import { chmodSync, existsSync as existsSync2, unlinkSync } from "fs";
+import { createConnection, createServer } from "net";
+// .claude-plugin/plugin.json
+var plugin_default = {
+  name: "remy",
+  displayName: "Remy",
+  version: "0.9.1",
+  description: "A coordinator session that tracks all your Claude Code sessions and their PRs and talks to you through Slack or Telegram.",
+  author: { name: "Tomas Svatek" },
+  repository: "https://github.com/t9builds/remy",
+  license: "MIT",
+  keywords: ["coordinator", "slack", "telegram", "sessions", "agents"]
+};
+
+// src/link.ts
+var VERSION = plugin_default.version;
+var RESTART_EXIT = 75;
+var HOLD_MAX = 500;
+function readLines(socket, onMessage) {
+  let partial = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => {
+    const lines = (partial + chunk).split(`
+`);
+    partial = lines.pop() ?? "";
+    for (const l of lines) {
+      if (!l)
+        continue;
+      let m;
+      try {
+        m = JSON.parse(l);
+      } catch {
+        continue;
+      }
+      onMessage(m);
+    }
+  });
 }
-async function doctor() {
-  const rows = [];
-  const v = sh(["claude", "--version"]).out.match(/(\d+)\.(\d+)\.(\d+)/);
-  const [major = 0, minor = 0, patch = 0] = v ? v.slice(1).map(Number) : [];
-  rows.push({ label: `Claude Code ${v?.[0] ?? "missing"}`, ok: major > 2 || major === 2 && (minor > 1 || patch >= 224), hint: "need 2.1.224+ (`claude update`)" });
-  rows.push({ label: "gh authenticated", ok: sh(["gh", "auth", "status"]).ok, hint: "run `gh auth login`" });
-  const c = loadConfig();
-  rows.push({ label: "at least one workspace", ok: c.workspaces.length > 0, hint: "run `remy setup`" });
-  const perWorkspace = await Promise.all(c.workspaces.map(async (ws) => (await checkWorkspace(ws)).map((r) => ({ ...r, workspace: ws.name }))));
-  rows.push(...perWorkspace.flat());
-  const byBot = new Map;
-  for (const ws of c.workspaces.filter((w) => w.telegram)) {
-    const token = readToken(ws.name, "telegram-bot");
-    const other = token && byBot.get(token);
-    if (other)
-      rows.push({ label: "Telegram bot of its own", ok: false, workspace: ws.name, messenger: "telegram", hint: `uses the same bot as "${other}"; give it another bot, or remove one of them (\`remy setup\`)` });
-    else if (token)
-      byBot.set(token, ws.name);
+var send = (socket, m) => {
+  if (!socket.destroyed)
+    socket.write(JSON.stringify(m) + `
+`);
+};
+function coordinatorTools(working) {
+  return [
+    {
+      name: "post",
+      description: "Send the user a message in a workspace: their Slack DM with the bot (or a Slack channel thread), or their Telegram chat. Returns the message id.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
+          workspace: { type: "string", description: `Workspace from the event tag. Working: ${working || "none"}` },
+          thread: { type: "string", description: "Answer in this thread: thread or id from the event tag, or an id post returned" },
+          session: {
+            type: "string",
+            description: "Agent session this message is about; the user's replies come back tagged with it. For an agent started from a Slack channel thread, leave thread out: the message goes to that thread."
+          },
+          expect_reply: { type: "boolean", description: "A question: watch for the user's answer" }
+        },
+        required: ["text"]
+      }
+    },
+    {
+      name: "update",
+      description: "Edit a message the bot posted earlier.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The id post returned" },
+          text: { type: "string" },
+          workspace: { type: "string" }
+        },
+        required: ["id", "text"]
+      }
+    }
+  ];
+}
+function answers(path, timeoutMs = 1000) {
+  return new Promise((resolve) => {
+    const s = createConnection(path);
+    const done = (ok) => (s.destroy(), resolve(ok));
+    s.setTimeout(timeoutMs, () => done(false));
+    s.on("connect", () => done(true));
+    s.on("error", () => done(false));
+  });
+}
+
+class LinkServer {
+  path;
+  handlers;
+  server;
+  coordinator;
+  held = [];
+  constructor(path, handlers) {
+    this.path = path;
+    this.handlers = handlers;
   }
-  const catchAll = c.workspaces.filter((w) => !w.repos?.length && !w.paths?.length);
-  if (catchAll.length > 1)
-    rows.push({ label: "one catch-all workspace", ok: false, optional: true, hint: `${catchAll.length} have no repos or paths; "${catchAll[0].name}" gets every unmatched session` });
-  return { ok: !blocking(rows).length, rows };
+  get connected() {
+    return !!this.coordinator;
+  }
+  get heldEvents() {
+    return this.held;
+  }
+  hold(events) {
+    this.held.unshift(...events);
+    this.held.splice(0, Math.max(0, this.held.length - HOLD_MAX));
+  }
+  async listen() {
+    if (existsSync2(this.path)) {
+      if (await answers(this.path))
+        throw new Error(`a remy daemon is already running (${this.path})`);
+      unlinkSync(this.path);
+    }
+    this.server = createServer((s) => this.accept(s));
+    await new Promise((resolve, reject) => {
+      this.server.once("error", reject);
+      this.server.listen(this.path, () => resolve());
+    });
+    chmodSync(this.path, 384);
+  }
+  close() {
+    this.coordinator?.destroy();
+    this.server?.close();
+    try {
+      unlinkSync(this.path);
+    } catch {}
+  }
+  push(event) {
+    if (this.coordinator)
+      return send(this.coordinator, { type: "event", event });
+    this.held.push({ ...event, meta: { ...event.meta, queued_at: new Date().toISOString() } });
+    if (this.held.length > HOLD_MAX)
+      this.handlers.log("link: dropped held event", this.held.shift().kind);
+  }
+  permission(request_id, behavior) {
+    if (this.coordinator)
+      send(this.coordinator, { type: "permission", request_id, behavior });
+    else
+      this.handlers.log("link: permission verdict with no coordinator", request_id);
+  }
+  accept(socket) {
+    socket.on("error", (e) => this.handlers.log("link: socket error", e.message));
+    socket.on("close", () => {
+      if (this.coordinator !== socket)
+        return;
+      this.coordinator = undefined;
+      this.handlers.log("link: coordinator disconnected");
+    });
+    readLines(socket, (m) => {
+      if (m.type === "hello")
+        return void this.hello(socket);
+      if (m.type === "permission_request")
+        return void this.handlers.permissionRequest(m.params).catch((e) => this.handlers.log("link: permission request failed", e?.message ?? e));
+      if (m.type === "request")
+        this.handlers.request(m.request, m.args).then((result) => send(socket, { type: "response", id: m.id, result }), (e) => send(socket, { type: "response", id: m.id, error: String(e?.message ?? e) }));
+    });
+  }
+  async hello(socket) {
+    const greeting = await this.handlers.greeting?.().catch(() => []) ?? [];
+    if (socket.destroyed)
+      return;
+    if (this.coordinator && this.coordinator !== socket) {
+      this.handlers.log("link: a newer coordinator connected; closing the old one");
+      this.coordinator.end(JSON.stringify({ type: "replaced" }) + `
+`);
+    }
+    this.coordinator = socket;
+    const held = this.held;
+    this.held = [];
+    this.handlers.log("link: coordinator connected", held.length ? `delivering ${held.length} held` : "");
+    for (const event of [...greeting, ...held])
+      send(socket, { type: "event", event });
+  }
+}
+
+class LinkClient {
+  path;
+  handlers;
+  retryMs;
+  socket;
+  nextId = 1;
+  pending = new Map;
+  closed = false;
+  constructor(path, handlers, retryMs = 2000) {
+    this.path = path;
+    this.handlers = handlers;
+    this.retryMs = retryMs;
+  }
+  get connected() {
+    return !!this.socket;
+  }
+  start() {
+    this.connect();
+    return this;
+  }
+  async connectedWithin(ms) {
+    for (const until = Date.now() + ms;!this.socket && Date.now() < until; )
+      await Bun.sleep(50);
+    return this.connected;
+  }
+  close() {
+    this.closed = true;
+    this.socket?.destroy();
+  }
+  connect() {
+    if (this.closed)
+      return;
+    const s = createConnection(this.path);
+    s.on("connect", () => {
+      this.socket = s;
+      send(s, { type: "hello" });
+      this.handlers.state?.(true);
+    });
+    s.on("error", () => {});
+    s.on("close", () => {
+      const wasUp = this.socket === s;
+      if (wasUp)
+        this.socket = undefined;
+      for (const p of this.pending.values())
+        p.reject(new Error("the remy daemon went away"));
+      this.pending.clear();
+      if (wasUp)
+        this.handlers.state?.(false);
+      if (!this.closed)
+        setTimeout(() => this.connect(), this.retryMs);
+    });
+    readLines(s, (m) => {
+      if (m.type === "event")
+        return void Promise.resolve(this.handlers.event(m.event)).catch((e) => this.handlers.log("link: event failed", e?.message ?? e));
+      if (m.type === "permission")
+        return void Promise.resolve(this.handlers.permission(m.request_id, m.behavior)).catch(() => {});
+      if (m.type === "replaced") {
+        this.closed = true;
+        return this.handlers.replaced?.();
+      }
+      if (m.type === "response") {
+        const p = this.pending.get(m.id);
+        this.pending.delete(m.id);
+        if (m.error !== undefined)
+          p?.reject(new Error(m.error));
+        else
+          p?.resolve(m.result);
+      }
+    });
+  }
+  request(request, args, timeoutMs = 60000) {
+    const s = this.socket;
+    if (!s)
+      return Promise.reject(new Error("the remy daemon isn't running"));
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`the remy daemon didn't answer within ${timeoutMs / 1000} s`));
+      }, timeoutMs);
+      const settle = (fn) => (clearTimeout(timer), fn());
+      this.pending.set(id, { resolve: (v) => settle(() => resolve(v)), reject: (e) => settle(() => reject(e)) });
+      send(s, { type: "request", id, request, args });
+    });
+  }
+  permissionRequest(params) {
+    if (!this.socket)
+      return false;
+    send(this.socket, { type: "permission_request", params });
+    return true;
+  }
+}
+function askDaemon(path, request, args, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const s = createConnection(path);
+    let settled = false;
+    const done = (fn) => {
+      if (settled)
+        return;
+      settled = true;
+      s.destroy();
+      fn();
+    };
+    s.setTimeout(timeoutMs, () => done(() => resolve(undefined)));
+    s.on("error", () => done(() => resolve(undefined)));
+    s.on("close", () => done(() => resolve(undefined)));
+    s.on("connect", () => send(s, { type: "request", id: 1, request, args }));
+    readLines(s, (m) => {
+      if (m.type !== "response")
+        return;
+      done(() => m.error !== undefined ? reject(new Error(m.error)) : resolve(m.result));
+    });
+  });
 }
 
 // src/hook.ts
-import { appendFileSync, statSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
+import { appendFileSync, statSync as statSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
 
 // src/kitchen-names.ts
 var KITCHEN_NAMES = [
@@ -1766,6 +2042,76 @@ async function nameSession(input, live) {
   return name;
 }
 
+// src/hook.ts
+var MAX_BYTES = 5 * 1024 * 1024;
+var KEEP_LINES = 2000;
+async function runHook() {
+  if (process.env.REMY_ROLE === "coordinator")
+    return;
+  const raw = await Bun.stdin.text();
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (input.agent_id)
+    return;
+  if (input.hook_event_name === "UserPromptSubmit") {
+    const name = await nameSession(input, async () => (await listAgents()).map((a) => a.name));
+    if (name)
+      console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", sessionTitle: name } }));
+    return;
+  }
+  const ev = {
+    ts: Date.now(),
+    event: input.hook_event_name,
+    type: input.notification_type ?? input.reason,
+    session_id: input.session_id,
+    cwd: input.cwd,
+    message: trim(input.message, 500),
+    last: trim(input.last_assistant_message, 1500),
+    transcript_path: input.transcript_path,
+    permission_mode: input.permission_mode
+  };
+  if (process.env.REMY_HOOK_DEBUG)
+    ev.message = trim(JSON.stringify(Object.keys(input)), 500);
+  ensureDir();
+  appendFileSync(PATHS.events, JSON.stringify(ev) + `
+`, { mode: 384 });
+  rotate();
+}
+function trim(s, n) {
+  if (typeof s !== "string" || !s)
+    return;
+  return s.length > n ? s.slice(0, n) + "\u2026" : s;
+}
+function rotate() {
+  try {
+    if (statSync2(PATHS.events).size < MAX_BYTES)
+      return;
+    const lines = readFileSync2(PATHS.events, "utf8").trimEnd().split(`
+`);
+    writeFileSync2(PATHS.events, lines.slice(-KEEP_LINES).join(`
+`) + `
+`, { mode: 384 });
+  } catch {}
+}
+function readEvents() {
+  try {
+    return readFileSync2(PATHS.events, "utf8").split(`
+`).filter(Boolean).flatMap((l) => {
+      try {
+        return [JSON.parse(l)];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
 // src/snapshot.ts
 function spawnedEntry(spawned, name, sessionId) {
   const byId = Object.values(spawned).find((s) => s.id && sessionId.startsWith(s.id));
@@ -1955,76 +2301,6 @@ function formatSession(x, now = Date.now(), paint = PLAIN) {
 `);
 }
 
-// src/hook.ts
-var MAX_BYTES = 5 * 1024 * 1024;
-var KEEP_LINES = 2000;
-async function runHook() {
-  if (process.env.REMY_ROLE === "coordinator")
-    return;
-  const raw = await Bun.stdin.text();
-  let input;
-  try {
-    input = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (input.agent_id)
-    return;
-  if (input.hook_event_name === "UserPromptSubmit") {
-    const name = await nameSession(input, async () => (await listAgents()).map((a) => a.name));
-    if (name)
-      console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", sessionTitle: name } }));
-    return;
-  }
-  const ev = {
-    ts: Date.now(),
-    event: input.hook_event_name,
-    type: input.notification_type ?? input.reason,
-    session_id: input.session_id,
-    cwd: input.cwd,
-    message: trim(input.message, 500),
-    last: trim(input.last_assistant_message, 1500),
-    transcript_path: input.transcript_path,
-    permission_mode: input.permission_mode
-  };
-  if (process.env.REMY_HOOK_DEBUG)
-    ev.message = trim(JSON.stringify(Object.keys(input)), 500);
-  ensureDir();
-  appendFileSync(PATHS.events, JSON.stringify(ev) + `
-`, { mode: 384 });
-  rotate();
-}
-function trim(s, n) {
-  if (typeof s !== "string" || !s)
-    return;
-  return s.length > n ? s.slice(0, n) + "\u2026" : s;
-}
-function rotate() {
-  try {
-    if (statSync(PATHS.events).size < MAX_BYTES)
-      return;
-    const lines = readFileSync2(PATHS.events, "utf8").trimEnd().split(`
-`);
-    writeFileSync2(PATHS.events, lines.slice(-KEEP_LINES).join(`
-`) + `
-`, { mode: 384 });
-  } catch {}
-}
-function readEvents() {
-  try {
-    return readFileSync2(PATHS.events, "utf8").split(`
-`).filter(Boolean).flatMap((l) => {
-      try {
-        return [JSON.parse(l)];
-      } catch {
-        return [];
-      }
-    });
-  } catch {
-    return [];
-  }
-}
-
 // src/merged.ts
 var runSync = (cmd) => {
   const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
@@ -2154,6 +2430,364 @@ function coalesce(run) {
   };
 }
 var digestWorthy = (c) => c.what === "merged" || c.what === "ended" || c.what === "pr_state" && /\u2192 #\d+ merged/.test(c.detail);
+
+// src/daemon.ts
+var log = (...a) => {
+  try {
+    appendFileSync2(PATHS.log, `${new Date().toISOString()} ${a.map(String).join(" ")}
+`);
+  } catch {}
+};
+var config;
+var stamp = 0;
+var link;
+var startedAt = Date.now();
+var lastActive = "";
+async function push(kind, content, meta = {}) {
+  const clean = Object.fromEntries(Object.entries(meta).filter(([, v]) => v));
+  if (kind === "user_message" && meta.workspace)
+    lastActive = meta.workspace;
+  if (kind === "user_message")
+    scheduleQueue(QUEUE_AFTER_USER_MS);
+  log("push", kind, meta.workspace ?? "", content.slice(0, 120).replace(/\n/g, " "), link.connected ? "" : "(held)");
+  link.push({ kind, content, meta: { kind, ...clean } });
+}
+var sink = {
+  push,
+  permission: async (request_id, behavior) => link.permission(request_id, behavior),
+  queue: async (workspace) => queueText(await takeSnapshot(), workspace),
+  log
+};
+var bridges = new Map;
+var off = [];
+var active;
+var opened;
+var ready = new Promise((r) => opened = r);
+var workspaceOf = (cwd, repo) => workspaceFor({ cwd, repo: repo ?? githubRepoOf(cwd) }, active)?.name ?? "";
+function bridgeFor(workspace, cwd) {
+  const b = workspace && bridges.get(workspace) || bridges.get(workspaceOf(cwd)) || bridges.values().next().value;
+  if (!b)
+    throw new Error("No workspace is set up. Tell the user to run `remy setup` in a terminal.");
+  return b;
+}
+async function request(name, args) {
+  if (name === "status")
+    return status();
+  if (name === "stop" || name === "restart") {
+    log(`${name === "stop" ? "stopping" : "restarting"} on request`);
+    setTimeout(() => shutdown(name === "stop" ? 0 : RESTART_EXIT), 50);
+    return name;
+  }
+  await ready;
+  if (name === "tools")
+    return coordinatorTools(active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", "));
+  if (name === "call")
+    return callTool(String(args?.name), args?.arguments ?? {});
+  throw new Error(`unknown request: ${name}`);
+}
+function status() {
+  return {
+    pid: process.pid,
+    version: VERSION,
+    startedAt,
+    config: stamp,
+    supervised: process.env.REMY_DAEMON_SERVICE === "1",
+    coordinator: link.connected,
+    held: link.heldEvents.length,
+    workspaces: [...bridges.keys()]
+  };
+}
+async function callTool(name, a) {
+  const origin = a.session && !a.thread ? await spawnOrigin(a.session) : undefined;
+  if (origin)
+    Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
+  const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+  const rerouted = a.workspace && a.workspace !== bridge.workspace ? ` ("${a.workspace}" is off, so this went to "${bridge.workspace}")` : "";
+  try {
+    if (name === "post") {
+      const id = await bridge.post(String(a.text), { thread: a.thread, session: a.session, expect_reply: a.expect_reply });
+      return { content: [{ type: "text", text: `posted to ${bridge.workspace} id=${id}${rerouted}` }] };
+    }
+    if (name === "update") {
+      await bridge.update(String(a.id), String(a.text));
+      return { content: [{ type: "text", text: "updated" }] };
+    }
+  } catch (e) {
+    return { isError: true, content: [{ type: "text", text: `${name} to ${bridge.workspace} failed: ${e?.message ?? e}` }] };
+  }
+  throw new Error(`unknown tool: ${name}`);
+}
+var agentsCache = { at: 0, rows: [] };
+var cwdById = new Map;
+async function agents(maxAgeMs = 20000) {
+  if (Date.now() - agentsCache.at > maxAgeMs) {
+    try {
+      agentsCache = { at: Date.now(), rows: await listAgents() };
+    } catch {}
+  }
+  return agentsCache.rows;
+}
+async function cwdOfSession(name) {
+  const row = (await agents()).find((r) => r.name === name);
+  return row ? cwdById.get(row.sessionId) ?? row.cwd : undefined;
+}
+async function spawnOrigin(name) {
+  const row = (await agents()).find((r) => r.name === name);
+  const spawned = readJson(PATHS.spawned, {});
+  return (row ? spawnedEntry(spawned, name, row.sessionId) : spawned[name])?.slack;
+}
+async function sessionInfo(sessionId) {
+  const row = (await agents()).find((r) => r.sessionId === sessionId);
+  const spawned = readJson(PATHS.spawned, {});
+  const spawn = row && spawnedEntry(spawned, row.name, sessionId);
+  return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, unattended: !!spawn || row?.kind === "background", merged: !!spawn?.merged };
+}
+var lastPushed = new Map;
+function debounced(key, ms = 60000) {
+  if (Date.now() - (lastPushed.get(key) ?? 0) < ms)
+    return true;
+  lastPushed.set(key, Date.now());
+  return false;
+}
+var NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitation_dialog"]);
+async function onEvent(e) {
+  if (e.cwd)
+    cwdById.set(e.session_id, e.cwd);
+  scheduleQueue();
+  const workspace = workspaceOf(e.cwd);
+  if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
+    setTimeout(async () => {
+      agentsCache.at = 0;
+      scheduleQueue();
+      const s = await sessionInfo(e.session_id);
+      if (s.status && s.status !== "waiting")
+        return;
+      if (debounced(`input:${e.session_id}`))
+        return;
+      await push("agent_needs_input", e.message ?? "waiting for input", { workspace, session: s.name, reason: e.type ?? "", cwd: e.cwd ?? "" });
+    }, 45000);
+    return;
+  }
+  if (e.event === "Stop" || e.event === "SessionEnd") {
+    const s = await sessionInfo(e.session_id);
+    if (!s.unattended || s.merged)
+      return;
+    if (e.event === "Stop" && !questionOf(e.last))
+      return;
+    if (debounced(`done:${e.session_id}`, 30000))
+      return;
+    const what = e.event === "Stop" ? "finished its turn" : `ended (${e.type ?? "exit"})`;
+    await push("agent_finished", `${s.name} ${what}.
+
+Last message:
+${e.last ?? "(none)"}`, { workspace, session: s.name, cwd: e.cwd ?? "" });
+  }
+}
+function tailEvents() {
+  let offset = 0;
+  try {
+    offset = statSync3(PATHS.events).size;
+  } catch {}
+  let partial = "";
+  setInterval(() => {
+    let size = 0;
+    try {
+      size = statSync3(PATHS.events).size;
+    } catch {
+      return;
+    }
+    if (size < offset)
+      offset = 0;
+    if (size === offset)
+      return;
+    const fd = openSync(PATHS.events, "r");
+    const buf = Buffer.alloc(size - offset);
+    readSync(fd, buf, 0, buf.length, offset);
+    closeSync(fd);
+    offset = size;
+    const lines = (partial + buf.toString("utf8")).split(`
+`);
+    partial = lines.pop() ?? "";
+    for (const l of lines) {
+      if (!l)
+        continue;
+      try {
+        onEvent(JSON.parse(l)).catch((err) => log("event error", err));
+      } catch {}
+    }
+  }, 2000);
+}
+async function digest() {
+  try {
+    const { snapshot: taken, changes: diffed, first } = await snapshotDiff();
+    const merged = closeMerged(taken);
+    const closed = new Set(merged.map((c) => c.sessionId));
+    const snapshot = { ...taken, sessions: taken.sessions.filter((s) => !closed.has(s.sessionId)) };
+    if (closed.size)
+      writeJson(PATHS.snapshot, snapshot);
+    await refreshQueue(snapshot);
+    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged].filter(digestWorthy);
+    if (first || !changes.length)
+      return;
+    const names = new Set(bridges.keys());
+    if (!names.size)
+      names.add("");
+    for (const name of names) {
+      const mine = changes.filter((c) => workspaceOf(c.cwd, c.repo) === name);
+      if (!mine.length)
+        continue;
+      const sessions = snapshot.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === name);
+      const lines = mine.map((c) => `- ${c.session}: ${c.what} \u2014 ${c.detail}${c.pr ? ` (${c.pr})` : ""}`);
+      await push("digest", `Changes since last digest:
+${lines.join(`
+`)}
+
+Sessions in this workspace:
+${formatTable({ ...snapshot, sessions })}`, {
+        workspace: name
+      });
+    }
+  } catch (e) {
+    log("digest error", e?.message ?? e);
+  }
+}
+var queueRun = Promise.resolve();
+var QUEUE_AFTER_EVENT_MS = 1e4;
+var QUEUE_AFTER_USER_MS = 30000;
+var queueAfter = coalesce(() => void refreshQueue());
+function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
+  queueAfter(ms);
+}
+function queueText(snap, workspace) {
+  const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
+  return formatQueue(queueOf({ ...snap, sessions }), sessions);
+}
+function refreshQueue(snapshot) {
+  queueRun = queueRun.then(async () => {
+    try {
+      const snap = snapshot ?? await takeSnapshot();
+      const state = readJson(PATHS.queue, {});
+      for (const [name, b] of bridges) {
+        state[name] = await showQueue(b, state[name], queueText(snap, name), (...a) => log(...a, name));
+      }
+      writeJson(PATHS.queue, state);
+    } catch (e) {
+      log("queue error", e?.message ?? e);
+    }
+  });
+  return queueRun;
+}
+async function greeting() {
+  await ready;
+  const note = (content) => ({ kind: "system", content, meta: { kind: "system" } });
+  if (!config.workspaces.length)
+    return [note("No workspace is configured. Tell the user in this terminal to run `remy setup`, then `remy start`.")];
+  if (!bridges.size)
+    return [note(`No workspace works: ${off.map((o) => `"${o.workspace}" ${o.messenger} (${o.reason})`).join("; ")}. Tell the user in this terminal; \`remy doctor\` shows what to fix.`)];
+  const fallback = workspaceFor({}, active)?.name;
+  const notes = [];
+  for (const name of new Set(off.map((o) => o.workspace))) {
+    const mine = off.filter((o) => o.workspace === name);
+    const why = mine.map((o) => `${o.messenger}: ${o.reason}`).join("; ");
+    const fix = `\`remy setup ${name}\`, then restart the daemon`;
+    if (bridges.has(name))
+      notes.push(note(`In workspace "${name}", ${mine.map((o) => o.messenger).join(" and ")} is off (${why}). Until it's fixed (${fix}), "${name}" works through its other app only. Mention it in your hello there.`));
+    else
+      notes.push(note(`Workspace "${name}" is off (${why}). Until it's fixed (${fix}), its sessions report to "${fallback}" and posts to "${name}" go there too. Don't post a separate hello for "${name}"; mention it in the hello to "${fallback}".`));
+  }
+  return notes;
+}
+var stopping = false;
+function shutdown(code) {
+  if (stopping)
+    return;
+  stopping = true;
+  link?.close();
+  if (link?.heldEvents.length)
+    writeJson(PATHS.held, link.heldEvents);
+  log("stopped", link?.heldEvents.length ? `keeping ${link.heldEvents.length} held` : "");
+  process.exit(code);
+}
+function takeHeld() {
+  const held = readJson(PATHS.held, []);
+  try {
+    unlinkSync2(PATHS.held);
+  } catch {}
+  return Array.isArray(held) ? held : [];
+}
+async function runDaemon() {
+  ensureDir();
+  stamp = configStamp();
+  config = loadConfig();
+  active = { ...config, workspaces: [] };
+  link = new LinkServer(PATHS.socket, {
+    request,
+    permissionRequest: async (params) => {
+      await ready;
+      await bridgeFor(lastActive).askPermission(params);
+    },
+    greeting,
+    log
+  });
+  await link.listen();
+  link.hold(takeHeld());
+  process.on("SIGINT", () => shutdown(0));
+  process.on("SIGTERM", () => shutdown(0));
+  console.log(`remy daemon ${VERSION} listening on ${PATHS.socket}; log in ${PATHS.log}`);
+  const r = await openWorkspaces(config.workspaces, sink, { triggerEmoji: config.triggerEmoji });
+  bridges = r.bridges;
+  off = r.off;
+  active = { ...config, workspaces: config.workspaces.filter((w) => bridges.has(w.name)) };
+  opened();
+  log("started", VERSION, [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => `${o.workspace}/${o.messenger}`).join(",")}` : "");
+  for (const b of bridges.values())
+    b.start().catch((e) => push("system", `Workspace "${b.workspace}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
+  tailEvents();
+  await digest();
+  setInterval(digest, config.digestMinutes * 60000);
+}
+
+// src/doctor.ts
+function sh(cmd) {
+  const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
+  return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
+}
+function daemonCheck(s) {
+  if (!s)
+    return { label: "remy daemon running", ok: false, optional: true, hint: "`remy start` starts it, or run it as a service (README \u2192 Run the daemon as a service)" };
+  const label = `remy daemon ${s.version} running (pid ${s.pid}${s.coordinator ? ", coordinator connected" : s.held ? `, ${s.held} held for the coordinator` : ""})`;
+  const why = s.version !== VERSION ? `remy ${VERSION} is installed` : s.config !== configStamp() ? "the config changed since it started" : "";
+  if (!why)
+    return { label, ok: true };
+  return { label, ok: false, optional: true, hint: `${why}; \`remy start\` restarts the daemon, or restart its service` };
+}
+async function doctor() {
+  const rows = [];
+  const v = sh(["claude", "--version"]).out.match(/(\d+)\.(\d+)\.(\d+)/);
+  const [major = 0, minor = 0, patch = 0] = v ? v.slice(1).map(Number) : [];
+  rows.push({ label: `Claude Code ${v?.[0] ?? "missing"}`, ok: major > 2 || major === 2 && (minor > 1 || patch >= 224), hint: "need 2.1.224+ (`claude update`)" });
+  rows.push({ label: "gh authenticated", ok: sh(["gh", "auth", "status"]).ok, hint: "run `gh auth login`" });
+  rows.push(daemonCheck(await askDaemon(PATHS.socket, "status").catch(() => {
+    return;
+  })));
+  const c = loadConfig();
+  rows.push({ label: "at least one workspace", ok: c.workspaces.length > 0, hint: "run `remy setup`" });
+  const perWorkspace = await Promise.all(c.workspaces.map(async (ws) => (await checkWorkspace(ws)).map((r) => ({ ...r, workspace: ws.name }))));
+  rows.push(...perWorkspace.flat());
+  const byBot = new Map;
+  for (const ws of c.workspaces.filter((w) => w.telegram)) {
+    const token = readToken(ws.name, "telegram-bot");
+    const other = token && byBot.get(token);
+    if (other)
+      rows.push({ label: "Telegram bot of its own", ok: false, workspace: ws.name, messenger: "telegram", hint: `uses the same bot as "${other}"; give it another bot, or remove one of them (\`remy setup\`)` });
+    else if (token)
+      byBot.set(token, ws.name);
+  }
+  const catchAll = c.workspaces.filter((w) => !w.repos?.length && !w.paths?.length);
+  if (catchAll.length > 1)
+    rows.push({ label: "one catch-all workspace", ok: false, optional: true, hint: `${catchAll.length} have no repos or paths; "${catchAll[0].name}" gets every unmatched session` });
+  return { ok: !blocking(rows).length, rows };
+}
 
 // node_modules/@clack/core/dist/index.mjs
 import { styleText } from "util";
@@ -3185,7 +3819,7 @@ ${h}
     }
   }).prompt();
 };
-var log = {
+var log2 = {
   message: (s = [], {
     symbol: e = styleText2("gray", S_BAR),
     secondarySymbol: r = styleText2("gray", S_BAR),
@@ -3209,22 +3843,22 @@ var log = {
 `);
   },
   info: (s, e) => {
-    log.message(s, { ...e, symbol: styleText2("blue", S_INFO) });
+    log2.message(s, { ...e, symbol: styleText2("blue", S_INFO) });
   },
   success: (s, e) => {
-    log.message(s, { ...e, symbol: styleText2("green", S_SUCCESS) });
+    log2.message(s, { ...e, symbol: styleText2("green", S_SUCCESS) });
   },
   step: (s, e) => {
-    log.message(s, { ...e, symbol: styleText2("green", S_STEP_SUBMIT) });
+    log2.message(s, { ...e, symbol: styleText2("green", S_STEP_SUBMIT) });
   },
   warn: (s, e) => {
-    log.message(s, { ...e, symbol: styleText2("yellow", S_WARN) });
+    log2.message(s, { ...e, symbol: styleText2("yellow", S_WARN) });
   },
   warning: (s, e) => {
-    log.warn(s, e);
+    log2.warn(s, e);
   },
   error: (s, e) => {
-    log.message(s, { ...e, symbol: styleText2("red", S_ERROR) });
+    log2.message(s, { ...e, symbol: styleText2("red", S_ERROR) });
   }
 };
 var cancel = (o = "", t) => {
@@ -3504,7 +4138,7 @@ ${i}
 }).prompt();
 
 // src/setup.ts
-import { chmodSync, mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "fs";
+import { chmodSync as chmodSync2, mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "fs";
 import { homedir as homedir2 } from "os";
 import { join as join3, resolve as resolve2 } from "path";
 
@@ -3552,13 +4186,15 @@ async function setup(only) {
   ensureDir();
   const c = loadConfig();
   intro(import_picocolors.default.bgCyan(import_picocolors.default.black(" remy setup ")));
+  if (await askDaemon(PATHS.socket, "stop"))
+    log2.info(`Stopped the remy daemon while you set up; ${import_picocolors.default.cyan("remy start")} starts it again with the new settings.`);
   if (only) {
     await setupWorkspace(c, only);
   } else {
     await general(c);
     await workspaces(c);
   }
-  log.success(installShim());
+  log2.success(installShim());
   const s = spinner();
   s.start("Checking everything");
   const { ok, rows } = await doctor();
@@ -3589,7 +4225,7 @@ async function general(c) {
 }
 async function workspaces(c) {
   if (!c.workspaces.length)
-    log.info("A workspace is where remy talks to you about a set of sessions: in Slack, in Telegram, or both. You can add several.");
+    log2.info("A workspace is where remy talks to you about a set of sessions: in Slack, in Telegram, or both. You can add several.");
   for (;; ) {
     const choice = await answer(select({
       message: c.workspaces.length ? "Workspaces" : "Add your first workspace",
@@ -3615,7 +4251,7 @@ async function workspaces(c) {
       else if (await answer(confirm({ message: `Remove "${choice}"?`, initialValue: false }))) {
         c.workspaces = c.workspaces.filter((w) => w.name !== choice);
         saveConfig(c);
-        log.success(`Removed "${choice}"`);
+        log2.success(`Removed "${choice}"`);
       }
       continue;
     }
@@ -3629,7 +4265,7 @@ async function workspaces(c) {
 }
 async function setupWorkspace(c, name) {
   const existing = c.workspaces.find((w) => w.name === name);
-  log.step(import_picocolors.default.bold(`Workspace "${name}"`));
+  log2.step(import_picocolors.default.bold(`Workspace "${name}"`));
   const kinds = await answer(multiselect({
     message: `Talk to remy here through ${import_picocolors.default.dim("(space to pick, enter to confirm)")}`,
     options: [
@@ -3682,7 +4318,7 @@ async function askBoth(existing) {
 async function askRouting(c, name, existing) {
   const others = c.workspaces.filter((w) => w.name !== name);
   const catchAll = others.find((w) => !w.repos?.length && !w.paths?.length);
-  log.message(import_picocolors.default.dim(`Which sessions report here? Match by GitHub repo or by folder. Leave both empty and this workspace gets every session no other one claims${catchAll ? ` (now "${catchAll.name}")` : ""}.`));
+  log2.message(import_picocolors.default.dim(`Which sessions report here? Match by GitHub repo or by folder. Leave both empty and this workspace gets every session no other one claims${catchAll ? ` (now "${catchAll.name}")` : ""}.`));
   const repos = await answer(text({ message: "GitHub repos", placeholder: "acme-corp/*, someone/side-project", initialValue: existing?.repos?.join(", ") ?? "" }));
   const paths = await answer(text({ message: "Folders", placeholder: "~/work", initialValue: existing?.paths?.join(", ") ?? "" }));
   return { name, repos: list(repos).length ? list(repos) : undefined, paths: list(paths).length ? list(paths).map(expandHome) : undefined };
@@ -3717,7 +4353,7 @@ var SLACK_APP_STEPS = [
 ].join(`
 `);
 async function setupSlack(c, name, existing) {
-  log.step("Slack");
+  log2.step("Slack");
   const userId = await answer(text({
     message: `Your Slack member ID ${import_picocolors.default.dim("(profile \u2192 \u22EE \u2192 Copy member ID)")}`,
     placeholder: "U012ABC345",
@@ -3759,7 +4395,7 @@ ${import_picocolors.default.bold("Event Subscriptions")} \u2192 enable \u2192 bo
   return { userId: userId.trim(), transport, channelRepos: pairs.length ? Object.fromEntries(pairs) : undefined };
 }
 async function setupTelegram(name, existing) {
-  log.step("Telegram");
+  log2.step("Telegram");
   if (!readToken(name, "telegram-bot"))
     note([
       `In Telegram, message ${import_picocolors.default.cyan("@BotFather")}, send ${import_picocolors.default.bold("/newbot")} and pick a name.`,
@@ -3785,7 +4421,7 @@ async function setupTelegram(name, existing) {
   return { userId };
 }
 async function pairTelegram(tg, username, workspace) {
-  log.info(`Open ${import_picocolors.default.cyan(`https://t.me/${username}`)} and press ${import_picocolors.default.bold("Start")} (or send the bot any message).`);
+  log2.info(`Open ${import_picocolors.default.cyan(`https://t.me/${username}`)} and press ${import_picocolors.default.bold("Start")} (or send the bot any message).`);
   const s = spinner();
   s.start(`Waiting for your message to @${username}`);
   let offset;
@@ -3809,7 +4445,7 @@ async function pairTelegram(tg, username, workspace) {
       s.stop(`Got a message from ${import_picocolors.default.bold(who)}`);
       if (await answer(confirm({ message: "Is that you?", initialValue: true }))) {
         await tg.getUpdates(offset, 0);
-        log.success(`Paired: only ${who} can talk to this remy`);
+        log2.success(`Paired: only ${who} can talk to this remy`);
         return from.id;
       }
       s.start(`Waiting for your message to @${username}`);
@@ -3828,21 +4464,21 @@ root=$(bun -e 'try{const p=require(process.env.HOME+"/.claude/plugins/installed_
 [ -x "$root/bin/remy" ] || root=${JSON.stringify(ROOT)}
 exec "$root/bin/remy" "$@"
 `);
-  chmodSync(shim, 493);
+  chmodSync2(shim, 493);
   const onPath = (process.env.PATH ?? "").split(":").includes(bin);
   return `Installed the ${import_picocolors.default.cyan("remy")} command${onPath ? "" : import_picocolors.default.yellow(` (add ${bin} to your PATH)`)}`;
 }
 
 // src/spawn.ts
-import { existsSync as existsSync2, statSync as statSync2 } from "fs";
+import { existsSync as existsSync3, statSync as statSync4 } from "fs";
 import { basename, join as join4, resolve as resolve3 } from "path";
 function resolveRepo(repo, roots) {
   const direct = resolve3(repo.replace(/^~(?=\/)/, process.env.HOME ?? "~"));
-  if (existsSync2(join4(direct, ".git")))
+  if (existsSync3(join4(direct, ".git")))
     return direct;
   for (const root of roots) {
     const p = join4(root, repo);
-    if (existsSync2(p) && statSync2(p).isDirectory() && existsSync2(join4(p, ".git")))
+    if (existsSync3(p) && statSync4(p).isDirectory() && existsSync3(join4(p, ".git")))
       return p;
   }
   throw new Error(`No git repo "${repo}" (checked it as a path and under ${roots.join(", ")})`);
@@ -3872,7 +4508,7 @@ async function spawnAgent(opts) {
     name = `${slug(opts.name)}-${i}`;
   let label = slug(`${basename(cwd)}-${opts.task.split(/\s+/).slice(0, 4).join(" ")}`);
   const base = label;
-  for (let i = 2;existsSync2(join4(cwd, ".claude", "worktrees", label)); i++)
+  for (let i = 2;existsSync3(join4(cwd, ".claude", "worktrees", label)); i++)
     label = `${base}-${i}`;
   const slack = opts.slackTask ? loadTask(opts.slackTask) : undefined;
   const prompt = config.spawnTemplate.replaceAll("{task}", slack ? taskPrompt(slack, opts.task) : opts.task);
@@ -3904,7 +4540,8 @@ async function spawnAgent(opts) {
 var ROOT2 = resolve4(import.meta.dir, "..");
 var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, in Slack or Telegram", [
   ["setup [workspace]", "Set up repo folders and workspaces (interactive)"],
-  ["start", "Start the coordinator; keep the terminal open"],
+  ["start", "Start the coordinator (and the daemon, if it isn't running); keep the terminal open"],
+  ["daemon [stop]", "Run the daemon in the foreground, for launchd or systemd; stop stops a running one"],
   ["status [name] [--json] [--merged]", "Every session with repo, branch, PR and CI; a name shows that one in detail; --merged lists closed agents"],
   ["queue [--json]", "What waits on you, most urgent first"],
   ["changes", "What changed since the last snapshot (updates it)"],
@@ -3941,6 +4578,7 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
     }
     console.log("");
   }
+  await ensureDaemon(c.repoRoots[0] ?? homedir3());
   writeJson(PATHS.mcpConfig, {
     mcpServers: { remy: { command: process.execPath, args: [join5(ROOT2, "dist", "channel.js")] } }
   });
@@ -3965,6 +4603,37 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
   const compact = compactEnv(c.coordinatorCompactPct);
   const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...compact, REMY_ROLE: "coordinator" } });
   process.exit(r.exitCode ?? 0);
+}
+var daemonStatus = () => askDaemon(PATHS.socket, "status");
+async function daemonWithin(ms, ok = () => true) {
+  for (const until = Date.now() + ms;Date.now() < until; ) {
+    await Bun.sleep(250);
+    const s = await daemonStatus();
+    if (s && ok(s))
+      return s;
+  }
+}
+async function ensureDaemon(cwd) {
+  const running = await daemonStatus();
+  if (running && running.version === VERSION && running.config === configStamp())
+    return;
+  if (running) {
+    const why = running.version !== VERSION ? `it runs ${running.version} and ${VERSION} is installed` : "the config changed";
+    console.log(import_picocolors.default.dim(`Restarting the remy daemon: ${why}.`));
+    await askDaemon(PATHS.socket, "restart");
+    if (running.supervised) {
+      if (await daemonWithin(20000, (s) => s.pid !== running.pid))
+        return;
+      throw new Error(`the remy daemon's service didn't start it again; see ${PATHS.log}`);
+    }
+    for (const until = Date.now() + 5000;Date.now() < until && await daemonStatus(); )
+      await Bun.sleep(100);
+  }
+  const out = openSync2(PATHS.log, "a");
+  spawn(process.execPath, [join5(ROOT2, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out] }).unref();
+  if (!await daemonWithin(15000, (s) => s.pid !== running?.pid))
+    throw new Error(`the remy daemon didn't start; see ${PATHS.log}`);
+  console.log(import_picocolors.default.dim(`Started the remy daemon; it keeps running after the coordinator exits (log: ${PATHS.log}).`));
 }
 var [cmd = "help", ...args] = process.argv.slice(2);
 try {
@@ -4043,6 +4712,17 @@ try {
     case "start":
       await start(args);
       break;
+    case "daemon": {
+      const sub = parse(args, {}).positionals[0];
+      if (sub === "stop") {
+        console.log(await askDaemon(PATHS.socket, "stop") ? "Stopped the remy daemon." : "No remy daemon is running.");
+        break;
+      }
+      if (sub)
+        throw new Error(`usage: ${import_picocolors.default.cyan("remy daemon [stop]")}`);
+      await runDaemon();
+      break;
+    }
     case "doctor": {
       const { ok, rows } = await doctor();
       console.log(formatChecks(rows));

@@ -62,4 +62,4 @@ If `remy` isn't found yet, give the user the full path: `${CLAUDE_PLUGIN_ROOT}/b
 remy start
 ```
 
-This opens the coordinator session named `remy` with its channel loaded. Accept the development-channel warning once. Leave that terminal open; closing it stops reporting to Slack and Telegram.
+This starts the remy daemon if it isn't running, then opens the coordinator session named `remy` with its channel loaded. Accept the development-channel warning once. Leave that terminal open: the daemon keeps the waiting-on-you list and holds the user's messages while the coordinator is closed, but only the coordinator answers them. To keep the daemon up across logins, see "Run the daemon as a service" in the README.
