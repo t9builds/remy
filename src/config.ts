@@ -13,15 +13,27 @@ export const PATHS = {
   /** One folder per Slack task: task.json plus files downloaded from the thread. */
   taskDir: (id: string) => join(REMY_DIR, "tasks", id),
   slackState: (workspace: string) => join(REMY_DIR, `slack-state.${workspace}.json`),
-  tokenFile: (workspace: string, kind: TokenKind) => join(REMY_DIR, `slack-${kind}-token.${workspace}`),
+  telegramState: (workspace: string) => join(REMY_DIR, `telegram-state.${workspace}.json`),
+  tokenFile: (workspace: string, kind: TokenKind) => join(REMY_DIR, `${kind}-token.${workspace}`),
 };
 
-export type TokenKind = "bot" | "app";
+/** Slack bot token (xoxb-), Slack app-level token (xapp-), Telegram bot token. */
+export type TokenKind = "slack-bot" | "slack-app" | "telegram-bot";
 export type Transport = "poll" | "socket";
 
-export type Workspace = {
+/** Which sessions report to a workspace. */
+export type Routing = {
   /** Short label, e.g. "work" or "personal". Names the keychain entries and state file. */
   name: string;
+  /** GitHub repos whose sessions report here, as "owner/name"; `*` matches anything, e.g. "acme-corp/*". Follows a repo into its worktrees. */
+  repos?: string[];
+  /** Sessions whose folder is under one of these report here. */
+  paths?: string[];
+};
+
+/** A Slack workspace. Configs from before Telegram have no `messenger`. */
+export type SlackWorkspace = Routing & {
+  messenger?: "slack";
   /** Your Slack member ID (U…) in this workspace. Only messages from this user reach the coordinator. */
   slackUserId: string;
   /**
@@ -30,13 +42,19 @@ export type Workspace = {
    * Slack hands each event to any one open connection.
    */
   transport: Transport;
-  /** GitHub repos whose sessions report here, as "owner/name"; `*` matches anything, e.g. "acme-corp/*". Follows a repo into its worktrees. */
-  repos?: string[];
-  /** Sessions whose folder is under one of these report here. */
-  paths?: string[];
   /** Default repo per Slack channel for tasks started from a thread, e.g. { "bugs": "api" }. Repo as for `remy spawn --repo`. */
   channelRepos?: Record<string, string>;
 };
+
+/** Your private chat with your own Telegram bot. A bot serves one remy: Telegram hands its updates to a single reader. */
+export type TelegramWorkspace = Routing & {
+  messenger: "telegram";
+  /** Your Telegram user ID. Only messages from this user reach the coordinator; it is also the chat remy writes to. */
+  telegramUserId: number;
+};
+
+export type Workspace = SlackWorkspace | TelegramWorkspace;
+export const isTelegram = (w: Workspace): w is TelegramWorkspace => w.messenger === "telegram";
 
 export type Config = {
   workspaces: Workspace[];
@@ -133,10 +151,11 @@ export function workspaceFor(where: { cwd?: string; repo?: string }, config: Con
   return best?.ws ?? config.workspaces.find(isCatchAll) ?? config.workspaces[0];
 }
 
-const keychainService = (workspace: string, kind: TokenKind) => `remy-slack-${kind}-token:${workspace}`;
+const keychainService = (workspace: string, kind: TokenKind) => `remy-${kind}-token:${workspace}`;
 
+/** Env `REMY_SLACK_BOT_TOKEN_<WS>`, `REMY_SLACK_APP_TOKEN_<WS>` or `REMY_TELEGRAM_BOT_TOKEN_<WS>`, then the keychain, then a file. */
 export function readToken(workspace: string, kind: TokenKind): string | undefined {
-  const envName = `REMY_SLACK_${kind.toUpperCase()}_TOKEN_${workspace.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+  const envName = `REMY_${kind.toUpperCase().replace("-", "_")}_TOKEN_${workspace.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
   if (process.env[envName]) return process.env[envName];
   if (process.platform === "darwin") {
     const r = Bun.spawnSync(["security", "find-generic-password", "-s", keychainService(workspace, kind), "-w"]);
