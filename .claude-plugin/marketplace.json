@@ -1,0 +1,14 @@
+{
+  "name": "remy",
+  "description": "Remy: a Slack coordinator for your Claude Code sessions.",
+  "owner": {
+    "name": "Tomas Svatek"
+  },
+  "plugins": [
+    {
+      "name": "remy",
+      "source": "./",
+      "description": "A coordinator session that tracks all your Claude Code sessions and their PRs and talks to you through Slack."
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Entry point for hooks, the Bash tool (plugin bin/ is on PATH) and the ~/.local/bin shim.
+here=$(cd "$(dirname "$0")/.." && pwd)
+exec bun "$here/src/cli.ts" "$@"
