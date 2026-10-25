@@ -202,7 +202,7 @@ From a terminal: `remy status` (`remy status <name>` for one session in detail, 
 | `spawnWorktree` | `true` | Give each spawned agent its own worktree |
 | `digestMinutes` | `15` | Minutes between change digests |
 | `coordinatorName` | `remy` | Session name of the coordinator |
-| `coordinatorCompactPct` | `50` | Context-window percentage at which the coordinator compacts; `0` keeps Claude Code's default |
+| `coordinatorCompactPct` | `50` | Context-window percentage (1–100) at which the coordinator compacts; `0` keeps Claude Code's default, and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` set in your shell wins |
 | `triggerEmoji` | `mouse` | Reacting with this emoji (Slack name) starts a task, like a mention |
 
 Each workspace:

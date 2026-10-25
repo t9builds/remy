@@ -15359,6 +15359,14 @@ var DEFAULTS = {
   coordinatorCompactPct: 50,
   triggerEmoji: "mouse"
 };
+function compactPct(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= 100 ? n : undefined;
+}
+function compactEnv(value, shell = process.env) {
+  const pct = compactPct(value);
+  return pct && !shell.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE ? { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(pct) } : {};
+}
 function ensureDir() {
   if (!existsSync(REMY_DIR))
     mkdirSync(REMY_DIR, { recursive: true, mode: 448 });
@@ -17038,6 +17046,15 @@ function formatTable(s, paint = PLAIN) {
     return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}${about}`;
   }).join(`
 `);
+}
+function findSession(sessions, name) {
+  const exact = sessions.find((x) => x.name === name);
+  if (exact)
+    return exact;
+  const hits = sessions.filter((x) => x.name.startsWith(name));
+  if (hits.length === 1)
+    return hits[0];
+  throw new Error(hits.length ? `"${name}" matches ${hits.map((x) => x.name).join(", ")}; give the full name` : `no running session "${name}"; \`remy status\` lists them`);
 }
 function ago(ms) {
   const m = Math.round(ms / 60000);

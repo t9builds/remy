@@ -97,7 +97,10 @@ export type Config = {
   digestMinutes: number;
   /** Session name of the coordinator itself. */
   coordinatorName: string;
-  /** Context-window percentage at which the coordinator compacts (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`); 0 keeps Claude Code's default. */
+  /**
+   * Context-window percentage (1–100) at which the coordinator compacts, passed as `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`.
+   * 0 keeps Claude Code's default; a value already set in the shell wins.
+   */
   coordinatorCompactPct: number;
   /** Reacting with this emoji (Slack name, no colons) to a message starts a task, like mentioning the bot. */
   triggerEmoji: string;
@@ -114,6 +117,18 @@ export const DEFAULTS: Config = {
   coordinatorCompactPct: 50,
   triggerEmoji: "mouse",
 };
+
+/** `coordinatorCompactPct` as a whole percentage from 1 to 100, else undefined: Claude Code's default. */
+export function compactPct(value: unknown): number | undefined {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= 100 ? n : undefined;
+}
+
+/** What the coordinator's environment gets for compaction. A value already set in the shell wins over the config. */
+export function compactEnv(value: unknown, shell: Record<string, string | undefined> = process.env): Record<string, string> {
+  const pct = compactPct(value);
+  return pct && !shell.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE ? { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(pct) } : {};
+}
 
 export function ensureDir() {
   if (!existsSync(REMY_DIR)) mkdirSync(REMY_DIR, { recursive: true, mode: 0o700 });
