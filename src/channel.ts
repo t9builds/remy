@@ -7,6 +7,8 @@
  * - Every `digestMinutes`, diffs the session/PR snapshot and pushes the changes, if any. Spawned agents whose PR
  *   merged are closed then (merged.ts) and reported as merged.
  * - Keeps one pinned "waiting on you" message per workspace (queue.ts), edited in place after each session event.
+ * - With `verify` rules, every couple of minutes starts verifier agents on ready PRs, merges the ones they're
+ *   confident in, and checks merged ones on dev (verify.ts); merges and dev results go to the coordinator.
  * - Exposes post / update so Claude can answer, and relays the coordinator's own permission prompts.
  * Sessions are routed to a workspace by GitHub repo or folder (see `workspaceFor`).
  */
@@ -23,6 +25,7 @@ import type { Messenger, Sink } from "./messenger";
 import { coalesce, digestWorthy, formatQueue, queueOf, questionOf, showQueue } from "./queue";
 import { threadRef } from "./slack-bridge";
 import { formatTable, githubRepoOf, listAgents, snapshotDiff, spawnedEntry, takeSnapshot, type Snapshot, type Spawned } from "./snapshot";
+import { liveEnv, tick, type VerifyState } from "./verify";
 
 const config = loadConfig();
 const log = (...a: unknown[]) => {
@@ -37,6 +40,7 @@ const INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel so
 - kind="agent_needs_input": a session is blocked waiting for the user. Post it with post(workspace, session=<name>, expect_reply=true).
 - kind="agent_finished": a background agent ended its turn. Post only if it ended asking something; remy's pinned waiting-on-you list shows the rest.
 - kind="digest": sessions or PRs changed since the last digest. Post only merges and ended sessions; the pinned list shows the rest.
+- kind="verify": remy's verification of a PR moved on (event=merged, dev_passed or dev_failed). Follow "Verified PRs" in your instructions.
 - kind="system": a note from the remy server itself.
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
 
@@ -310,10 +314,11 @@ function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
   queueAfter(ms);
 }
 
-/** The workspace's list, with only its own sessions. */
+/** The workspace's list, with only its own sessions and PRs. */
 function queueText(snap: Snapshot, workspace: string) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
-  return formatQueue(queueOf({ ...snap, sessions }), sessions);
+  const verify = Object.fromEntries(Object.entries(readJson<VerifyState>(PATHS.verify, {})).filter(([, v]) => workspaceOf(v.repoDir, v.repo) === workspace));
+  return formatQueue(queueOf({ ...snap, sessions }, verify), sessions);
 }
 
 /** Keep each workspace's "waiting on you" message current: edit it in place, or post and pin one when there is none. */
@@ -331,6 +336,32 @@ function refreshQueue(snapshot?: Snapshot) {
     }
   });
   return queueRun;
+}
+
+// ---------- Verification ----------
+
+const VERIFY_EVERY_MS = 2 * 60_000;
+const verifyEnv = liveEnv(async (v, event, text) => {
+  await push("verify", text, { workspace: workspaceOf(v.repoDir, v.repo), event, pr: v.pr, repo: v.repo });
+});
+let verifying = false;
+
+/** Start verifiers on PRs that became ready and move the others on; then refresh the list with what changed. */
+async function verifyRound() {
+  if (verifying) return;
+  verifying = true;
+  try {
+    const snapshot = await takeSnapshot();
+    const state = readJson<VerifyState>(PATHS.verify, {});
+    if (await tick(snapshot, state, config, verifyEnv, log)) {
+      writeJson(PATHS.verify, state);
+      await refreshQueue(snapshot);
+    }
+  } catch (e: any) {
+    log("verify error", e?.message ?? e);
+  } finally {
+    verifying = false;
+  }
 }
 
 // ---------- Start ----------
@@ -367,3 +398,4 @@ for (const b of bridges.values())
 tailEvents();
 await digest(); // stores the baseline on first run
 setInterval(digest, config.digestMinutes * 60_000);
+if (config.verify.length) setInterval(verifyRound, VERIFY_EVERY_MS);

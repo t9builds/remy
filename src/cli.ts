@@ -13,6 +13,7 @@ import { setup } from "./setup";
 import { findSession, formatSession, formatTable, snapshotDiff, takeSnapshot, type Spawned } from "./snapshot";
 import { spawnAgent } from "./spawn";
 import { errorLine, formatChecks, formatHelp, pc, statusPaint } from "./ui";
+import { formatVerify, recordVerdict, type Confidence, type VerifyState } from "./verify";
 
 const ROOT = resolve(import.meta.dir, "..");
 
@@ -23,6 +24,8 @@ const HELP = formatHelp("remy — a coordinator for your Claude Code sessions, i
   ["queue [--json]", "What waits on you, most urgent first"],
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task…>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
+  ["verify [--json] [--retry <pr>]", "PRs under verification and where each stands; --retry verifies a held PR again"],
+  ["verdict <pr> …", "Record a verifier's verdict (--confidence high|medium|low [--fixed]) or a dev check's (--dev --pass|--fail), with --summary"],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
   ["doctor", "Check requirements, tokens and scopes"],
   ["dir", "Print remy's state folder"],
@@ -117,7 +120,7 @@ try {
     case "queue": {
       const { values } = parse(args, { json: { type: "boolean" } });
       const s = await takeSnapshot();
-      const items = queueOf(s);
+      const items = queueOf(s, readJson<VerifyState>(PATHS.verify, {}));
       console.log(values.json ? JSON.stringify(items, null, 2) : formatQueue(items, s.sessions, true));
       break;
     }
@@ -145,6 +148,39 @@ try {
         slackTask: values["slack-task"],
       });
       console.log(JSON.stringify(r, null, 2));
+      break;
+    }
+    case "verify": {
+      const { values } = parse(args, { json: { type: "boolean" }, retry: { type: "string" } });
+      if (values.retry) {
+        recordVerdict({ pr: values.retry, kind: "retry" });
+        console.log("A fresh verifier starts on it within a few minutes, if it waits for you.");
+        break;
+      }
+      const state = readJson<VerifyState>(PATHS.verify, {});
+      console.log(values.json ? JSON.stringify(state, null, 2) : formatVerify(state));
+      break;
+    }
+    case "verdict": {
+      const { values, positionals } = parse(args, {
+        confidence: { type: "string" },
+        fixed: { type: "boolean" },
+        dev: { type: "boolean" },
+        pass: { type: "boolean" },
+        fail: { type: "boolean" },
+        summary: { type: "string" },
+      });
+      const pr = positionals[0];
+      const usage = `usage: ${pc.cyan("remy verdict <pr-url> --confidence high|medium|low [--fixed] --summary <text>")} or ${pc.cyan("remy verdict <pr-url> --dev --pass|--fail --summary <text>")}`;
+      if (!pr || !/^https:\/\/github\.com\/.+\/pull\/\d+$/.test(pr) || !values.summary) throw new Error(usage);
+      if (values.dev) {
+        if (values.pass === values.fail) throw new Error(usage);
+        recordVerdict({ pr, kind: "dev", pass: !!values.pass, summary: values.summary });
+      } else {
+        if (!["high", "medium", "low"].includes(values.confidence ?? "")) throw new Error(usage);
+        recordVerdict({ pr, kind: "review", confidence: values.confidence as Confidence, fixed: !!values.fixed, summary: values.summary });
+      }
+      console.log("Recorded. remy picks it up within a few minutes.");
       break;
     }
     case "post": {

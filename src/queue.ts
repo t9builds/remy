@@ -5,6 +5,7 @@
 import type { Messenger } from "./messenger";
 import { aboutOf } from "./nickname";
 import type { Change, SessionView, Snapshot } from "./snapshot";
+import { DEV_FAILED_LISTED_MS, isActive, type VerifyState } from "./verify";
 
 export type QueueItem = {
   session: string;
@@ -37,24 +38,36 @@ export function questionOf(last: string | undefined): string | undefined {
 }
 
 /** Why `s` waits on the user, if it does. A session counts once, under its most urgent reason. */
-function itemOf(s: SessionView): Omit<QueueItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
+function itemOf(s: SessionView, verify: VerifyState): Omit<QueueItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt") return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
   if (s.status === "busy") return undefined;
   if (asked) return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
   if (s.status === "waiting") return { rank: 0, why: "waits for your answer", action: "reply to its thread" };
+  // A verifier or dev check reports through its verdict, not its own PR state.
+  if (s.role) return undefined;
   if (pr?.ci === "fail") return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
   if (pr?.review === "CHANGES_REQUESTED") return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
+  const v = pr && verify[pr.url];
+  // Being verified, or verified at this head and waiting for the user with the verdict.
+  if (v && isActive(v)) return undefined;
+  if (v?.stage === "held" && v.head === pr!.head) return { rank: 3, why: v.reason ?? "verified", action: "review it" };
   if (pr && pr.ci !== "pending") return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };
   if (s.spawned && !s.pr) return { rank: 4, why: "stopped without a PR", action: "check what it did" };
   return undefined;
 }
 
-export function queueOf(snapshot: Snapshot): QueueItem[] {
+/** `verify`: where each PR's verification stands; a PR that failed on dev stays listed for a day after. */
+export function queueOf(snapshot: Snapshot, verify: VerifyState = {}, now = Date.now()): QueueItem[] {
   const items: (QueueItem & { since: number })[] = [];
+  for (const v of Object.values(verify)) {
+    if (v.stage !== "dev-failed" || now - v.since > DEV_FAILED_LISTED_MS) continue;
+    const why = `failed on dev: ${short(v.reason ?? "", 100)}`;
+    items.push({ session: `#${v.number}`, sessionId: v.pr, cwd: v.repoDir, repo: v.repo, rank: 1, why, action: 'reply "fix" for a fix PR', pr: v.pr, since: v.since });
+  }
   for (const s of snapshot.sessions) {
-    const it = itemOf(s);
+    const it = itemOf(s, verify);
     if (it) items.push({ ...it, session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, pr: s.pr?.url, since: s.lastEvent?.ts ?? s.startedAt });
   }
   // Within a rank, whoever has waited longest first.

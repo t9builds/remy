@@ -19,7 +19,7 @@ test("first snapshot reports nothing", () => {
 });
 
 test("reports PR opened, CI result and ended sessions", () => {
-  const a = snap(session(), session({ sessionId: "s2", name: "old" }));
+  const a = snap(session(), session({ sessionId: "s2", name: "old" }), session({ sessionId: "s3", name: "checker", role: "verifier" }));
   const b = snap(session({ status: "idle", pr: { ...pr, ci: "fail", failing: ["unit-tests"] } }));
   const whats = diff(a, b).map((c) => `${c.session}:${c.what}`);
   expect(whats).toEqual(["api-fix:status", "api-fix:pr_opened", "old:ended"]);

@@ -3,9 +3,9 @@ import { spawnedEntry, type Change, type Snapshot, type Spawned } from "./snapsh
 
 export type Merged = { at: number; pr: string; number: number; cleanup: string };
 
-type Run = (cmd: string[]) => { ok: boolean; out: string };
+export type Run = (cmd: string[]) => { ok: boolean; out: string };
 
-const runSync: Run = (cmd) => {
+export const runSync: Run = (cmd) => {
   const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
   return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
 };
@@ -35,13 +35,18 @@ export function closeIn(snapshot: Snapshot, spawned: Spawned, run: Run = runSync
   const changes: Change[] = [];
   for (const { session: s, spawn } of mergedToClose(snapshot, spawned)) {
     const id = spawn.id ?? s.sessionId;
-    const rm = run(["claude", "rm", id]);
-    const cleanup = rm.ok ? "session and worktree removed" : run(["claude", "stop", id]).ok ? `stopped; worktree kept (${rm.out})` : `not removed (${rm.out})`;
+    const cleanup = closeSession(id, run);
     // Pin the record to this session's id, so a later session that reuses the name isn't taken for it.
     Object.assign(spawn, { id, merged: { at: Date.now(), pr: s.pr!.url, number: s.pr!.number, cleanup } });
     changes.push({ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what: "merged", detail: `PR #${s.pr!.number} merged; ${cleanup}`, pr: s.pr!.url });
   }
   return changes;
+}
+
+/** `claude rm` the session and its worktree, else `claude stop` it and keep the worktree. Says which happened. */
+export function closeSession(id: string, run: Run = runSync) {
+  const rm = run(["claude", "rm", id]);
+  return rm.ok ? "session and worktree removed" : run(["claude", "stop", id]).ok ? `stopped; worktree kept (${rm.out})` : `not removed (${rm.out})`;
 }
 
 export function formatMerged(spawned: Spawned): string {

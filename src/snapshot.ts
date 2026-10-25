@@ -14,6 +14,8 @@ export type Pr = {
   review: string; // APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | ""
   ci: Ci;
   failing: string[];
+  /** Commit at the head of the PR branch. */
+  head?: string;
 };
 
 export type SessionView = {
@@ -24,6 +26,8 @@ export type SessionView = {
   cwd: string;
   startedAt: number;
   spawned: boolean;
+  /** Set for agents remy started to verify a PR or check a deploy (verify.ts). */
+  role?: Role;
   /** What the session is for: a spawned agent's task, else the first prompt of a session remy named. */
   about?: string;
   repo?: string;
@@ -36,6 +40,8 @@ export type Snapshot = { takenAt: number; sessions: SessionView[] };
 
 export type Change = { session: string; sessionId: string; cwd: string; repo?: string; what: string; detail: string; pr?: string };
 
+export type Role = "verifier" | "dev-check";
+
 export type Spawned = Record<
   string,
   {
@@ -46,6 +52,9 @@ export type Spawned = Record<
     task: string;
     startedAt: number;
     slack?: { workspace: string; channel: string; threadTs: string; task: string };
+    /** A verifier or dev check, and the PR it is for. */
+    role?: Role;
+    pr?: string;
     /** Set when its PR merged and remy closed the session (merged.ts); such sessions are left out of snapshots. */
     merged?: Merged;
   }
@@ -120,7 +129,7 @@ async function gitInfo(cwd: string) {
 
 async function prInfo(cwd: string, branch: string): Promise<Pr | undefined> {
   const out = await run(
-    ["gh", "pr", "view", branch, "--json", "number,url,title,state,isDraft,reviewDecision,statusCheckRollup"],
+    ["gh", "pr", "view", branch, "--json", "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid"],
     cwd,
   );
   if (!out) return undefined;
@@ -133,6 +142,7 @@ async function prInfo(cwd: string, branch: string): Promise<Pr | undefined> {
     draft: !!j.isDraft,
     review: j.reviewDecision ?? "",
     ...ciOf(j.statusCheckRollup),
+    head: j.headRefOid,
   };
 }
 
@@ -163,6 +173,7 @@ export async function takeSnapshot(): Promise<Snapshot> {
         cwd,
         startedAt: a.startedAt,
         spawned: !!spawn,
+        role: spawn?.role,
         about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
         repo,
         branch,
@@ -202,7 +213,8 @@ export function diff(prev: Snapshot | undefined, next: Snapshot): Change[] {
       if (p.pr.review !== s.pr.review && s.pr.review) add(s, "review", s.pr.review.toLowerCase().replace(/_/g, " "));
     }
   }
-  for (const p of prev.sessions) if (!after.has(p.sessionId)) add(p, "ended", p.pr ? `last PR ${prLabel(p.pr)}` : "session closed");
+  // Verifiers and dev checks end when remy removes them after their verdict: not news.
+  for (const p of prev.sessions) if (!after.has(p.sessionId) && !p.role) add(p, "ended", p.pr ? `last PR ${prLabel(p.pr)}` : "session closed");
   return changes;
 }
 

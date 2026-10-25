@@ -28,6 +28,9 @@ export async function doctor(): Promise<{ ok: boolean; rows: CheckRow[] }> {
       rows.push({ label: "Telegram bot of its own", ok: false, workspace: ws.name, messenger: "telegram", hint: `uses the same bot as "${other}"; give it another bot, or remove one of them (\`remy setup\`)` });
     else if (token) byBot.set(token, ws.name);
   }
+  // Dev checks find the deploy of a merge with gcloud; without it they report the deploy as missing.
+  for (const project of new Set(c.verify.flatMap((r) => (r.dev ? [r.dev.cloudBuild.project] : []))))
+    rows.push({ label: `gcloud reads Cloud Build in ${project}`, ok: sh(["gcloud", "builds", "list", "--project", project, "--limit", "1", "--format", "value(id)"]).ok, optional: true, hint: "run `gcloud auth login`; dev checks need it" });
   const catchAll = c.workspaces.filter((w) => !w.repos?.length && !w.paths?.length);
   if (catchAll.length > 1)
     rows.push({ label: "one catch-all workspace", ok: false, optional: true, hint: `${catchAll.length} have no repos or paths; "${catchAll[0]!.name}" gets every unmatched session` });

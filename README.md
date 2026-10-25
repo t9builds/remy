@@ -73,6 +73,33 @@ Every 15 minutes you get a short note about merged PRs and ended sessions, if th
 
 You review and merge PRs like you always do. Once an agent's PR is merged, Remy closes that agent at the next digest: `claude rm` deletes the session and its worktree, or, if the worktree still has uncommitted or unpushed work, `claude stop` ends the session and the worktree stays. The agent then counts as merged: it's left out of `remy status`, and `remy status --merged` lists it. Remy only does this for agents it started (`remy spawn`), never for sessions you started yourself, and waits while an agent is mid-turn.
 
+## Verified PRs and auto-merge
+
+For repos you list under `verify`, Remy checks every ready PR itself: open, not a draft, CI green, no changes requested, its session not mid-turn. This covers PRs from agents it started and from your own sessions.
+
+1. A **verifier** starts: a fresh background agent that didn't write the change. It runs the repo's checks (tests, typecheck, lint, build), reviews the diff against what the PR says it does, fixes what it finds and pushes to the PR branch. Then it records a verdict with `remy verdict`.
+2. If it pushed fixes, a new verifier takes the next round once CI is green again, up to `maxRounds`. A verifier never re-checks its own fixes.
+3. A round that finds nothing ends it. With `autoMerge`, Remy merges a `high`-confidence PR whose head hasn't moved, if it's under `maxLines` and touches no `protect` file. Anything else stays on the list with the verdict: 🟢 `#12 · verifier: medium confidence: no test for the retry path → review it`.
+4. With `dev`, after the merge Remy waits for the Cloud Build of the merge commit (`gcloud builds list`). A **dev check** agent then exercises the change on dev with what your machine has: HTTP, the browser, `gcloud logging`, read-only database skills. Remy tells you when it works. When it doesn't, or the deploy fails, you get a message that says what failed and offers a fix PR. The PR stays on the list for a day as 🟠 `#12 · failed on dev: … → reply "fix" for a fix PR`.
+
+Verifiers and dev checks get kitchen names like any agent. Remy removes them once they've recorded their verdict, and leaves one that stopped without a verdict for you to look at. `remy verify` shows where each PR stands. `remy verify --retry <pr>` starts a fresh verifier on a held PR, and new commits on a held PR do the same. A verifier pushes to the PR branch, so pull before you go on working on that branch yourself.
+
+```json
+"verify": [
+  {
+    "repos": ["acme-corp/api"],
+    "autoMerge": true,
+    "maxLines": 400,
+    "protect": ["migrations/**", "infra/**", "src/auth/**"],
+    "checks": "bun run typecheck && bun test",
+    "dev": {
+      "cloudBuild": { "project": "acme-dev", "region": "europe-west1", "trigger": "<trigger id>" },
+      "check": "Call https://api.dev.acme.example/health, exercise the changed endpoint, read the service's logs since the deploy."
+    }
+  }
+]
+```
+
 Telegram works the same way, in your chat with your bot. Telegram has no threads there, so each agent's messages come as a reply chain: reply to any of them to talk to that agent. Right after an agent asks you something, a plain message works too. When the coordinator itself needs a permission, you get Allow / Deny buttons.
 
 ## Tips
@@ -97,6 +124,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | `src/slack-bridge.ts` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in (`src/watch.ts`) |
 | `src/telegram-bridge.ts` | Telegram: your chat with your bot, read by long polling, with Slack-style formatting converted to Telegram's (`src/telegram-format.ts`) |
 | `remy spawn` | `claude --bg -n <kitchen-name> -w <repo-and-task> --permission-mode auto "<task>"` in the chosen repo |
+| `src/verify.ts` | With `verify` rules, every 2 minutes: starts verifiers on ready PRs, reads the verdicts they append to `~/.remy/verdicts.jsonl`, merges with `gh pr merge --match-head-commit`, and waits for the dev deploy with `gcloud builds list`. Where each PR stands is in `~/.remy/verify.json` |
 | `coordinator.md` | The coordinator's instructions, appended to its system prompt |
 
 Messages to other sessions go through Claude Code's built-in `SendMessage`.
@@ -193,7 +221,7 @@ In any channel the bot is in, mention it in a thread (`@bot fix this, it's in ap
 
 Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
 
-From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`.
+From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy verify`, `remy changes`, `remy doctor`.
 
 ## Config
 
@@ -210,6 +238,7 @@ From a terminal: `remy status` (`remy status <name>` for one session in detail, 
 | `coordinatorName` | `remy` | Session name of the coordinator |
 | `coordinatorCompactPct` | `50` | Context-window percentage (1–100) at which the coordinator compacts; `0` keeps Claude Code's default, and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` set in your shell wins |
 | `triggerEmoji` | `mouse` | Reacting with this emoji (Slack name) starts a task, like a mention |
+| `verify` | `[]` | Repos whose PRs get verified, see below and [Verified PRs](#verified-prs-and-auto-merge) |
 
 Each workspace:
 
@@ -242,6 +271,21 @@ Leave out both `repos` and `paths` for the catch-all workspace. Configs from bef
   ]
 }
 ```
+
+Each `verify` rule (the first one matching a repo applies):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `repos` | | GitHub repos, e.g. `["acme-corp/api"]`; `*` matches anything |
+| `autoMerge` | `false` | Merge PRs the verifier is confident in. Off: verified PRs wait for you with the verdict |
+| `maxLines` | `400` | Most changed lines (added plus deleted) Remy merges on its own |
+| `protect` | `[]` | Globs of files that keep a PR for you, e.g. `migrations/**` |
+| `maxRounds` | `3` | Verifiers in a row, each after the previous one's fixes, before the PR goes to you |
+| `mergeMethod` | `squash` | `squash`, `merge` or `rebase` |
+| `checks` | | Checks to run besides the ones the repo documents |
+| `dev.cloudBuild` | | `{ project, region?, trigger? }`: the Cloud Build that deploys the default branch to dev; `gcloud` must be logged in |
+| `dev.check` | | What the dev check should look at: URLs, flows, logs |
+| `dev.timeoutMinutes` | `60` | How long to wait for the deploy before reporting it missing |
 
 Each workspace with Telegram needs a bot of its own (`remy doctor` flags two sharing one), so the example above uses two bots.
 

@@ -6976,7 +6976,7 @@ var require_dist = __commonJS(function(exports, module) {
 });
 
 // src/channel.ts
-import { appendFileSync as appendFileSync2, openSync, readSync, closeSync, statSync as statSync2 } from "fs";
+import { appendFileSync as appendFileSync3, openSync, readSync, closeSync, statSync as statSync3 } from "fs";
 
 // node_modules/zod/v4/core/util.js
 function getEnumValues(entries) {
@@ -15331,6 +15331,8 @@ var PATHS = {
   queue: join(REMY_DIR, "queue.json"),
   spawned: join(REMY_DIR, "spawned.json"),
   nicknames: join(REMY_DIR, "nicknames.json"),
+  verify: join(REMY_DIR, "verify.json"),
+  verdicts: join(REMY_DIR, "verdicts.jsonl"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
   log: join(REMY_DIR, "channel.log"),
   taskDir: (id) => join(REMY_DIR, "tasks", id),
@@ -15358,7 +15360,8 @@ var DEFAULTS = {
   digestMinutes: 15,
   coordinatorName: "remy",
   coordinatorCompactPct: 50,
-  triggerEmoji: "mouse"
+  triggerEmoji: "mouse",
+  verify: []
 };
 function compactPct(value) {
   const n = Number(value);
@@ -15386,6 +15389,7 @@ function writeJson(path, value, mode = 384) {
 `, { mode });
   renameSync(tmp, path);
 }
+var verifyRuleFor = (repo, config) => repo ? config.verify.find((r) => r.repos.some((p) => globMatch(p, repo))) : undefined;
 function expandHome(p) {
   return resolve(p.trim().replace(/^~(?=$|\/)/, homedir()));
 }
@@ -17018,7 +17022,7 @@ async function gitInfo(cwd) {
   return { branch: branch || undefined, repo };
 }
 async function prInfo(cwd, branch) {
-  const out = await run(["gh", "pr", "view", branch, "--json", "number,url,title,state,isDraft,reviewDecision,statusCheckRollup"], cwd);
+  const out = await run(["gh", "pr", "view", branch, "--json", "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid"], cwd);
   if (!out)
     return;
   const j = JSON.parse(out);
@@ -17029,7 +17033,8 @@ async function prInfo(cwd, branch) {
     state: j.state,
     draft: !!j.isDraft,
     review: j.reviewDecision ?? "",
-    ...ciOf(j.statusCheckRollup)
+    ...ciOf(j.statusCheckRollup),
+    head: j.headRefOid
   };
 }
 var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
@@ -17055,6 +17060,7 @@ async function takeSnapshot() {
       cwd,
       startedAt: a.startedAt,
       spawned: !!spawn,
+      role: spawn?.role,
       about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
       repo,
       branch,
@@ -17095,7 +17101,7 @@ function diff(prev, next) {
     }
   }
   for (const p of prev.sessions)
-    if (!after.has(p.sessionId))
+    if (!after.has(p.sessionId) && !p.role)
       add(p, "ended", p.pr ? `last PR ${prLabel(p.pr)}` : "session closed");
   return changes;
 }
@@ -17169,18 +17175,475 @@ function closeIn(snapshot, spawned, run = runSync) {
   const changes = [];
   for (const { session: s, spawn } of mergedToClose(snapshot, spawned)) {
     const id = spawn.id ?? s.sessionId;
-    const rm = run(["claude", "rm", id]);
-    const cleanup = rm.ok ? "session and worktree removed" : run(["claude", "stop", id]).ok ? `stopped; worktree kept (${rm.out})` : `not removed (${rm.out})`;
+    const cleanup = closeSession(id, run);
     Object.assign(spawn, { id, merged: { at: Date.now(), pr: s.pr.url, number: s.pr.number, cleanup } });
     changes.push({ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what: "merged", detail: `PR #${s.pr.number} merged; ${cleanup}`, pr: s.pr.url });
   }
   return changes;
+}
+function closeSession(id, run = runSync) {
+  const rm = run(["claude", "rm", id]);
+  return rm.ok ? "session and worktree removed" : run(["claude", "stop", id]).ok ? `stopped; worktree kept (${rm.out})` : `not removed (${rm.out})`;
 }
 function formatMerged(spawned) {
   const rows = Object.entries(spawned).filter(([, s]) => s.merged).sort(([, a], [, b]) => b.merged.at - a.merged.at);
   if (!rows.length)
     return "No merged agents.";
   return rows.map(([name, s]) => `${name} \xB7 ${s.label ?? s.repo} \xB7 PR #${s.merged.number} merged ${new Date(s.merged.at).toLocaleString()} \xB7 ${s.merged.cleanup} ${s.merged.pr}`).join(`
+`);
+}
+
+// src/verify.ts
+import { appendFileSync as appendFileSync2, readFileSync as readFileSync3 } from "fs";
+import { dirname } from "path";
+
+// src/spawn.ts
+import { existsSync as existsSync2, statSync as statSync2 } from "fs";
+import { basename, join as join3, resolve as resolve2 } from "path";
+function resolveRepo(repo, roots) {
+  const direct = resolve2(repo.replace(/^~(?=\/)/, process.env.HOME ?? "~"));
+  if (existsSync2(join3(direct, ".git")))
+    return direct;
+  for (const root of roots) {
+    const p = join3(root, repo);
+    if (existsSync2(p) && statSync2(p).isDirectory() && existsSync2(join3(p, ".git")))
+      return p;
+  }
+  throw new Error(`No git repo "${repo}" (checked it as a path and under ${roots.join(", ")})`);
+}
+var SESSION_ENV = new Set([
+  "REMY_ROLE",
+  "CLAUDECODE",
+  "CLAUDE_PID",
+  "CLAUDE_EFFORT",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN"
+]);
+function slug(s) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+}
+async function spawnAgent(opts) {
+  const config = loadConfig();
+  const cwd = resolveRepo(opts.repo, config.repoRoots);
+  const live = (await listAgents()).map((a) => a.name);
+  const taken = takenNames(live, readJson(PATHS.nicknames, {}), readJson(PATHS.spawned, {}));
+  let name = opts.name ? slug(opts.name) : pickNickname(taken);
+  for (let i = 2;taken.has(name); i++)
+    name = `${slug(opts.name)}-${i}`;
+  let label = slug(`${basename(cwd)}-${opts.task.split(/\s+/).slice(0, 4).join(" ")}`);
+  const base = label;
+  for (let i = 2;existsSync2(join3(cwd, ".claude", "worktrees", label)); i++)
+    label = `${base}-${i}`;
+  const slack = opts.slackTask ? loadTask(opts.slackTask) : undefined;
+  const prompt = opts.prompt ?? config.spawnTemplate.replaceAll("{task}", slack ? taskPrompt(slack, opts.task) : opts.task);
+  const worktree = opts.worktree ?? config.spawnWorktree;
+  const cmd = ["claude", "--bg", "-n", name, "--permission-mode", opts.permissionMode ?? config.spawnPermissionMode];
+  if (worktree)
+    cmd.push("-w", label);
+  cmd.push(prompt);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_ENV.has(k)));
+  const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env });
+  const out = (r.stdout.toString() + r.stderr.toString()).trim();
+  if (r.exitCode !== 0)
+    throw new Error(`claude --bg failed (${r.exitCode}): ${out}`);
+  const id = out.match(/\b([0-9a-f]{6,}(?:-[0-9a-f-]+)?)\b/i)?.[1];
+  const spawned = readJson(PATHS.spawned, {});
+  spawned[name] = {
+    id,
+    repo: cwd,
+    label,
+    task: opts.task,
+    startedAt: Date.now(),
+    slack: slack && { workspace: slack.workspace, channel: slack.channel, threadTs: slack.threadTs, task: slack.id },
+    role: opts.role,
+    pr: opts.pr
+  };
+  writeJson(PATHS.spawned, spawned);
+  return { name, label, id, cwd, worktree, output: out };
+}
+
+// src/verify.ts
+var ACTIVE = ["verifying", "awaiting-ci", "merging", "deploying", "dev-checking"];
+var GRACE_MS = 3 * 60000;
+var PUSH_WAIT_MS = 30 * 60000;
+var KEEP_MS3 = 7 * 24 * 3600000;
+var DEV_FAILED_LISTED_MS = 24 * 3600000;
+var isActive = (v) => ACTIVE.includes(v.stage);
+function isReady(s) {
+  const pr = s.pr;
+  return !!pr?.head && pr.state === "OPEN" && !pr.draft && pr.ci === "pass" && pr.review !== "CHANGES_REQUESTED" && s.status !== "busy" && !s.role;
+}
+function toStart(snapshot, state, config) {
+  const seen = new Set;
+  return snapshot.sessions.filter((s) => {
+    if (!isReady(s) || !verifyRuleFor(s.repo, config) || seen.has(s.pr.url))
+      return false;
+    seen.add(s.pr.url);
+    const v = state[s.pr.url];
+    return !v || v.stage === "held" && v.head !== s.pr.head;
+  });
+}
+function mergeBlockers(d, rule) {
+  const why = [];
+  if (d.draft)
+    why.push("it's a draft");
+  if (d.review === "CHANGES_REQUESTED")
+    why.push("changes were requested");
+  if (d.ci === "fail")
+    why.push("CI fails");
+  const max = rule.maxLines ?? 400;
+  if (d.lines > max)
+    why.push(`${d.lines} changed lines (limit ${max})`);
+  if (!d.allFiles)
+    why.push("too many files to check against the protected ones");
+  const hit = d.files.find((f) => (rule.protect ?? []).some((p) => new Bun.Glob(p).match(f)));
+  if (hit)
+    why.push(`touches protected ${hit}`);
+  return why;
+}
+function verifierPrompt(v, rule) {
+  const n = v.number;
+  return [
+    `You're an independent verifier for ${v.pr} ("${v.title}") in ${v.repo}, round ${v.round} of at most ${rule.maxRounds ?? 3}. You didn't write this change: look for what's wrong with it, don't set out to confirm it works.`,
+    ...v.about ? [`What it is for: ${v.about}`] : [],
+    rule.autoMerge ? "If you find nothing wrong, remy merges it without a person reviewing it: your review is the last check." : "A person decides on the merge; your verdict tells them what to look at.",
+    "",
+    `1. Get the code: \`gh pr checkout ${n} --detach\`. The branch is checked out in another worktree, so stay on a detached HEAD.`,
+    `2. Run the checks: tests, typecheck, lint, build, whatever the repo's CLAUDE.md or AGENTS.md, README, package scripts, Makefile and CI workflows run.${rule.checks ? ` Also: ${rule.checks}` : ""}`,
+    `3. Review the change (\`gh pr view ${n}\`, \`gh pr diff ${n}\`) against what the PR says it does and the repo's standards: correctness, edge cases, error handling, missing tests, security, and changes it shouldn't make.`,
+    `4. Fix every real problem you find, within the PR's scope: commit, then \`git push origin HEAD:${v.branch}\`. Don't refactor or add features. If a problem needs a decision you can't make, leave it and name it in your verdict.`,
+    "5. As the very last step, record your verdict:",
+    `   remy verdict ${v.pr} --confidence <high|medium|low> [--fixed] --summary "<one line>"`,
+    "   - --fixed: you pushed fixes. A fresh verifier then checks the PR again, so pass it even when you trust your fixes.",
+    "   - high: every check passes and the review found nothing wrong; you'd merge it as it is.",
+    "   - medium or low: the summary says what a person should look at.",
+    "",
+    "Don't merge, approve or close the PR, don't open other PRs, and don't post to Slack or Telegram."
+  ].join(`
+`);
+}
+function devPrompt(v, rule) {
+  const n = v.number;
+  return [
+    `Check on the dev environment that ${v.pr} ("${v.title}") in ${v.repo} works. It merged as ${v.mergeSha}${v.build ? ` and Cloud Build ${v.build} deployed it` : ""}.`,
+    ...v.about ? [`What it is for: ${v.about}`] : [],
+    `How to check: ${rule.dev?.check ?? "work out from the PR what changed and how to see it on dev."}`,
+    "",
+    `1. Read the change: \`gh pr view ${n}\`, \`gh pr diff ${n}\`.`,
+    "2. Exercise it on dev with what you have here: HTTP requests, the browser (Chrome tools), logs (`gcloud logging read`), read-only database access through your skills. Look for new errors in the logs since the deploy.",
+    "3. Don't change data on dev beyond what exercising the change needs. Don't write code, push or open PRs.",
+    "4. As the very last step, record the result:",
+    `   remy verdict ${v.pr} --dev --pass|--fail --summary "<one line: what you checked and what you saw>"`,
+    "   --fail when the change doesn't work on dev or broke something; say what, so a fix can start from it."
+  ].join(`
+`);
+}
+function enter(v, stage, now, reason) {
+  Object.assign(v, { stage, since: now, reason });
+}
+var verdictFor = (v, kind, all) => all.findLast((x) => x.pr === v.pr && x.kind === kind && x.at >= (v.agent?.startedAt ?? 0));
+async function startRound(v, rule, env) {
+  const agent = await env.spawn(v, "verifier", `verify PR #${v.number} round ${v.round}`, verifierPrompt(v, rule));
+  v.agent = { ...agent, startedAt: env.now() };
+  enter(v, "verifying", env.now());
+}
+async function agentStopped(v, env) {
+  if (!v.agent)
+    return true;
+  const status = await env.agentStatus(v.agent);
+  if (status === "busy" || status === "waiting")
+    return false;
+  return status === undefined || env.now() - v.agent.startedAt > GRACE_MS;
+}
+async function onMerged(v, rule, sha, env) {
+  v.mergeSha = sha;
+  if (v.mergeRequestedAt) {
+    const said = v.verdicts.findLast((x) => x.kind === "review")?.summary;
+    await env.notify(v, "merged", `remy merged ${v.pr} (#${v.number} ${v.title}) after verification${said ? `: ${said}` : ""}.${rule.dev ? " It checks the change on dev once it's deployed." : ""}`);
+  }
+  if (rule.dev && sha)
+    enter(v, "deploying", env.now());
+  else
+    enter(v, "done", env.now(), "merged");
+}
+async function advance(v, rule, env) {
+  const now = env.now();
+  const all = env.verdicts();
+  const retry = all.findLast((x) => x.pr === v.pr && x.kind === "retry");
+  if (v.stage === "held" && retry && retry.at > v.since) {
+    v.round = 1;
+    return startRound(v, rule, env);
+  }
+  if (v.stage === "verifying") {
+    const verdict = verdictFor(v, "review", all);
+    if (!verdict) {
+      if (await agentStopped(v, env))
+        enter(v, "held", now, `verifier ${v.agent?.name} stopped without a verdict`);
+      return;
+    }
+    env.close(v.agent);
+    v.verdicts.push(verdict);
+    if (verdict.fixed) {
+      if (v.round >= (rule.maxRounds ?? 3))
+        return enter(v, "held", now, `still fixing after ${v.round} rounds: ${verdict.summary}`);
+      v.round++;
+      return enter(v, "awaiting-ci", now);
+    }
+    if (verdict.confidence !== "high")
+      return enter(v, "held", now, `verifier: ${verdict.confidence} confidence: ${verdict.summary}`);
+    if (!rule.autoMerge)
+      return enter(v, "held", now, `verified, ready to merge: ${verdict.summary}`);
+    enter(v, "merging", now);
+  }
+  if (v.stage === "awaiting-ci") {
+    const d = await env.pr(v.pr);
+    if (!d)
+      return;
+    if (d.state !== "OPEN")
+      return enter(v, "done", now, d.state.toLowerCase());
+    if (d.head === v.head) {
+      if (now - v.since > PUSH_WAIT_MS)
+        enter(v, "held", now, "the verifier said it pushed fixes, but the PR didn't change");
+      return;
+    }
+    if (d.ci === "fail")
+      return enter(v, "held", now, "CI fails after the verifier's fixes");
+    if (d.ci !== "pass" || d.draft || d.review === "CHANGES_REQUESTED")
+      return;
+    v.head = d.head;
+    return startRound(v, rule, env);
+  }
+  if (v.stage === "merging") {
+    const d = await env.pr(v.pr);
+    if (!d)
+      return;
+    if (d.state === "MERGED")
+      return onMerged(v, rule, d.mergeSha, env);
+    if (d.state !== "OPEN")
+      return enter(v, "done", now, d.state.toLowerCase());
+    if (v.mergeRequestedAt) {
+      if (now - v.mergeRequestedAt > PUSH_WAIT_MS)
+        enter(v, "held", now, "remy asked GitHub to merge it, but it hasn't merged");
+      return;
+    }
+    if (d.head !== v.head) {
+      v.round++;
+      return enter(v, "awaiting-ci", now);
+    }
+    if (d.ci === "pending")
+      return;
+    const blockers = mergeBlockers(d, rule);
+    const said = v.verdicts.findLast((x) => x.kind === "review")?.summary;
+    if (blockers.length)
+      return enter(v, "held", now, `verified (${said}), but not merging on its own: ${blockers.join("; ")}`);
+    const r = await env.merge(v.pr, v.head, rule.mergeMethod ?? "squash");
+    if (!r.ok)
+      return enter(v, "held", now, `merge failed: ${r.out.split(`
+`)[0]}`);
+    v.mergeRequestedAt = now;
+    const after = await env.pr(v.pr);
+    if (after?.state === "MERGED")
+      return onMerged(v, rule, after.mergeSha, env);
+    return;
+  }
+  if (v.stage === "deploying" && rule.dev) {
+    const b = await env.build(v.mergeSha, rule.dev);
+    if (b.status === "success") {
+      v.build = b.id;
+      const agent = await env.spawn(v, "dev-check", `check PR #${v.number} on dev`, devPrompt(v, rule));
+      v.agent = { ...agent, startedAt: env.now() };
+      return enter(v, "dev-checking", now);
+    }
+    if (b.status === "failed") {
+      enter(v, "dev-failed", now, `the dev deploy failed: Cloud Build ${b.id} ${b.detail ?? ""}`.trim());
+      return env.notify(v, "dev_failed", devFailedText(v));
+    }
+    if (b.status === "error")
+      v.reason = `gcloud: ${b.detail}`;
+    const minutes = rule.dev.timeoutMinutes ?? 60;
+    if (now - v.since > minutes * 60000) {
+      enter(v, "dev-failed", now, `no successful dev deploy of ${v.mergeSha?.slice(0, 7)} after ${minutes} min${v.reason ? ` (${v.reason})` : ""}`);
+      return env.notify(v, "dev_failed", devFailedText(v));
+    }
+    return;
+  }
+  if (v.stage === "dev-checking") {
+    const verdict = verdictFor(v, "dev", all);
+    if (!verdict) {
+      if (!await agentStopped(v, env))
+        return;
+      enter(v, "dev-failed", now, `the dev check (${v.agent?.name}) stopped without a result`);
+      return env.notify(v, "dev_failed", devFailedText(v));
+    }
+    env.close(v.agent);
+    v.verdicts.push(verdict);
+    if (verdict.pass) {
+      enter(v, "dev-passed", now, verdict.summary);
+      return env.notify(v, "dev_passed", `#${v.number} ${v.title} works on dev: ${verdict.summary}`);
+    }
+    enter(v, "dev-failed", now, verdict.summary);
+    return env.notify(v, "dev_failed", devFailedText(v));
+  }
+}
+var devFailedText = (v) => `#${v.number} ${v.title} (${v.pr}, merged as ${v.mergeSha?.slice(0, 7)}) failed on dev: ${v.reason}. Repo ${v.repo}, checkout ${v.repoDir}.`;
+function repoRootOf(cwd) {
+  try {
+    const r = Bun.spawnSync(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, stdout: "pipe", stderr: "ignore" });
+    const common = r.exitCode === 0 ? r.stdout.toString().trim() : "";
+    return common.endsWith("/.git") ? dirname(common) : cwd;
+  } catch {
+    return cwd;
+  }
+}
+async function tick(snapshot, state, config, env, log = () => {}) {
+  const before = JSON.stringify(state);
+  for (const s of toStart(snapshot, state, config)) {
+    const pr = s.pr;
+    const v = {
+      pr: pr.url,
+      number: pr.number,
+      title: pr.title,
+      repo: s.repo,
+      repoDir: repoRootOf(s.cwd),
+      branch: s.branch,
+      session: s.name,
+      about: s.about,
+      head: pr.head,
+      round: 1,
+      stage: "verifying",
+      since: env.now(),
+      verdicts: []
+    };
+    try {
+      await startRound(v, verifyRuleFor(s.repo, config), env);
+      state[pr.url] = v;
+    } catch (e) {
+      log("verify start failed", pr.url, e?.message ?? e);
+    }
+  }
+  for (const [url, v] of Object.entries(state)) {
+    const rule = verifyRuleFor(v.repo, config);
+    if (!rule || !isActive(v) && env.now() - v.since > KEEP_MS3) {
+      if (!isActive(v))
+        delete state[url];
+      continue;
+    }
+    try {
+      await advance(v, rule, env);
+    } catch (e) {
+      log("verify advance failed", url, e?.message ?? e);
+    }
+  }
+  return JSON.stringify(state) !== before;
+}
+async function run2(cmd) {
+  const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  return { ok: code === 0, out: out.trim(), err: err.trim() };
+}
+async function prDetail(url) {
+  const r = await run2(["gh", "pr", "view", url, "--json", "state,isDraft,reviewDecision,statusCheckRollup,headRefOid,additions,deletions,files,changedFiles,mergeCommit"]);
+  if (!r.ok)
+    return;
+  const j = JSON.parse(r.out);
+  const files = (j.files ?? []).map((f) => f.path);
+  return {
+    state: j.state,
+    draft: !!j.isDraft,
+    review: j.reviewDecision ?? "",
+    ci: ciOf(j.statusCheckRollup).ci,
+    head: j.headRefOid,
+    lines: (j.additions ?? 0) + (j.deletions ?? 0),
+    files,
+    allFiles: files.length >= (j.changedFiles ?? 0),
+    mergeSha: j.mergeCommit?.oid
+  };
+}
+var RUNNING = new Set(["QUEUED", "PENDING", "WORKING", "STATUS_UNKNOWN"]);
+function buildOf(builds) {
+  const ok = builds.find((b) => b.status === "SUCCESS");
+  if (ok)
+    return { status: "success", id: ok.id };
+  const running = builds.find((b) => RUNNING.has(b.status));
+  if (running)
+    return { status: "running", id: running.id };
+  const failed = builds.sort((a, b) => (b.createTime ?? "").localeCompare(a.createTime ?? ""))[0];
+  return failed ? { status: "failed", id: failed.id, detail: failed.status.toLowerCase() } : { status: "none" };
+}
+async function cloudBuild(sha, dev) {
+  const { project, region, trigger } = dev.cloudBuild;
+  const filter = `substitutions.COMMIT_SHA="${sha}"${trigger ? ` AND buildTriggerId="${trigger}"` : ""}`;
+  const cmd = ["gcloud", "builds", "list", "--project", project, "--filter", filter, "--format", "json(id,status,createTime)", "--limit", "10"];
+  if (region)
+    cmd.push("--region", region);
+  const r = await run2(cmd);
+  if (!r.ok)
+    return { status: "error", detail: r.err.split(`
+`).find((l) => l.startsWith("ERROR")) ?? r.err.split(`
+`)[0] };
+  return buildOf(JSON.parse(r.out || "[]"));
+}
+function readVerdicts() {
+  try {
+    return readFileSync3(PATHS.verdicts, "utf8").split(`
+`).filter(Boolean).flatMap((l) => {
+      try {
+        return [JSON.parse(l)];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+function recordVerdict(v) {
+  ensureDir();
+  appendFileSync2(PATHS.verdicts, JSON.stringify({ ...v, at: Date.now() }) + `
+`, { mode: 384 });
+}
+function liveEnv(notify) {
+  return {
+    now: Date.now,
+    pr: prDetail,
+    merge: async (url, head, method) => {
+      const r = await run2(["gh", "pr", "merge", url, `--${method}`, "--match-head-commit", head]);
+      return { ok: r.ok, out: r.err || r.out };
+    },
+    build: cloudBuild,
+    spawn: async (v, role, task, prompt) => {
+      const r = await spawnAgent({ repo: v.repoDir, task, prompt, role, pr: v.pr, worktree: true });
+      return { name: r.name, id: r.id };
+    },
+    agentStatus: async (a) => (await listAgents()).find((r) => a.id ? r.sessionId.startsWith(a.id) : r.name === a.name)?.status,
+    close: (a) => void closeSession(a.id ?? a.name),
+    verdicts: readVerdicts,
+    notify
+  };
+}
+var STAGE_LABEL = {
+  verifying: "verifying",
+  "awaiting-ci": "waiting for CI after fixes",
+  merging: "merging",
+  held: "waits for you",
+  done: "done",
+  deploying: "waiting for the dev deploy",
+  "dev-checking": "checking on dev",
+  "dev-passed": "works on dev",
+  "dev-failed": "failed on dev"
+};
+function formatVerify(state) {
+  const rows = Object.values(state).sort((a, b) => b.since - a.since);
+  if (!rows.length)
+    return "No PRs under verification.";
+  return rows.map((v) => {
+    const agent = v.agent && (v.stage === "verifying" || v.stage === "dev-checking") ? ` (${v.agent.name})` : "";
+    return `#${v.number} ${v.repo} \xB7 ${STAGE_LABEL[v.stage]}${agent} \xB7 round ${v.round}${v.reason ? ` \xB7 ${v.reason}` : ""} \xB7 ${v.pr}`;
+  }).join(`
 `);
 }
 
@@ -17194,7 +17657,7 @@ function questionOf(last) {
 `).map(unwrap).findLast(asks);
   return line ? short(line) : undefined;
 }
-function itemOf(s) {
+function itemOf(s, verify) {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
@@ -17205,20 +17668,33 @@ function itemOf(s) {
     return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
   if (s.status === "waiting")
     return { rank: 0, why: "waits for your answer", action: "reply to its thread" };
+  if (s.role)
+    return;
   if (pr?.ci === "fail")
     return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
   if (pr?.review === "CHANGES_REQUESTED")
     return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
+  const v = pr && verify[pr.url];
+  if (v && isActive(v))
+    return;
+  if (v?.stage === "held" && v.head === pr.head)
+    return { rank: 3, why: v.reason ?? "verified", action: "review it" };
   if (pr && pr.ci !== "pending")
     return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };
   if (s.spawned && !s.pr)
     return { rank: 4, why: "stopped without a PR", action: "check what it did" };
   return;
 }
-function queueOf(snapshot) {
+function queueOf(snapshot, verify = {}, now = Date.now()) {
   const items = [];
+  for (const v of Object.values(verify)) {
+    if (v.stage !== "dev-failed" || now - v.since > DEV_FAILED_LISTED_MS)
+      continue;
+    const why = `failed on dev: ${short(v.reason ?? "", 100)}`;
+    items.push({ session: `#${v.number}`, sessionId: v.pr, cwd: v.repoDir, repo: v.repo, rank: 1, why, action: 'reply "fix" for a fix PR', pr: v.pr, since: v.since });
+  }
   for (const s of snapshot.sessions) {
-    const it = itemOf(s);
+    const it = itemOf(s, verify);
     if (it)
       items.push({ ...it, session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, pr: s.pr?.url, since: s.lastEvent?.ts ?? s.startedAt });
   }
@@ -17281,7 +17757,7 @@ var digestWorthy = (c) => c.what === "merged" || c.what === "ended" || c.what ==
 var config2 = loadConfig();
 var log = (...a) => {
   try {
-    appendFileSync2(PATHS.log, `${new Date().toISOString()} ${a.map(String).join(" ")}
+    appendFileSync3(PATHS.log, `${new Date().toISOString()} ${a.map(String).join(" ")}
 `);
   } catch {}
 };
@@ -17291,6 +17767,7 @@ var INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel sour
 - kind="agent_needs_input": a session is blocked waiting for the user. Post it with post(workspace, session=<name>, expect_reply=true).
 - kind="agent_finished": a background agent ended its turn. Post only if it ended asking something; remy's pinned waiting-on-you list shows the rest.
 - kind="digest": sessions or PRs changed since the last digest. Post only merges and ended sessions; the pinned list shows the rest.
+- kind="verify": remy's verification of a PR moved on (event=merged, dev_passed or dev_failed). Follow "Verified PRs" in your instructions.
 - kind="system": a note from the remy server itself.
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
 var mcp = new Server({ name: "remy", version: "0.9.0" }, {
@@ -17468,13 +17945,13 @@ ${e.last ?? "(none)"}`, { workspace, session: s.name, cwd: e.cwd ?? "" });
 function tailEvents() {
   let offset = 0;
   try {
-    offset = statSync2(PATHS.events).size;
+    offset = statSync3(PATHS.events).size;
   } catch {}
   let partial = "";
   setInterval(() => {
     let size = 0;
     try {
-      size = statSync2(PATHS.events).size;
+      size = statSync3(PATHS.events).size;
     } catch {
       return;
     }
@@ -17542,7 +18019,8 @@ function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
 }
 function queueText(snap, workspace) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
-  return formatQueue(queueOf({ ...snap, sessions }), sessions);
+  const verify = Object.fromEntries(Object.entries(readJson(PATHS.verify, {})).filter(([, v]) => workspaceOf(v.repoDir, v.repo) === workspace));
+  return formatQueue(queueOf({ ...snap, sessions }, verify), sessions);
 }
 function refreshQueue(snapshot) {
   queueRun = queueRun.then(async () => {
@@ -17558,6 +18036,28 @@ function refreshQueue(snapshot) {
     }
   });
   return queueRun;
+}
+var VERIFY_EVERY_MS = 2 * 60000;
+var verifyEnv = liveEnv(async (v, event, text) => {
+  await push("verify", text, { workspace: workspaceOf(v.repoDir, v.repo), event, pr: v.pr, repo: v.repo });
+});
+var verifying = false;
+async function verifyRound() {
+  if (verifying)
+    return;
+  verifying = true;
+  try {
+    const snapshot = await takeSnapshot();
+    const state = readJson(PATHS.verify, {});
+    if (await tick(snapshot, state, config2, verifyEnv, log)) {
+      writeJson(PATHS.verify, state);
+      await refreshQueue(snapshot);
+    }
+  } catch (e) {
+    log("verify error", e?.message ?? e);
+  } finally {
+    verifying = false;
+  }
 }
 var initialized = new Promise((r) => mcp.oninitialized = () => r());
 mcp.onclose = () => process.exit(0);
@@ -17587,3 +18087,5 @@ for (const b of bridges.values())
 tailEvents();
 await digest();
 setInterval(digest, config2.digestMinutes * 60000);
+if (config2.verify.length)
+  setInterval(verifyRound, VERIFY_EVERY_MS);

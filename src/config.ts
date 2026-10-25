@@ -11,6 +11,10 @@ export const PATHS = {
   queue: join(REMY_DIR, "queue.json"),
   spawned: join(REMY_DIR, "spawned.json"),
   nicknames: join(REMY_DIR, "nicknames.json"),
+  /** Per PR, where its verification stands (verify.ts). Written only by the channel. */
+  verify: join(REMY_DIR, "verify.json"),
+  /** Verdicts verifier agents record with `remy verdict`, one JSON line each. */
+  verdicts: join(REMY_DIR, "verdicts.jsonl"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
   log: join(REMY_DIR, "channel.log"),
   /** One folder per Slack task: task.json plus files downloaded from the thread. */
@@ -85,6 +89,38 @@ function migrateWorkspace(w: any): Workspace {
   return { ...routing, slack: { userId: slackUserId ?? "", transport: transport ?? "poll", channelRepos } };
 }
 
+/**
+ * Verification for PRs in some repos: an independent agent checks each ready PR, fixing what it finds, until one
+ * finds nothing; then remy can merge it and check the deploy on dev.
+ */
+export type VerifyRule = {
+  /** GitHub repos as "owner/name"; `*` matches anything, e.g. "acme-corp/*". */
+  repos: string[];
+  /** Merge a PR the verifier is confident in. Off: the PR waits for you with the verdict. */
+  autoMerge?: boolean;
+  /** Most changed lines (added plus deleted) remy merges on its own. Default 400. */
+  maxLines?: number;
+  /** Files that keep a PR for you, as globs, e.g. "migrations/**". */
+  protect?: string[];
+  /** Verifier agents, one after another, before a PR that keeps needing fixes goes to you. Default 3. */
+  maxRounds?: number;
+  /** "squash" (default), "merge" or "rebase". */
+  mergeMethod?: "squash" | "merge" | "rebase";
+  /** Checks to run besides the ones the repo documents, in words or commands. */
+  checks?: string;
+  /** After a merge, wait for the dev deploy and have an agent check the change there. */
+  dev?: DevCheck;
+};
+
+export type DevCheck = {
+  /** The Cloud Build that deploys the default branch to dev; remy finds the build of the merge commit with gcloud. */
+  cloudBuild: { project: string; region?: string; /** Build trigger id, when several triggers build the same commit. */ trigger?: string };
+  /** What to check on dev: URLs, flows, logs to look at. */
+  check?: string;
+  /** Minutes to wait for the deploy before reporting it missing. Default 60. */
+  timeoutMinutes?: number;
+};
+
 export type Config = {
   workspaces: Workspace[];
   /** Folders that hold your repos; `remy spawn --repo <name>` looks here. */
@@ -106,6 +142,8 @@ export type Config = {
   coordinatorCompactPct: number;
   /** Reacting with this emoji (Slack name, no colons) to a message starts a task, like mentioning the bot. */
   triggerEmoji: string;
+  /** Repos whose PRs get verified, and maybe merged and checked on dev. The first rule matching a repo applies. */
+  verify: VerifyRule[];
 };
 
 export const DEFAULTS: Config = {
@@ -118,6 +156,7 @@ export const DEFAULTS: Config = {
   coordinatorName: "remy",
   coordinatorCompactPct: 50,
   triggerEmoji: "mouse",
+  verify: [],
 };
 
 /** `coordinatorCompactPct` as a whole percentage from 1 to 100, else undefined: Claude Code's default. */
@@ -152,6 +191,9 @@ export function writeJson(path: string, value: unknown, mode = 0o600) {
   renameSync(tmp, path);
 }
 
+/** The verification rule for a GitHub repo, if any. */
+export const verifyRuleFor = (repo: string | undefined, config: Config) => (repo ? config.verify.find((r) => r.repos.some((p) => globMatch(p, repo))) : undefined);
+
 export function expandHome(p: string) {
   return resolve(p.trim().replace(/^~(?=$|\/)/, homedir()));
 }
@@ -172,7 +214,7 @@ export function saveConfig(config: Config) {
 
 const isCatchAll = (w: Workspace) => !w.repos?.length && !w.paths?.length;
 
-function globMatch(pattern: string, value: string) {
+export function globMatch(pattern: string, value: string) {
   const re = new RegExp("^" + pattern.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "i");
   return re.test(value);
 }
