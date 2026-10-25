@@ -1765,7 +1765,7 @@ async function takeSnapshot() {
   const config = loadConfig();
   const spawned = readJson(PATHS.spawned, {});
   const nicknames = readJson(PATHS.nicknames, {});
-  const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName);
+  const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName && !spawnedEntry(spawned, a.name, a.sessionId)?.merged);
   const latest = new Map;
   for (const e of readEvents())
     latest.set(e.session_id, e);
@@ -1915,6 +1915,43 @@ function readEvents() {
   } catch {
     return [];
   }
+}
+
+// src/merged.ts
+var runSync = (cmd) => {
+  const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
+  return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
+};
+function mergedToClose(snapshot, spawned) {
+  return snapshot.sessions.flatMap((s) => {
+    const spawn = s.pr?.state === "MERGED" && s.status !== "busy" ? spawnedEntry(spawned, s.name, s.sessionId) : undefined;
+    return spawn && !spawn.merged ? [{ session: s, spawn }] : [];
+  });
+}
+function closeMerged(snapshot) {
+  const spawned = readJson(PATHS.spawned, {});
+  const changes = closeIn(snapshot, spawned);
+  if (changes.length)
+    writeJson(PATHS.spawned, spawned);
+  return changes;
+}
+function closeIn(snapshot, spawned, run = runSync) {
+  const changes = [];
+  for (const { session: s, spawn } of mergedToClose(snapshot, spawned)) {
+    const id = spawn.id ?? s.sessionId;
+    const rm = run(["claude", "rm", id]);
+    const cleanup = rm.ok ? "session and worktree removed" : run(["claude", "stop", id]).ok ? `stopped; worktree kept (${rm.out})` : `not removed (${rm.out})`;
+    Object.assign(spawn, { id, merged: { at: Date.now(), pr: s.pr.url, number: s.pr.number, cleanup } });
+    changes.push({ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what: "merged", detail: `PR #${s.pr.number} merged; ${cleanup}`, pr: s.pr.url });
+  }
+  return changes;
+}
+function formatMerged(spawned) {
+  const rows = Object.entries(spawned).filter(([, s]) => s.merged).sort(([, a], [, b]) => b.merged.at - a.merged.at);
+  if (!rows.length)
+    return "No merged agents.";
+  return rows.map(([name, s]) => `${name} \xB7 ${s.label ?? s.repo} \xB7 PR #${s.merged.number} merged ${new Date(s.merged.at).toLocaleString()} \xB7 ${s.merged.cleanup} ${s.merged.pr}`).join(`
+`);
 }
 
 // node_modules/@clack/core/dist/index.mjs
@@ -3667,7 +3704,7 @@ var ROOT2 = resolve4(import.meta.dir, "..");
 var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, in Slack or Telegram", [
   ["setup [workspace]", "Set up repo folders and workspaces (interactive)"],
   ["start", "Start the coordinator; keep the terminal open"],
-  ["status [--json]", "Every session with repo, branch, PR and CI"],
+  ["status [--json] [--merged]", "Every session with repo, branch, PR and CI; --merged lists closed agents"],
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task\u2026>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
@@ -3735,7 +3772,13 @@ try {
       await runHook();
       break;
     case "status": {
-      const { values } = parse(args, { json: { type: "boolean" } });
+      const { values } = parse(args, { json: { type: "boolean" }, merged: { type: "boolean" } });
+      if (values.merged) {
+        const spawned = readJson(PATHS.spawned, {});
+        const merged = Object.fromEntries(Object.entries(spawned).filter(([, x]) => x.merged));
+        console.log(values.json ? JSON.stringify(merged, null, 2) : formatMerged(merged));
+        break;
+      }
       const s = await takeSnapshot();
       console.log(values.json ? JSON.stringify(s, null, 2) : formatTable(s, statusPaint));
       break;

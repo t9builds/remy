@@ -4,7 +4,8 @@
  * - Reads your messages in each configured workspace and pushes them into the session. A workspace is a Slack
  *   workspace (slack-bridge.ts, which also starts tasks from channel threads) or a Telegram chat (telegram-bridge.ts).
  * - Tails ~/.remy/events.jsonl and pushes "agent needs input" / "background agent finished" right away.
- * - Every `digestMinutes`, diffs the session/PR snapshot and pushes the changes, if any.
+ * - Every `digestMinutes`, diffs the session/PR snapshot and pushes the changes, if any. Spawned agents whose PR
+ *   merged are closed then (merged.ts) and reported as merged.
  * - Exposes post / update so Claude can answer, and relays the coordinator's own permission prompts.
  * Sessions are routed to a workspace by GitHub repo or folder (see `workspaceFor`).
  */
@@ -14,8 +15,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { describeMessengers, openWorkspaces, type Off } from "./bridges";
-import { loadConfig, PATHS, readJson, workspaceFor, type Config } from "./config";
+import { loadConfig, PATHS, readJson, workspaceFor, writeJson, type Config } from "./config";
 import type { RemyEvent } from "./hook";
+import { closeMerged } from "./merged";
 import type { Messenger, Sink } from "./messenger";
 import { threadRef } from "./slack-bridge";
 import { formatTable, githubRepoOf, listAgents, snapshotDiff, spawnedEntry, type Spawned } from "./snapshot";
@@ -187,8 +189,8 @@ async function spawnOrigin(name: string) {
 async function sessionInfo(sessionId: string) {
   const row = (await agents()).find((r) => r.sessionId === sessionId);
   const spawned = readJson<Spawned>(PATHS.spawned, {});
-  const isSpawned = !!row && !!spawnedEntry(spawned, row.name, sessionId);
-  return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, unattended: isSpawned || row?.kind === "background" };
+  const spawn = row && spawnedEntry(spawned, row.name, sessionId);
+  return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, unattended: !!spawn || row?.kind === "background", merged: !!spawn?.merged };
 }
 
 const lastPushed = new Map<string, number>();
@@ -216,7 +218,8 @@ async function onEvent(e: RemyEvent) {
   }
   if (e.event === "Stop" || e.event === "SessionEnd") {
     const s = await sessionInfo(e.session_id);
-    if (!s.unattended || debounced(`done:${e.session_id}`, 30_000)) return;
+    // A session remy closed because its PR merged is reported in the digest, not as finished.
+    if (!s.unattended || s.merged || debounced(`done:${e.session_id}`, 30_000)) return;
     const what = e.event === "Stop" ? "finished its turn" : `ended (${e.type ?? "exit"})`;
     await push("agent_finished", `${s.name} ${what}.\n\nLast message:\n${e.last ?? "(none)"}`, { workspace, session: s.name, cwd: e.cwd ?? "" });
   }
@@ -257,7 +260,13 @@ function tailEvents() {
 
 async function digest() {
   try {
-    const { snapshot, changes, first } = await snapshotDiff();
+    const { snapshot: taken, changes: diffed, first } = await snapshotDiff();
+    // Merged agents are closed now: they leave the stored snapshot and get one "merged" line instead of their other changes.
+    const merged = closeMerged(taken);
+    const closed = new Set(merged.map((c) => c.sessionId));
+    const snapshot = { ...taken, sessions: taken.sessions.filter((s) => !closed.has(s.sessionId)) };
+    if (closed.size) writeJson(PATHS.snapshot, snapshot);
+    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged];
     if (first || !changes.length) return;
     // One digest per workspace, each listing only that workspace's sessions.
     const names = new Set(bridges.keys());

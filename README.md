@@ -66,7 +66,7 @@ remy: Since 10:30
       • risotto: CI failed
 ```
 
-Finished PRs come with their link and CI status. You review and merge them like you always do.
+Finished PRs come with their link and CI status. You review and merge them like you always do. Once an agent's PR is merged, Remy closes that agent at the next digest: `claude rm` deletes the session and its worktree, or, if the worktree still has uncommitted or unpushed work, `claude stop` ends the session and the worktree stays. The agent then counts as merged: it's left out of `remy status`, and `remy status --merged` lists it. Remy only does this for agents it started (`remy spawn`), never for sessions you started yourself, and waits while an agent is mid-turn.
 
 Telegram works the same way, in your chat with your bot. Telegram has no threads there, so each agent's messages come as a reply chain: reply to any of them to talk to that agent. Right after an agent asks you something, a plain message works too. When the coordinator itself needs a permission, you get Allow / Deny buttons.
 
@@ -173,7 +173,7 @@ Message the bot, in Slack or Telegram:
 - "what's running?" / "which PRs need me?"
 - "start an agent in api-server: fix the flaky auth test, open a PR"
 - "ask basil whether it's blocked"
-- "stop docs-cli" (Remy only stops, merges or closes things when you ask like this)
+- "stop docs-cli" (Remy only stops, merges or closes things when you ask like this, apart from closing its own agents once their PR merges)
 - reply in an agent's thread to answer its question
 
 ### Tasks from Slack threads
@@ -187,7 +187,7 @@ In any channel the bot is in, mention it in a thread (`@bot fix this, it's in ap
 
 Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
 
-From a terminal: `remy status`, `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`.
+From a terminal: `remy status` (`--merged` for closed agents), `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`.
 
 ## Config
 

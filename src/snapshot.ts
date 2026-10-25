@@ -1,5 +1,6 @@
 import { loadConfig, PATHS, readJson, writeJson } from "./config";
 import { readEvents } from "./hook";
+import type { Merged } from "./merged";
 import { aboutOf, type Nicknames } from "./nickname";
 
 export type Ci = "pass" | "fail" | "pending" | "none";
@@ -45,6 +46,8 @@ export type Spawned = Record<
     task: string;
     startedAt: number;
     slack?: { workspace: string; channel: string; threadTs: string; task: string };
+    /** Set when its PR merged and remy closed the session (merged.ts); such sessions are left out of snapshots. */
+    merged?: Merged;
   }
 >;
 
@@ -139,7 +142,7 @@ export async function takeSnapshot(): Promise<Snapshot> {
   const config = loadConfig();
   const spawned = readJson<Spawned>(PATHS.spawned, {});
   const nicknames = readJson<Nicknames>(PATHS.nicknames, {});
-  const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName);
+  const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName && !spawnedEntry(spawned, a.name, a.sessionId)?.merged);
 
   // The newest hook event per session carries its current cwd (a session may have moved into a worktree).
   const latest = new Map<string, ReturnType<typeof readEvents>[number]>();
