@@ -2,15 +2,79 @@
 
 <p align="center"><img src="assets/remy-cooking.svg" alt="A rat chef watching four pots on a stove, each pot an agent session: one bubbling, one with a PR ready, one waiting for input, one smoking with failed CI" width="900"></p>
 
-Remy is a coordinator for people who run many Claude Code sessions at once. One long-running Claude Code session (named `remy`) tracks every session on your machine and talks to you in a Slack DM. It can:
+Remy is a Claude Code plugin that keeps an eye on all your Claude Code sessions and talks to you in Slack.
 
-- start new background agents, each in its own worktree
-- tell you when a background agent finishes, with its PR link and CI status
-- send a digest every 15 minutes when sessions, PRs or CI changed
-- ping you when a session is blocked waiting for input, and forward your Slack reply to that session
-- start an agent from a Slack thread when you mention the bot there or react with 🐭, and report in that thread
+If you run a few agents at once, you know the routine: click through terminal tabs to see which one is done, find one that has been sitting on a question for half an hour, notice a PR went red after you'd moved on. Remy does that checking for you and messages you when something needs you.
 
-Everything runs on your machine under your own Claude Code login. Teammates install it the same way and use their own subscription.
+What you get:
+
+- A Slack message when an agent finishes, with the PR link and CI status
+- A ping when a session is stuck waiting for you. Reply in Slack and the answer goes to that session.
+- A short update every 15 minutes, only if something changed
+- Type "start an agent in api: fix the flaky auth test" in a DM and Remy starts one in its own worktree
+- React 🐭 to a bug report in a channel and an agent picks it up with the whole thread, then posts the PR back there
+
+It runs on your laptop with your own Claude Code login. There's no server to host, and it can share a Slack app your team already has.
+
+## Why
+
+I usually have several Claude Code sessions going across a few repos, and I kept losing track of them. Starting agents was never the problem. Knowing which ones were done, stuck or broken was. I wanted one chat that knows about all of them, tells me when something needs me, and lets me answer without finding the right terminal.
+
+Remy doesn't write code. It starts agents, checks on them and passes messages back and forth. It won't merge, close or delete anything unless you tell it to in Slack. Reviewing and merging is still on you.
+
+## What it looks like
+
+Run `remy start` in the morning and leave that terminal open. Remy posts what's already running:
+
+```
+remy: Morning. 3 sessions running:
+      • web-onboarding · web · idle · PR #212 · CI ✓
+      • api-rate-limits · api · busy · no PR
+      • docs-cli · docs · waiting for you
+```
+
+Give it work and get on with yours:
+
+```
+you:  start an agent in api: the invoice export times out for big accounts, fix it and open a PR
+remy: Started api-invoice-export in api. I'll report here.
+```
+
+Someone posts a bug in `#bugs`. React with 🐭, or reply in the thread mentioning the bot (`@remy fix this`, using your bot's name). Remy adds 👀 and starts an agent. Updates go in the same thread, so whoever reported the bug sees the PR too:
+
+```
+remy: Started bugs-login-timeout in web.
+      …
+remy: bugs-login-timeout · web · done · PR #219 · CI ✓
+      Session cookie TTL was 30 s after the auth refactor; set back to 30 min, added a test.
+```
+
+When an agent has a question, it comes to you. Your answer goes straight to the agent:
+
+```
+remy: api-invoice-export is asking: stream the CSV, or generate it in a background job and email a link?
+you:  stream it, accounts are under 50k rows
+remy: Sent to api-invoice-export.
+```
+
+Every 15 minutes you get a summary, if anything changed. If nothing did, you get nothing:
+
+```
+remy: Since 10:30
+      • api-invoice-export opened PR #88 · CI running
+      • web-onboarding: PR #212 approved
+      • api-rate-limits: CI failed
+```
+
+Finished PRs come with their link and CI status. You review and merge them like you always do.
+
+## Tips
+
+- Put your usual routine in `spawnTemplate`, e.g. `/start-feature {task}`. Every agent Remy starts then branches, tests and opens a PR the way you would.
+- Sessions you start yourself show up too. Remy only pings you about one if it's been stuck for about a minute, so it won't bother you about a session you're watching.
+- Each agent gets its own Slack thread. Reply there to talk to that agent.
+- Ask things like "what's api-rate-limits doing?" and Remy checks with the agent or reads its log.
+- Teammates can install it too. Each person runs their own Remy on their own Claude subscription, and only your own messages and 🐭 reactions reach yours.
 
 ## How it works
 
@@ -83,6 +147,7 @@ DM the bot:
 - "what's running?" / "which PRs need me?"
 - "start an agent in api-server: fix the flaky auth test, open a PR"
 - "ask api-fix-login whether it's blocked"
+- "stop docs-cli" (Remy only stops, merges or closes things when you ask like this)
 - reply in an agent's thread to answer its question
 
 ### Tasks from Slack threads
