@@ -187,7 +187,7 @@ In any channel the bot is in, mention it in a thread (`@bot fix this, it's in ap
 
 Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
 
-From a terminal: `remy status` (`--merged` for closed agents), `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`.
+From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`.
 
 ## Config
 
@@ -202,6 +202,7 @@ From a terminal: `remy status` (`--merged` for closed agents), `remy spawn --rep
 | `spawnWorktree` | `true` | Give each spawned agent its own worktree |
 | `digestMinutes` | `15` | Minutes between change digests |
 | `coordinatorName` | `remy` | Session name of the coordinator |
+| `coordinatorCompactPct` | `50` | Context-window percentage at which the coordinator compacts; `0` keeps Claude Code's default |
 | `triggerEmoji` | `mouse` | Reacting with this emoji (Slack name) starts a task, like a mention |
 
 Each workspace:

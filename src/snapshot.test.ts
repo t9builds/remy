@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ciOf, diff, spawnedEntry, type Snapshot, type SessionView } from "./snapshot";
+import { ciOf, diff, formatSession, spawnedEntry, type Snapshot, type SessionView } from "./snapshot";
 
 const session = (over: Partial<SessionView> = {}): SessionView => ({
   sessionId: "s1", name: "api-fix", kind: "background", status: "busy", cwd: "/r", startedAt: 1, spawned: true, ...over,
@@ -41,4 +41,21 @@ test("pending CI is not a change on its own", () => {
   const a = snap(session({ pr: { ...pr, ci: "pass" } }));
   const b = snap(session({ pr: { ...pr, ci: "pending" } }));
   expect(diff(a, b)).toEqual([]);
+});
+
+test("formatSession shows one session with its last message cut short", () => {
+  const now = 10 * 60_000;
+  const out = formatSession(
+    session({
+      name: "basil", repo: "o/r", branch: "fix", about: "fix the login timeout",
+      pr: { ...pr, ci: "fail", failing: ["tests"] },
+      lastEvent: { event: "Stop", ts: now - 3 * 60_000, text: "x".repeat(2000) },
+    }),
+    now,
+  );
+  expect(out.split("\n")[0]).toBe("basil [busy, spawned] o/r@fix · PR #7 open, CI fail https://github.com/o/r/pull/7");
+  expect(out).toContain("  about: fix the login timeout");
+  expect(out).toContain("  failing: tests");
+  expect(out).toContain("  last: Stop 3m ago — " + "x".repeat(800) + "…");
+  expect(out.length).toBeLessThan(1200);
 });

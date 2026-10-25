@@ -236,3 +236,21 @@ export function formatTable(s: Snapshot, paint: Paint = PLAIN): string {
     })
     .join("\n");
 }
+
+function ago(ms: number) {
+  const m = Math.round(ms / 60_000);
+  return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 48 * 60 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+}
+
+/** One session in detail: what `--json` holds that a coordinator usually needs, with long text cut short. */
+export function formatSession(x: SessionView, now = Date.now(), paint: Paint = PLAIN): string {
+  const lines = [formatTable({ takenAt: now, sessions: [{ ...x, about: undefined }] }, paint), `  folder: ${x.cwd}`];
+  if (x.about) lines.push(`  about: ${aboutOf(x.about, 300)}`);
+  if (x.pr) {
+    lines.push(`  PR title: ${x.pr.title}`);
+    if (x.pr.failing.length) lines.push(`  failing: ${x.pr.failing.join(", ")}`);
+  }
+  const e = x.lastEvent;
+  if (e) lines.push(`  last: ${e.event}${e.type ? ` ${e.type}` : ""} ${ago(now - e.ts)}${e.text ? ` — ${aboutOf(e.text, 800)}` : ""}`);
+  return lines.join("\n");
+}

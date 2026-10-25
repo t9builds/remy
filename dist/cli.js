@@ -204,6 +204,7 @@ var DEFAULTS = {
   spawnWorktree: true,
   digestMinutes: 15,
   coordinatorName: "remy",
+  coordinatorCompactPct: 50,
   triggerEmoji: "mouse"
 };
 function ensureDir() {
@@ -1844,6 +1845,25 @@ function formatTable(s, paint = PLAIN) {
     const about = x.about ? paint.dim(` \u2014 ${aboutOf(x.about, 80)}`) : "";
     return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}${about}`;
   }).join(`
+`);
+}
+function ago(ms) {
+  const m = Math.round(ms / 60000);
+  return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 48 * 60 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+}
+function formatSession(x, now = Date.now(), paint = PLAIN) {
+  const lines = [formatTable({ takenAt: now, sessions: [{ ...x, about: undefined }] }, paint), `  folder: ${x.cwd}`];
+  if (x.about)
+    lines.push(`  about: ${aboutOf(x.about, 300)}`);
+  if (x.pr) {
+    lines.push(`  PR title: ${x.pr.title}`);
+    if (x.pr.failing.length)
+      lines.push(`  failing: ${x.pr.failing.join(", ")}`);
+  }
+  const e = x.lastEvent;
+  if (e)
+    lines.push(`  last: ${e.event}${e.type ? ` ${e.type}` : ""} ${ago(now - e.ts)}${e.text ? ` \u2014 ${aboutOf(e.text, 800)}` : ""}`);
+  return lines.join(`
 `);
 }
 
@@ -3704,7 +3724,7 @@ var ROOT2 = resolve4(import.meta.dir, "..");
 var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, in Slack or Telegram", [
   ["setup [workspace]", "Set up repo folders and workspaces (interactive)"],
   ["start", "Start the coordinator; keep the terminal open"],
-  ["status [--json] [--merged]", "Every session with repo, branch, PR and CI; --merged lists closed agents"],
+  ["status [name] [--json] [--merged]", "Every session with repo, branch, PR and CI; a name shows that one in detail; --merged lists closed agents"],
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task\u2026>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
@@ -3758,7 +3778,8 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
     ...extra,
     "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention."
   ];
-  const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, REMY_ROLE: "coordinator" } });
+  const compact = c.coordinatorCompactPct ? { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(c.coordinatorCompactPct) } : {};
+  const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...compact, REMY_ROLE: "coordinator" } });
   process.exit(r.exitCode ?? 0);
 }
 var [cmd = "help", ...args] = process.argv.slice(2);
@@ -3772,7 +3793,7 @@ try {
       await runHook();
       break;
     case "status": {
-      const { values } = parse(args, { json: { type: "boolean" }, merged: { type: "boolean" } });
+      const { values, positionals } = parse(args, { json: { type: "boolean" }, merged: { type: "boolean" } });
       if (values.merged) {
         const spawned = readJson(PATHS.spawned, {});
         const merged = Object.fromEntries(Object.entries(spawned).filter(([, x]) => x.merged));
@@ -3780,6 +3801,14 @@ try {
         break;
       }
       const s = await takeSnapshot();
+      const name = positionals[0];
+      if (name) {
+        const one = s.sessions.find((x) => x.name === name) ?? s.sessions.find((x) => x.name.startsWith(name));
+        if (!one)
+          throw new Error(`no running session "${name}"; \`remy status\` lists them`);
+        console.log(values.json ? JSON.stringify(one, null, 2) : formatSession(one, s.takenAt, statusPaint));
+        break;
+      }
       console.log(values.json ? JSON.stringify(s, null, 2) : formatTable(s, statusPaint));
       break;
     }
