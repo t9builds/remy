@@ -15328,6 +15328,7 @@ var PATHS = {
   config: join(REMY_DIR, "config.json"),
   events: join(REMY_DIR, "events.jsonl"),
   snapshot: join(REMY_DIR, "snapshot.json"),
+  queue: join(REMY_DIR, "queue.json"),
   spawned: join(REMY_DIR, "spawned.json"),
   nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
@@ -15558,6 +15559,10 @@ class Fanout {
   async update(id, text) {
     for (const [k, part] of Object.entries(decodeId(id)))
       await this.members.get(k)?.update(part, text);
+  }
+  async pin(id) {
+    for (const [k, part] of Object.entries(decodeId(id)))
+      await this.members.get(k)?.pin?.(part);
   }
   async askPermission(p) {
     const to = this.mode === "follow" ? this.targets({}, {}) : this.kinds;
@@ -16319,6 +16324,12 @@ class Telegram {
   async edit(chatId, messageId, text) {
     await this.withHtml("editMessageText", { chat_id: chatId, message_id: messageId }, splitText(text)[0]);
   }
+  async setCommands(commands) {
+    await this.call("setMyCommands", { commands, scope: { type: "all_private_chats" } });
+  }
+  async pin(chatId, messageId) {
+    await this.call("pinChatMessage", { chat_id: chatId, message_id: messageId, disable_notification: true });
+  }
   async answerCallback(id, text) {
     await this.call("answerCallbackQuery", { callback_query_id: id, text });
   }
@@ -16404,6 +16415,9 @@ class TelegramBridge {
   async update(id, text) {
     await this.api.edit(this.settings.userId, Number(id), text);
   }
+  async pin(id) {
+    await this.api.pin(this.settings.userId, Number(id));
+  }
   answered(session) {
     for (const t of Object.values(this.state.threads))
       if (t.session === session)
@@ -16417,6 +16431,7 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
     });
   }
   async start() {
+    await this.api.setCommands([{ command: "queue", description: "What waits on you, most urgent first" }]).catch((e) => this.sink.log(`[${this.workspace}] setMyCommands failed`, e?.message ?? e));
     (async () => {
       let failures = 0;
       for (;; ) {
@@ -16467,6 +16482,8 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
       return void await this.api.send(m.chat.id, "I can only read text for now.", { replyTo: m.message_id });
     if (text === "/start")
       return;
+    if (/^\/queue(@\w+)?$/.test(text))
+      return this.sendQueue(m.chat.id);
     const v = parseVerdict(text);
     if (v)
       return this.sink.permission(v.requestId, v.behavior);
@@ -16483,6 +16500,10 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
       session: session ?? "",
       awaiting: repliedTo ? "" : this.awaiting() ?? ""
     });
+  }
+  async sendQueue(chatId) {
+    const text = this.sink.queue ? await this.sink.queue(this.workspace).catch((e) => `Couldn't build the list: ${e?.message ?? e}`) : "The list isn't available yet.";
+    await this.api.send(chatId, text);
   }
   async onButton(q) {
     const [kind, behavior, requestId] = (q.data ?? "").split(":");
@@ -17113,6 +17134,62 @@ function formatMerged(spawned) {
 `);
 }
 
+// src/queue.ts
+var MARK = ["\uD83D\uDD34", "\uD83D\uDFE0", "\uD83D\uDFE1", "\uD83D\uDFE2", "\u26AA"];
+var short = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}\u2026` : s).replace(/\s+/g, " ").trim();
+function questionOf(last) {
+  const line = last?.split(`
+`).map((l) => l.replace(/[*_`#>]/g, "").trim()).findLast((l) => l.includes("?"));
+  return line ? short(line) : undefined;
+}
+function itemOf(s) {
+  const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
+  const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
+  if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
+    return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
+  if (s.status === "busy")
+    return;
+  if (asked)
+    return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
+  if (s.status === "waiting")
+    return { rank: 0, why: "waits for your answer", action: "reply to its thread" };
+  if (pr?.ci === "fail")
+    return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
+  if (pr?.review === "CHANGES_REQUESTED")
+    return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
+  if (pr && pr.ci !== "pending")
+    return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };
+  if (s.spawned && !s.pr)
+    return { rank: 4, why: "stopped without a PR", action: "check what it did" };
+  return;
+}
+function queueOf(snapshot) {
+  const items = [];
+  for (const s of snapshot.sessions) {
+    const it = itemOf(s);
+    if (it)
+      items.push({ ...it, session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, pr: s.pr?.url, since: s.lastEvent?.ts ?? s.startedAt });
+  }
+  return items.sort((a, b) => a.rank - b.rank || a.since - b.since).map(({ since, ...it }) => it);
+}
+function formatQueue(items, sessions = [], plain = false) {
+  const busy = sessions.filter((s) => s.status === "busy").length;
+  const tail = busy ? `
+_${busy} more working on their own_` : "";
+  if (!items.length)
+    return `\u2705 *Nothing waits on you.*${tail}`;
+  const about = new Map(sessions.map((s) => [s.sessionId, s.about]));
+  const lines = items.map((it) => {
+    const name = !it.pr ? it.session : plain ? `${it.session} (${it.pr})` : `<${it.pr}|${it.session}>`;
+    const what = about.get(it.sessionId);
+    return `${MARK[it.rank]} *${name}* \xB7 ${it.why} \u2192 ${it.action}${what ? `
+      _${aboutOf(what, 60)}_` : ""}`;
+  });
+  return `*Waiting on you (${items.length})*
+${lines.join(`
+`)}${tail}`;
+}
+
 // src/channel.ts
 var config2 = loadConfig();
 var log = (...a) => {
@@ -17125,8 +17202,8 @@ var INSTRUCTIONS = `You are the remy coordinator. Events arrive as <channel sour
 - kind="user_message": the user wrote to you. Answer with post, passing the same workspace, and thread when the tag has it. If it has session, the user is replying to that agent. If it has awaiting instead, that agent asked the user a question recently: if the message reads like the answer, treat it as a reply to that agent.
 - kind="task_request": the user mentioned you, or reacted with the trigger emoji, in a Slack channel thread. Follow "Tasks from Slack threads" in your instructions.
 - kind="agent_needs_input": a session is blocked waiting for the user. Post it with post(workspace, session=<name>, expect_reply=true).
-- kind="agent_finished": a background agent ended its turn. Report it (name, PR link, status) with post(workspace, session=<name>).
-- kind="digest": sessions or PRs changed since the last digest. Post one compact summary to that workspace.
+- kind="agent_finished": a background agent ended its turn. Post only if it ended asking something; remy's pinned waiting-on-you list shows the rest.
+- kind="digest": sessions or PRs changed since the last digest. Post only merges and ended sessions; the pinned list shows the rest.
 - kind="system": a note from the remy server itself.
 Always pass the event's workspace to post. Write Slack mrkdwn in every workspace (Telegram messages are converted): *bold*, _italic_, \`code\`, <https://url|label>. Use emoji characters, not :shortcodes:. Keep messages short.`;
 var mcp = new Server({ name: "remy", version: "0.8.0" }, {
@@ -17141,12 +17218,15 @@ async function push(kind, content, meta = {}) {
   const clean = Object.fromEntries(Object.entries(meta).filter(([, v]) => v));
   if (kind === "user_message" && meta.workspace)
     lastActive = meta.workspace;
+  if (kind === "user_message")
+    scheduleQueue(30000);
   log("push", kind, meta.workspace ?? "", content.slice(0, 120).replace(/\n/g, " "));
   await mcp.notification({ method: "notifications/claude/channel", params: { content, meta: { kind, ...clean } } });
 }
 var sink = {
   push,
   permission: (request_id, behavior) => mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id, behavior } }),
+  queue: async (workspace) => queueText(await takeSnapshot(), workspace),
   log
 };
 var bridges = new Map;
@@ -17268,10 +17348,12 @@ var NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitatio
 async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
+  scheduleQueue();
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
     setTimeout(async () => {
       agentsCache.at = 0;
+      scheduleQueue();
       const s = await sessionInfo(e.session_id);
       if (s.status && s.status !== "waiting")
         return;
@@ -17334,6 +17416,7 @@ async function digest() {
     const snapshot = { ...taken, sessions: taken.sessions.filter((s) => !closed.has(s.sessionId)) };
     if (closed.size)
       writeJson(PATHS.snapshot, snapshot);
+    await refreshQueue(snapshot);
     const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged];
     if (first || !changes.length)
       return;
@@ -17358,6 +17441,50 @@ ${formatTable({ ...snapshot, sessions })}`, {
   } catch (e) {
     log("digest error", e?.message ?? e);
   }
+}
+var queueTimer;
+var queueRun = Promise.resolve();
+function scheduleQueue(ms = 1e4) {
+  if (queueTimer)
+    return;
+  queueTimer = setTimeout(() => {
+    queueTimer = undefined;
+    refreshQueue();
+  }, ms);
+}
+function queueText(snap, workspace) {
+  const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
+  return formatQueue(queueOf({ ...snap, sessions }), sessions);
+}
+function refreshQueue(snapshot) {
+  queueRun = queueRun.then(async () => {
+    try {
+      const snap = snapshot ?? await takeSnapshot();
+      const state = readJson(PATHS.queue, {});
+      for (const [name, b] of bridges) {
+        const text = queueText(snap, name);
+        const prev = state[name];
+        if (prev?.text === text)
+          continue;
+        if (prev) {
+          try {
+            await b.update(prev.id, text);
+            state[name] = { id: prev.id, text };
+            continue;
+          } catch (e) {
+            log("queue edit failed, posting a new one", name, e?.message ?? e);
+          }
+        }
+        const id = await b.post(text);
+        await b.pin?.(id).catch((e) => log("queue pin failed", name, e?.message ?? e));
+        state[name] = { id, text };
+      }
+      writeJson(PATHS.queue, state);
+    } catch (e) {
+      log("queue error", e?.message ?? e);
+    }
+  });
+  return queueRun;
 }
 var initialized = new Promise((r) => mcp.oninitialized = () => r());
 mcp.onclose = () => process.exit(0);

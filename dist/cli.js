@@ -176,6 +176,7 @@ var PATHS = {
   config: join(REMY_DIR, "config.json"),
   events: join(REMY_DIR, "events.jsonl"),
   snapshot: join(REMY_DIR, "snapshot.json"),
+  queue: join(REMY_DIR, "queue.json"),
   spawned: join(REMY_DIR, "spawned.json"),
   nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
@@ -406,6 +407,10 @@ class Fanout {
   async update(id, text) {
     for (const [k, part] of Object.entries(decodeId(id)))
       await this.members.get(k)?.update(part, text);
+  }
+  async pin(id) {
+    for (const [k, part] of Object.entries(decodeId(id)))
+      await this.members.get(k)?.pin?.(part);
   }
   async askPermission(p) {
     const to = this.mode === "follow" ? this.targets({}, {}) : this.kinds;
@@ -1167,6 +1172,12 @@ class Telegram {
   async edit(chatId, messageId, text) {
     await this.withHtml("editMessageText", { chat_id: chatId, message_id: messageId }, splitText(text)[0]);
   }
+  async setCommands(commands) {
+    await this.call("setMyCommands", { commands, scope: { type: "all_private_chats" } });
+  }
+  async pin(chatId, messageId) {
+    await this.call("pinChatMessage", { chat_id: chatId, message_id: messageId, disable_notification: true });
+  }
   async answerCallback(id, text) {
     await this.call("answerCallbackQuery", { callback_query_id: id, text });
   }
@@ -1252,6 +1263,9 @@ class TelegramBridge {
   async update(id, text) {
     await this.api.edit(this.settings.userId, Number(id), text);
   }
+  async pin(id) {
+    await this.api.pin(this.settings.userId, Number(id));
+  }
   answered(session) {
     for (const t of Object.values(this.state.threads))
       if (t.session === session)
@@ -1265,6 +1279,7 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
     });
   }
   async start() {
+    await this.api.setCommands([{ command: "queue", description: "What waits on you, most urgent first" }]).catch((e) => this.sink.log(`[${this.workspace}] setMyCommands failed`, e?.message ?? e));
     (async () => {
       let failures = 0;
       for (;; ) {
@@ -1315,6 +1330,8 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
       return void await this.api.send(m.chat.id, "I can only read text for now.", { replyTo: m.message_id });
     if (text === "/start")
       return;
+    if (/^\/queue(@\w+)?$/.test(text))
+      return this.sendQueue(m.chat.id);
     const v = parseVerdict(text);
     if (v)
       return this.sink.permission(v.requestId, v.behavior);
@@ -1331,6 +1348,10 @@ Or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
       session: session ?? "",
       awaiting: repliedTo ? "" : this.awaiting() ?? ""
     });
+  }
+  async sendQueue(chatId) {
+    const text = this.sink.queue ? await this.sink.queue(this.workspace).catch((e) => `Couldn't build the list: ${e?.message ?? e}`) : "The list isn't available yet.";
+    await this.api.send(chatId, text);
   }
   async onButton(q) {
     const [kind, behavior, requestId] = (q.data ?? "").split(":");
@@ -1989,6 +2010,62 @@ function formatMerged(spawned) {
     return "No merged agents.";
   return rows.map(([name, s]) => `${name} \xB7 ${s.label ?? s.repo} \xB7 PR #${s.merged.number} merged ${new Date(s.merged.at).toLocaleString()} \xB7 ${s.merged.cleanup} ${s.merged.pr}`).join(`
 `);
+}
+
+// src/queue.ts
+var MARK = ["\uD83D\uDD34", "\uD83D\uDFE0", "\uD83D\uDFE1", "\uD83D\uDFE2", "\u26AA"];
+var short = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}\u2026` : s).replace(/\s+/g, " ").trim();
+function questionOf(last) {
+  const line = last?.split(`
+`).map((l) => l.replace(/[*_`#>]/g, "").trim()).findLast((l) => l.includes("?"));
+  return line ? short(line) : undefined;
+}
+function itemOf(s) {
+  const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
+  const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
+  if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
+    return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
+  if (s.status === "busy")
+    return;
+  if (asked)
+    return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
+  if (s.status === "waiting")
+    return { rank: 0, why: "waits for your answer", action: "reply to its thread" };
+  if (pr?.ci === "fail")
+    return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
+  if (pr?.review === "CHANGES_REQUESTED")
+    return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
+  if (pr && pr.ci !== "pending")
+    return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };
+  if (s.spawned && !s.pr)
+    return { rank: 4, why: "stopped without a PR", action: "check what it did" };
+  return;
+}
+function queueOf(snapshot) {
+  const items = [];
+  for (const s of snapshot.sessions) {
+    const it = itemOf(s);
+    if (it)
+      items.push({ ...it, session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, pr: s.pr?.url, since: s.lastEvent?.ts ?? s.startedAt });
+  }
+  return items.sort((a, b) => a.rank - b.rank || a.since - b.since).map(({ since, ...it }) => it);
+}
+function formatQueue(items, sessions = [], plain = false) {
+  const busy = sessions.filter((s) => s.status === "busy").length;
+  const tail = busy ? `
+_${busy} more working on their own_` : "";
+  if (!items.length)
+    return `\u2705 *Nothing waits on you.*${tail}`;
+  const about = new Map(sessions.map((s) => [s.sessionId, s.about]));
+  const lines = items.map((it) => {
+    const name = !it.pr ? it.session : plain ? `${it.session} (${it.pr})` : `<${it.pr}|${it.session}>`;
+    const what = about.get(it.sessionId);
+    return `${MARK[it.rank]} *${name}* \xB7 ${it.why} \u2192 ${it.action}${what ? `
+      _${aboutOf(what, 60)}_` : ""}`;
+  });
+  return `*Waiting on you (${items.length})*
+${lines.join(`
+`)}${tail}`;
 }
 
 // node_modules/@clack/core/dist/index.mjs
@@ -3742,6 +3819,7 @@ var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, 
   ["setup [workspace]", "Set up repo folders and workspaces (interactive)"],
   ["start", "Start the coordinator; keep the terminal open"],
   ["status [name] [--json] [--merged]", "Every session with repo, branch, PR and CI; a name shows that one in detail; --merged lists closed agents"],
+  ["queue [--json]", "What waits on you, most urgent first"],
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task\u2026>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
@@ -3827,6 +3905,13 @@ try {
         break;
       }
       console.log(values.json ? JSON.stringify(s, null, 2) : formatTable(s, statusPaint));
+      break;
+    }
+    case "queue": {
+      const { values } = parse(args, { json: { type: "boolean" } });
+      const s = await takeSnapshot();
+      const items = queueOf(s);
+      console.log(values.json ? JSON.stringify(items, null, 2) : formatQueue(items, s.sessions, true));
       break;
     }
     case "changes": {
