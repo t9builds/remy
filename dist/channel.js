@@ -15329,6 +15329,7 @@ var PATHS = {
   events: join(REMY_DIR, "events.jsonl"),
   snapshot: join(REMY_DIR, "snapshot.json"),
   spawned: join(REMY_DIR, "spawned.json"),
+  nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
   log: join(REMY_DIR, "channel.log"),
   taskDir: (id) => join(REMY_DIR, "tasks", id),
@@ -16571,6 +16572,243 @@ var quietSink = { push: async () => {}, permission: async () => {}, log: () => {
 
 // src/hook.ts
 import { appendFileSync, statSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
+
+// src/kitchen-names.ts
+var KITCHEN_NAMES = [
+  "basil",
+  "saffron",
+  "garlic",
+  "ginger",
+  "pepper",
+  "paprika",
+  "cumin",
+  "nutmeg",
+  "cinnamon",
+  "vanilla",
+  "mint",
+  "thyme",
+  "rosemary",
+  "oregano",
+  "parsley",
+  "dill",
+  "sage",
+  "chili",
+  "wasabi",
+  "turmeric",
+  "lemon",
+  "lime",
+  "orange",
+  "mango",
+  "banana",
+  "cherry",
+  "apple",
+  "pear",
+  "peach",
+  "plum",
+  "grape",
+  "kiwi",
+  "coconut",
+  "papaya",
+  "apricot",
+  "raspberry",
+  "blueberry",
+  "strawberry",
+  "fig",
+  "melon",
+  "tomato",
+  "potato",
+  "onion",
+  "carrot",
+  "celery",
+  "spinach",
+  "kale",
+  "cabbage",
+  "broccoli",
+  "pumpkin",
+  "zucchini",
+  "eggplant",
+  "avocado",
+  "olive",
+  "radish",
+  "beetroot",
+  "artichoke",
+  "asparagus",
+  "leek",
+  "truffle",
+  "almond",
+  "walnut",
+  "pecan",
+  "cashew",
+  "pistachio",
+  "hazelnut",
+  "peanut",
+  "chestnut",
+  "sesame",
+  "lentil",
+  "chickpea",
+  "quinoa",
+  "honey",
+  "butter",
+  "maple",
+  "cocoa",
+  "coffee",
+  "espresso",
+  "mocha",
+  "matcha",
+  "mozzarella",
+  "parmesan",
+  "feta",
+  "brie",
+  "gouda",
+  "cheddar",
+  "burrata",
+  "ricotta",
+  "pizza",
+  "pasta",
+  "lasagna",
+  "ravioli",
+  "risotto",
+  "gnocchi",
+  "paella",
+  "sushi",
+  "ramen",
+  "udon",
+  "tempura",
+  "curry",
+  "taco",
+  "burrito",
+  "nachos",
+  "falafel",
+  "hummus",
+  "kebab",
+  "goulash",
+  "pierogi",
+  "dumpling",
+  "omelette",
+  "quiche",
+  "fondue",
+  "ratatouille",
+  "bruschetta",
+  "focaccia",
+  "tortilla",
+  "burger",
+  "sandwich",
+  "pesto",
+  "salsa",
+  "guacamole",
+  "polenta",
+  "couscous",
+  "biryani",
+  "samosa",
+  "naan",
+  "kimchi",
+  "bibimbap",
+  "pho",
+  "tofu",
+  "miso",
+  "teriyaki",
+  "edamame",
+  "wonton",
+  "noodle",
+  "meatball",
+  "schnitzel",
+  "chowder",
+  "gumbo",
+  "jambalaya",
+  "gazpacho",
+  "minestrone",
+  "carbonara",
+  "pickle",
+  "croissant",
+  "baguette",
+  "brioche",
+  "pretzel",
+  "bagel",
+  "waffle",
+  "pancake",
+  "crepe",
+  "muffin",
+  "cookie",
+  "brownie",
+  "cupcake",
+  "donut",
+  "cheesecake",
+  "tiramisu",
+  "macaron",
+  "eclair",
+  "strudel",
+  "souffle",
+  "churro",
+  "flan",
+  "baklava",
+  "cannoli",
+  "gelato",
+  "sorbet",
+  "pudding",
+  "scone",
+  "biscuit",
+  "nougat",
+  "praline",
+  "marzipan",
+  "meringue",
+  "custard",
+  "caramel",
+  "toffee",
+  "fudge",
+  "granola",
+  "yogurt",
+  "popsicle",
+  "panettone"
+];
+
+// src/nickname.ts
+var RESERVE_MS = 3 * 24 * 3600000;
+var KEEP_MS2 = 30 * 24 * 3600000;
+function takenNames(live, nicknames, spawned, now = Date.now()) {
+  const taken = new Set(live);
+  for (const n of Object.values(nicknames))
+    if (now - n.at < RESERVE_MS)
+      taken.add(n.name);
+  for (const [name, s] of Object.entries(spawned))
+    if (now - s.startedAt < RESERVE_MS)
+      taken.add(name);
+  return taken;
+}
+function pickNickname(taken, random = Math.random) {
+  const free = KITCHEN_NAMES.filter((n) => !taken.has(n));
+  if (free.length)
+    return free[Math.floor(random() * free.length)];
+  const base = KITCHEN_NAMES[Math.floor(random() * KITCHEN_NAMES.length)];
+  let i = 2;
+  while (taken.has(`${base}-${i}`))
+    i++;
+  return `${base}-${i}`;
+}
+function aboutOf(text, max = 160) {
+  const line = text?.replace(/\s+/g, " ").trim();
+  if (!line)
+    return;
+  return line.length > max ? line.slice(0, max) + "\u2026" : line;
+}
+async function nameSession(input, live) {
+  if (!input.session_id || input.session_title || input.agent_id)
+    return;
+  const nicknames = readJson(PATHS.nicknames, {});
+  const known = nicknames[input.session_id];
+  if (known)
+    return known.name;
+  const names = await live().catch(() => []);
+  const now = Date.now();
+  const name = pickNickname(takenNames(names, nicknames, readJson(PATHS.spawned, {}), now));
+  for (const [id, n] of Object.entries(nicknames))
+    if (now - n.at > KEEP_MS2)
+      delete nicknames[id];
+  nicknames[input.session_id] = { name, about: aboutOf(input.prompt), cwd: input.cwd, at: now };
+  writeJson(PATHS.nicknames, nicknames);
+  return name;
+}
+
+// src/hook.ts
 var MAX_BYTES = 5 * 1024 * 1024;
 var KEEP_LINES = 2000;
 async function runHook() {
@@ -16585,6 +16823,12 @@ async function runHook() {
   }
   if (input.agent_id)
     return;
+  if (input.hook_event_name === "UserPromptSubmit") {
+    const name = await nameSession(input, async () => (await listAgents()).map((a) => a.name));
+    if (name)
+      console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", sessionTitle: name } }));
+    return;
+  }
   const ev = {
     ts: Date.now(),
     event: input.hook_event_name,
@@ -16635,6 +16879,13 @@ function readEvents() {
 }
 
 // src/snapshot.ts
+function spawnedEntry(spawned, name, sessionId) {
+  const byId = Object.values(spawned).find((s) => s.id && sessionId.startsWith(s.id));
+  if (byId)
+    return byId;
+  const s = spawned[name];
+  return s && !s.id ? s : undefined;
+}
 async function run(cmd, cwd) {
   try {
     const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "ignore" });
@@ -16705,7 +16956,7 @@ var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
 async function takeSnapshot() {
   const config = loadConfig();
   const spawned = readJson(PATHS.spawned, {});
-  const spawnedIds = new Set(Object.values(spawned).map((s) => s.id).filter(Boolean));
+  const nicknames = readJson(PATHS.nicknames, {});
   const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName);
   const latest = new Map;
   for (const e of readEvents())
@@ -16715,6 +16966,7 @@ async function takeSnapshot() {
     const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
     const { branch, repo } = await gitInfo(cwd);
     const pr = branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
+    const spawn = spawnedEntry(spawned, a.name, a.sessionId);
     return {
       sessionId: a.sessionId,
       name: a.name,
@@ -16722,7 +16974,8 @@ async function takeSnapshot() {
       status: a.status,
       cwd,
       startedAt: a.startedAt,
-      spawned: a.name in spawned || spawnedIds.has(a.sessionId),
+      spawned: !!spawn,
+      about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
       repo,
       branch,
       pr,
@@ -16780,7 +17033,8 @@ function formatTable(s, paint = PLAIN) {
   return s.sessions.sort((a, b) => b.startedAt - a.startedAt).map((x) => {
     const where = x.repo ? `${x.repo}${x.branch ? `@${x.branch}` : ""}` : x.cwd;
     const pr = x.pr ? ` \xB7 PR ${prLabel(x.pr, paint)} ${paint.dim(x.pr.url)}` : "";
-    return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}`;
+    const about = x.about ? paint.dim(` \u2014 ${aboutOf(x.about, 80)}`) : "";
+    return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}${about}`;
   }).join(`
 `);
 }
@@ -16877,7 +17131,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => (await ready, {
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   await ready;
   const a = req.params.arguments ?? {};
-  const origin = a.session && !a.thread ? readJson(PATHS.spawned, {})[a.session]?.slack : undefined;
+  const origin = a.session && !a.thread ? await spawnOrigin(a.session) : undefined;
   if (origin)
     Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
   const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
@@ -16918,10 +17172,15 @@ async function cwdOfSession(name) {
   const row = (await agents()).find((r) => r.name === name);
   return row ? cwdById.get(row.sessionId) ?? row.cwd : undefined;
 }
+async function spawnOrigin(name) {
+  const row = (await agents()).find((r) => r.name === name);
+  const spawned = readJson(PATHS.spawned, {});
+  return (row ? spawnedEntry(spawned, name, row.sessionId) : spawned[name])?.slack;
+}
 async function sessionInfo(sessionId) {
   const row = (await agents()).find((r) => r.sessionId === sessionId);
   const spawned = readJson(PATHS.spawned, {});
-  const isSpawned = !!row && ((row.name in spawned) || Object.values(spawned).some((s) => s.id && sessionId.startsWith(s.id)));
+  const isSpawned = !!row && !!spawnedEntry(spawned, row.name, sessionId);
   return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, unattended: isSpawned || row?.kind === "background" };
 }
 var lastPushed = new Map;

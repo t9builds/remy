@@ -5,7 +5,7 @@ description: Report on the user's running Claude Code sessions — which are bus
 
 # Report on sessions
 
-1. Run `remy status`. Each line is one session: `name [status] repo@branch · PR #n state, CI x, review`. Use `remy status --json` when you need the last hook event (`lastEvent.text` holds the session's last message or its pending question).
+1. Run `remy status`. Each line is one session: `name [status] repo@branch · PR #n state, CI x, review — about`. Names are kitchen nicknames; `about` (a spawned agent's task, else the session's first prompt) says what the session is for. Use `remy status --json` when you need the last hook event (`lastEvent.text` holds the session's last message or its pending question).
 2. Order what you tell the user by what needs them:
    1. `waiting` sessions: they're blocked on a person.
    2. PRs with failing CI or changes requested.

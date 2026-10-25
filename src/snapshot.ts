@@ -1,5 +1,6 @@
 import { loadConfig, PATHS, readJson, writeJson } from "./config";
 import { readEvents } from "./hook";
+import { aboutOf, type Nicknames } from "./nickname";
 
 export type Ci = "pass" | "fail" | "pending" | "none";
 
@@ -22,6 +23,8 @@ export type SessionView = {
   cwd: string;
   startedAt: number;
   spawned: boolean;
+  /** What the session is for: a spawned agent's task, else the first prompt of a session remy named. */
+  about?: string;
   repo?: string;
   branch?: string;
   pr?: Pr;
@@ -34,8 +37,27 @@ export type Change = { session: string; sessionId: string; cwd: string; repo?: s
 
 export type Spawned = Record<
   string,
-  { id?: string; repo: string; task: string; startedAt: number; slack?: { workspace: string; channel: string; threadTs: string; task: string } }
+  {
+    id?: string;
+    repo: string;
+    /** Descriptive name from repo and task, e.g. "api-fix-login-timeout"; also the worktree's name. */
+    label?: string;
+    task: string;
+    startedAt: number;
+    slack?: { workspace: string; channel: string; threadTs: string; task: string };
+  }
 >;
+
+/**
+ * The spawn record of a session: by its id (`spawn` stores the short id `claude --bg` prints), else by name.
+ * Kitchen names get reused, so a record with an id must match the session's id.
+ */
+export function spawnedEntry(spawned: Spawned, name: string, sessionId: string) {
+  const byId = Object.values(spawned).find((s) => s.id && sessionId.startsWith(s.id));
+  if (byId) return byId;
+  const s = spawned[name];
+  return s && !s.id ? s : undefined;
+}
 
 type AgentRow = { sessionId: string; name: string; kind: string; status: string; cwd: string; startedAt: number };
 
@@ -116,7 +138,7 @@ const DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
 export async function takeSnapshot(): Promise<Snapshot> {
   const config = loadConfig();
   const spawned = readJson<Spawned>(PATHS.spawned, {});
-  const spawnedIds = new Set(Object.values(spawned).map((s) => s.id).filter(Boolean));
+  const nicknames = readJson<Nicknames>(PATHS.nicknames, {});
   const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName);
 
   // The newest hook event per session carries its current cwd (a session may have moved into a worktree).
@@ -129,6 +151,7 @@ export async function takeSnapshot(): Promise<Snapshot> {
       const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
       const { branch, repo } = await gitInfo(cwd);
       const pr = branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
+      const spawn = spawnedEntry(spawned, a.name, a.sessionId);
       return {
         sessionId: a.sessionId,
         name: a.name,
@@ -136,7 +159,8 @@ export async function takeSnapshot(): Promise<Snapshot> {
         status: a.status,
         cwd,
         startedAt: a.startedAt,
-        spawned: a.name in spawned || spawnedIds.has(a.sessionId),
+        spawned: !!spawn,
+        about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
         repo,
         branch,
         pr,
@@ -204,7 +228,8 @@ export function formatTable(s: Snapshot, paint: Paint = PLAIN): string {
     .map((x) => {
       const where = x.repo ? `${x.repo}${x.branch ? `@${x.branch}` : ""}` : x.cwd;
       const pr = x.pr ? ` · PR ${prLabel(x.pr, paint)} ${paint.dim(x.pr.url)}` : "";
-      return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}`;
+      const about = x.about ? paint.dim(` — ${aboutOf(x.about, 80)}`) : "";
+      return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}${about}`;
     })
     .join("\n");
 }

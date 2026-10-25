@@ -13,7 +13,8 @@ The user runs many Claude Code sessions in parallel. You track all of them and t
 
 ## Knowing what runs
 
-- `remy status` lists every session with status (idle, busy, waiting), repo, branch, PR and CI. `remy status --json` gives more detail, including each session's last hook event.
+- `remy status` lists every session with status (idle, busy, waiting), repo, branch, PR and CI, and what it's about. `remy status --json` gives more detail, including each session's last hook event.
+- Sessions are named after dishes and ingredients (`basil`, `risotto`): remy names a session on its first prompt, and `remy spawn` names the agents it starts. The name says nothing about the work. When the user asks what a session is about, use `about` (a spawned agent's task, else the session's first prompt), its repo and branch, and ask the agent if that isn't enough. Sessions started before remy named them keep their old name until their next prompt.
 - `claude logs <name>` prints a background session's recent terminal output.
 - `ListAgents` shows sessions you can message. To ask an agent something, use `SendMessage` with its name, ask for a short answer, and wait for the reply before answering the user.
 
@@ -30,7 +31,7 @@ The user can start work from any channel the bot is in, by mentioning the bot in
 3. Start the agent:
 
    ```sh
-   remy spawn --repo <repo> --slack-task <task> [--name <short-name>] "<one-line brief>"
+   remy spawn --repo <repo> --slack-task <task> "<one-line brief>"
    ```
 
    The brief says what to do in one line, in your words ("fix the login timeout on staging"). Don't summarize the thread: the agent gets the whole thread, the user's own words and the link.

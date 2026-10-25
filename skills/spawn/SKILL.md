@@ -10,10 +10,10 @@ description: Start a new background Claude Code agent on a task in one of the us
 3. Run:
 
    ```sh
-   remy spawn --repo <repo> [--name <short-name>] <task text>
+   remy spawn --repo <repo> <task text>
    ```
 
-   - `--name`: a short kebab-case name, e.g. `api-fix-login`. Otherwise one is made from the repo and task.
+   - The agent gets a free kitchen name (`basil`, `risotto`); its worktree is named after the repo and task (`label` in the output). Pass `--name <name>` only when the user asks for a specific name.
    - `--no-worktree`: run in the repo checkout itself instead of a new worktree. Only when the user asks.
    - `--mode <mode>`: permission mode. Defaults to the configured one (normally `auto`).
    - `--slack-task <id>`: the task came from a Slack thread (`task` in a `task_request` event). The task text is then a one-line brief; the agent also gets the thread and its link, and Remy reports in that thread.

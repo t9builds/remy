@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { loadConfig, PATHS, readJson, writeJson } from "./config";
+import { pickNickname, takenNames, type Nicknames } from "./nickname";
 import { listAgents, type Spawned } from "./snapshot";
 import { loadTask, taskPrompt } from "./task";
 
@@ -35,15 +36,20 @@ function slug(s: string) {
 export async function spawnAgent(opts: { repo: string; task: string; name?: string; worktree?: boolean; permissionMode?: string; slackTask?: string }) {
   const config = loadConfig();
   const cwd = resolveRepo(opts.repo, config.repoRoots);
-  const taken = new Set((await listAgents()).map((a) => a.name));
-  let name = slug(opts.name ?? `${basename(cwd)}-${opts.task.split(/\s+/).slice(0, 4).join(" ")}`);
-  for (let i = 2; taken.has(name); i++) name = `${slug(opts.name ?? name)}-${i}`;
+  const live = (await listAgents()).map((a) => a.name);
+  const taken = takenNames(live, readJson<Nicknames>(PATHS.nicknames, {}), readJson<Spawned>(PATHS.spawned, {}));
+  let name = opts.name ? slug(opts.name) : pickNickname(taken);
+  for (let i = 2; taken.has(name); i++) name = `${slug(opts.name!)}-${i}`;
+  // The session goes by its kitchen name; the worktree (and its branch) by what it's for.
+  let label = slug(`${basename(cwd)}-${opts.task.split(/\s+/).slice(0, 4).join(" ")}`);
+  const base = label;
+  for (let i = 2; existsSync(join(cwd, ".claude", "worktrees", label)); i++) label = `${base}-${i}`;
 
   const slack = opts.slackTask ? loadTask(opts.slackTask) : undefined;
   const prompt = config.spawnTemplate.replaceAll("{task}", slack ? taskPrompt(slack, opts.task) : opts.task);
   const worktree = opts.worktree ?? config.spawnWorktree;
   const cmd = ["claude", "--bg", "-n", name, "--permission-mode", opts.permissionMode ?? config.spawnPermissionMode];
-  if (worktree) cmd.push("-w", name);
+  if (worktree) cmd.push("-w", label);
   cmd.push(prompt);
 
   // Drop the variables that tie a process to the session running this command (the coordinator),
@@ -60,10 +66,11 @@ export async function spawnAgent(opts: { repo: string; task: string; name?: stri
   spawned[name] = {
     id,
     repo: cwd,
+    label,
     task: opts.task,
     startedAt: Date.now(),
     slack: slack && { workspace: slack.workspace, channel: slack.channel, threadTs: slack.threadTs, task: slack.id },
   };
   writeJson(PATHS.spawned, spawned);
-  return { name, id, cwd, worktree, output: out };
+  return { name, label, id, cwd, worktree, output: out };
 }

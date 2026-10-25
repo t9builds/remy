@@ -8,6 +8,7 @@ export const PATHS = {
   events: join(REMY_DIR, "events.jsonl"),
   snapshot: join(REMY_DIR, "snapshot.json"),
   spawned: join(REMY_DIR, "spawned.json"),
+  nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
   log: join(REMY_DIR, "channel.log"),
   /** One folder per Slack task: task.json plus files downloaded from the thread. */
