@@ -21,4 +21,4 @@ description: Start a new background Claude Code agent on a task in one of the us
    The command prints JSON with the session `name`. The task text goes through the user's `spawnTemplate` (for example `/start-feature {task}`).
 4. Tell the user the agent's name and that they can watch it with `claude attach <name>`.
 
-Agents started this way are tracked by remy: their finished turns and questions are reported to Slack.
+Agents started this way are tracked by remy: their finished turns and questions are reported to the user in Slack or Telegram.

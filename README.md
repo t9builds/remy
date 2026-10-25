@@ -2,19 +2,19 @@
 
 <p align="center"><img src="assets/remy-cooking.svg" alt="A rat chef watching four pots on a stove, each pot an agent session: one bubbling, one with a PR ready, one waiting for input, one smoking with failed CI" width="900"></p>
 
-Remy is a Claude Code plugin that keeps an eye on all your Claude Code sessions and talks to you in Slack.
+Remy is a Claude Code plugin that keeps an eye on all your Claude Code sessions and talks to you in Slack or Telegram.
 
 If you run a few agents at once, you know the routine: click through terminal tabs to see which one is done, find one that has been sitting on a question for half an hour, notice a PR went red after you'd moved on. Remy does that checking for you and messages you when something needs you.
 
 What you get:
 
-- A Slack message when an agent finishes, with the PR link and CI status
-- A ping when a session is stuck waiting for you. Reply in Slack and the answer goes to that session.
+- A message when an agent finishes, with the PR link and CI status
+- A ping when a session is stuck waiting for you. Reply in the chat and the answer goes to that session.
 - A short update every 15 minutes, only if something changed
 - Type "start an agent in api: fix the flaky auth test" in a DM and Remy starts one in its own worktree
-- React 🐭 to a bug report in a channel and an agent picks it up with the whole thread, then posts the PR back there
+- React 🐭 to a bug report in a Slack channel and an agent picks it up with the whole thread, then posts the PR back there
 
-It runs on your laptop with your own Claude Code login. There's no server to host, and it can share a Slack app your team already has.
+It runs on your laptop with your own Claude Code login. There's no server to host. In Slack it can share an app your team already has; in Telegram you make your own bot in a minute. Use one or both: work repos in the company Slack, side projects in Telegram on your phone.
 
 ## Why
 
@@ -68,11 +68,13 @@ remy: Since 10:30
 
 Finished PRs come with their link and CI status. You review and merge them like you always do.
 
+Telegram works the same way, in your chat with your bot. Telegram has no threads there, so each agent's messages come as a reply chain: reply to any of them to talk to that agent. Right after an agent asks you something, a plain message works too. When the coordinator itself needs a permission, you get Allow / Deny buttons.
+
 ## Tips
 
 - Put your usual routine in `spawnTemplate`, e.g. `/start-feature {task}`. Every agent Remy starts then branches, tests and opens a PR the way you would.
 - Sessions you start yourself show up too. Remy only pings you about one if it's been stuck for about a minute, so it won't bother you about a session you're watching.
-- Each agent gets its own Slack thread. Reply there to talk to that agent.
+- Each agent gets its own Slack thread, or reply chain in Telegram. Reply there to talk to that agent.
 - Ask things like "what's api-rate-limits doing?" and Remy checks with the agent or reads its log.
 - Teammates can install it too. Each person runs their own Remy on their own Claude subscription, and only your own messages and 🐭 reactions reach yours.
 
@@ -82,8 +84,10 @@ Finished PRs come with their link and CI status. You review and merge them like 
 |---|---|
 | Plugin hooks (`Stop`, `Notification`, `SessionEnd`) | Every session appends its events to `~/.remy/events.jsonl` |
 | `remy status` | Joins `claude agents --json`, each session's git branch and `gh pr view` |
-| `remy-slack` channel (`src/channel.ts`) | Runs inside the `remy` session only. Reads your Slack DM with the bot in each workspace (polling or Socket Mode), pushes your messages, agent events and digests into the session, and gives Claude `slack_post` / `slack_update` |
-| `src/watch.ts` | Inside the channel: finds your mentions of the bot and your 🐭 reactions in the channels the bot is in |
+| `remy` channel (`src/channel.ts`) | Runs inside the `remy` session only. Reads your messages in each workspace, pushes them, agent events and digests into the session, and gives Claude `post` / `update` |
+| `src/bridges.ts` | Picks the Slack or Telegram bridge for each workspace; both implement `Messenger` (`src/messenger.ts`) |
+| `src/slack-bridge.ts` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in (`src/watch.ts`) |
+| `src/telegram-bridge.ts` | Telegram: your chat with your bot, read by long polling, with Slack-style formatting converted to Telegram's (`src/telegram-format.ts`) |
 | `remy spawn` | `claude --bg -n <name> -w <name> --permission-mode auto "<task>"` in the chosen repo |
 | `coordinator.md` | The coordinator's instructions, appended to its system prompt |
 
@@ -93,13 +97,13 @@ Messages to other sessions go through Claude Code's built-in `SendMessage`.
 
 - macOS or Linux, Claude Code 2.1.224+, [Bun](https://bun.sh), `gh` logged in
 - Claude Team/Enterprise: an admin turns on **Channels** (Organization settings → Claude Code → Channels)
-- A Slack app with a bot user; an existing app works
+- A Slack app with a bot user (an existing app works), or a Telegram bot of your own, or both
 
-## Slack workspaces
+## Workspaces
 
-Remy can talk to you in several Slack workspaces, for example your company's and a personal one. Each session reports to one workspace: give a workspace `repos` (GitHub `owner/name`, `*` allowed) or `paths` (folders), and the workspace with neither gets everything else. Repo matching follows a repo into its worktrees, wherever they live. One coordinator serves all workspaces.
+A workspace is one place Remy talks to you: a Slack workspace or your Telegram chat. You can have several, for example the company Slack and a personal Telegram. Each session reports to one workspace: give a workspace `repos` (GitHub `owner/name`, `*` allowed) or `paths` (folders), and the workspace with neither gets everything else. Repo matching follows a repo into its worktrees, wherever they live. One coordinator serves all workspaces.
 
-Each workspace also picks how remy reads your DMs:
+A Slack workspace also picks how remy reads your DMs:
 
 | Transport | Use when | Delay | Slack app setup |
 |---|---|---|---|
@@ -122,6 +126,14 @@ At api.slack.com/apps → your app (an existing app works):
 
 With `poll`, remy adds no event subscriptions and doesn't need Socket Mode, so anything the app already does (for example posting alerts through incoming webhooks) keeps working. Several people can share one app in `poll` mode: each remy reads only its owner's DM. Anyone holding the bot token can read every DM with the bot, so share it only within a trusted team.
 
+### Telegram bot
+
+1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot` and pick a name. It replies with a token (`123456789:AA…`).
+2. Run `remy setup`, choose `telegram` for the workspace and paste the token.
+3. Setup asks you to open the bot and press **Start**. It reads that first message to learn your Telegram ID, so only you can talk to your remy.
+
+Make a new bot for remy. Telegram gives a bot's messages to one program only, so a bot can't be shared with teammates, the Telegram channel plugin or another remy. Anyone can find a bot and write to it; remy ignores everyone but you.
+
 ## Install
 
 ```sh
@@ -136,13 +148,13 @@ Restart your Claude Code sessions so they load the hooks. Then, in a terminal:
 remy start
 ```
 
-`remy setup` asks for your repo folders, the prompt template for spawned agents and the digest interval, then for each Slack workspace: your member ID (Slack → profile → ⋮ → Copy member ID), the transport, its folders and its tokens. Tokens go to the macOS keychain (`~/.remy/slack-*-token.<workspace>` on Linux). It installs `~/.local/bin/remy` and sends you a test DM in each workspace. `remy setup <workspace>` edits one workspace.
+`remy setup` asks for your repo folders, the prompt template for spawned agents and the digest interval, then for each workspace: Slack or Telegram, which repos or folders report there, and then either your Slack member ID (Slack → profile → ⋮ → Copy member ID), transport and tokens, or your Telegram bot token and a pairing message. Tokens go to the macOS keychain (`~/.remy/*-token.<workspace>` on Linux). It installs `~/.local/bin/remy` and sends you a test message in each workspace. `remy setup <workspace>` edits one workspace.
 
 `remy start` opens the coordinator. Accept the development-channel warning; custom channels need it during the research preview. Keep the terminal open.
 
 ## Use
 
-DM the bot:
+Message the bot, in Slack or Telegram:
 
 - "what's running?" / "which PRs need me?"
 - "start an agent in api-server: fix the flaky auth test, open a PR"
@@ -169,7 +181,7 @@ From a terminal: `remy status`, `remy spawn --repo <repo> <task>`, `remy changes
 
 | Key | Default | Meaning |
 |---|---|---|
-| `workspaces` | | Slack workspaces, see below |
+| `workspaces` | | Slack workspaces and Telegram chats, see below |
 | `repoRoots` | `["~/Repositories"]` | Where `remy spawn --repo <name>` looks |
 | `spawnTemplate` | `{task}` | Prompt for spawned agents, e.g. `/start-feature {task}` |
 | `spawnPermissionMode` | `auto` | Permission mode for spawned agents |
@@ -183,11 +195,13 @@ Each workspace:
 | Key | Meaning |
 |---|---|
 | `name` | Short label, e.g. `work`; names its tokens and state file |
-| `slackUserId` | Your member ID there; only this user can talk to your remy |
-| `transport` | `poll` or `socket` |
+| `messenger` | `slack` (the default) or `telegram` |
 | `repos` | GitHub repos whose sessions report here, e.g. `["acme-corp/*"]`; checked first |
 | `paths` | Folders whose sessions report here |
-| `channelRepos` | Default repo per channel for thread tasks, e.g. `{ "bugs": "api" }` |
+| `slackUserId` | Slack: your member ID there; only this user can talk to your remy |
+| `transport` | Slack: `poll` or `socket` |
+| `channelRepos` | Slack: default repo per channel for thread tasks, e.g. `{ "bugs": "api" }` |
+| `telegramUserId` | Telegram: your user ID, set by pairing in `remy setup`; only this user can talk to your remy |
 
 Leave out both `repos` and `paths` for the catch-all workspace.
 
@@ -195,21 +209,22 @@ Leave out both `repos` and `paths` for the catch-all workspace.
 {
   "workspaces": [
     { "name": "work", "slackUserId": "U012ABC", "transport": "poll", "repos": ["acme-corp/*"] },
-    { "name": "personal", "slackUserId": "U034DEF", "transport": "socket" }
+    { "name": "personal", "messenger": "telegram", "telegramUserId": 123456789 }
   ]
 }
 ```
 
-A path covers the folder and everything inside it, not sibling folders that share its prefix, so prefer `repos` when worktrees sit next to the main checkout. Tokens can also come from `REMY_SLACK_BOT_TOKEN_<WORKSPACE>` and `REMY_SLACK_APP_TOKEN_<WORKSPACE>`.
+A path covers the folder and everything inside it, not sibling folders that share its prefix, so prefer `repos` when worktrees sit next to the main checkout. Tokens can also come from `REMY_SLACK_BOT_TOKEN_<WORKSPACE>`, `REMY_SLACK_APP_TOKEN_<WORKSPACE>` and `REMY_TELEGRAM_BOT_TOKEN_<WORKSPACE>`.
 
 ## Limits
 
 - A message from another session can't approve a permission prompt. When an agent waits on one, remy tells you to `claude attach <name>`. Spawned agents run in auto mode, so this is rare.
-- The coordinator's own permission prompts are relayed to Slack: reply `yes <id>` or `no <id>`.
+- The coordinator's own permission prompts are relayed to the chat: reply `yes <id>` or `no <id>`, or tap the buttons in Telegram.
 - With `poll`, Slack replies arrive within about 4 seconds while you're chatting and 15 seconds when idle. Slack allows about 50 reads a minute per app, shared by everyone using it, which is enough for 3–4 active people. `socket` is instant.
-- The coordinator's own permission prompts go to the catch-all workspace.
+- The coordinator's own permission prompts go to the workspace you last wrote from (the catch-all until you've written).
 - Sessions that aren't in a git checkout (for example started in `~/Repositories` itself) show without a repo or PR.
 - Channel tasks are polled every 45 seconds. A mention is found when its thread's first message is among the channel's latest 100; a 🐭 is found anywhere through `reactions.list`.
+- Telegram is your private chat only: no tasks from groups, and Remy reads text, not photos or voice messages.
 - Custom channels are a Claude Code research preview and may change.
 
 ## Develop
