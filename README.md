@@ -61,7 +61,7 @@ With `poll`, remy adds no event subscriptions and doesn't need Socket Mode, so a
 ## Install
 
 ```sh
-claude plugin marketplace add tomassvatek/remy
+claude plugin marketplace add t9builds/remy
 claude plugin install remy@remy
 ```
 

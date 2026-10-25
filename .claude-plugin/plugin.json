@@ -4,7 +4,7 @@
   "version": "0.3.0",
   "description": "A coordinator session that tracks all your Claude Code sessions and their PRs and talks to you through Slack.",
   "author": { "name": "Tomas Svatek" },
-  "repository": "https://github.com/tomassvatek/remy",
+  "repository": "https://github.com/t9builds/remy",
   "license": "MIT",
   "keywords": ["coordinator", "slack", "sessions", "agents"]
 }
