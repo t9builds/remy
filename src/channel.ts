@@ -20,7 +20,7 @@ import { loadConfig, PATHS, readJson, workspaceFor, writeJson, type Config } fro
 import type { RemyEvent } from "./hook";
 import { closeMerged } from "./merged";
 import type { Messenger, Sink } from "./messenger";
-import { formatQueue, queueOf } from "./queue";
+import { coalesce, digestWorthy, formatQueue, queueOf, questionOf, showQueue } from "./queue";
 import { threadRef } from "./slack-bridge";
 import { formatTable, githubRepoOf, listAgents, snapshotDiff, spawnedEntry, takeSnapshot, type Snapshot, type Spawned } from "./snapshot";
 
@@ -57,7 +57,7 @@ let lastActive = "";
 async function push(kind: string, content: string, meta: Record<string, string> = {}) {
   const clean = Object.fromEntries(Object.entries(meta).filter(([, v]) => v));
   if (kind === "user_message" && meta.workspace) lastActive = meta.workspace;
-  if (kind === "user_message") scheduleQueue(30_000); // an answered agent is busy again by then
+  if (kind === "user_message") scheduleQueue(QUEUE_AFTER_USER_MS);
   log("push", kind, meta.workspace ?? "", content.slice(0, 120).replace(/\n/g, " "));
   await mcp.notification({ method: "notifications/claude/channel", params: { content, meta: { kind, ...clean } } });
 }
@@ -225,7 +225,10 @@ async function onEvent(e: RemyEvent) {
   if (e.event === "Stop" || e.event === "SessionEnd") {
     const s = await sessionInfo(e.session_id);
     // A session remy closed because its PR merged is reported in the digest, not as finished.
-    if (!s.unattended || s.merged || debounced(`done:${e.session_id}`, 30_000)) return;
+    if (!s.unattended || s.merged) return;
+    // A turn that ended without a question is already on the pinned list; only questions and exits reach the coordinator.
+    if (e.event === "Stop" && !questionOf(e.last)) return;
+    if (debounced(`done:${e.session_id}`, 30_000)) return;
     const what = e.event === "Stop" ? "finished its turn" : `ended (${e.type ?? "exit"})`;
     await push("agent_finished", `${s.name} ${what}.\n\nLast message:\n${e.last ?? "(none)"}`, { workspace, session: s.name, cwd: e.cwd ?? "" });
   }
@@ -273,7 +276,7 @@ async function digest() {
     const snapshot = { ...taken, sessions: taken.sessions.filter((s) => !closed.has(s.sessionId)) };
     if (closed.size) writeJson(PATHS.snapshot, snapshot);
     await refreshQueue(snapshot);
-    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged];
+    const changes = [...diffed.filter((c) => !closed.has(c.sessionId)), ...merged].filter(digestWorthy);
     if (first || !changes.length) return;
     // One digest per workspace, each listing only that workspace's sessions.
     const names = new Set(bridges.keys());
@@ -295,16 +298,16 @@ async function digest() {
 // ---------- Queue ----------
 
 type QueueState = Record<string, { id: string; text: string }>;
-let queueTimer: ReturnType<typeof setTimeout> | undefined;
 let queueRun = Promise.resolve();
 
-/** Refresh the queue soon; events that come close together share one refresh. */
-function scheduleQueue(ms = 10_000) {
-  if (queueTimer) return;
-  queueTimer = setTimeout(() => {
-    queueTimer = undefined;
-    void refreshQueue();
-  }, ms);
+const QUEUE_AFTER_EVENT_MS = 10_000;
+/** After the user writes, long enough for an agent they answered to be busy again. */
+const QUEUE_AFTER_USER_MS = 30_000;
+
+const queueAfter = coalesce(() => void refreshQueue());
+/** Refresh the queue after `ms`; events that come close together share one refresh, and each delay keeps its own. */
+function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
+  queueAfter(ms);
 }
 
 /** The workspace's list, with only its own sessions. */
@@ -320,21 +323,7 @@ function refreshQueue(snapshot?: Snapshot) {
       const snap = snapshot ?? (await takeSnapshot());
       const state = readJson<QueueState>(PATHS.queue, {});
       for (const [name, b] of bridges) {
-        const text = queueText(snap, name);
-        const prev = state[name];
-        if (prev?.text === text) continue;
-        if (prev) {
-          try {
-            await b.update(prev.id, text);
-            state[name] = { id: prev.id, text };
-            continue;
-          } catch (e: any) {
-            log("queue edit failed, posting a new one", name, e?.message ?? e); // deleted, or too old to edit
-          }
-        }
-        const id = await b.post(text);
-        await b.pin?.(id).catch((e: any) => log("queue pin failed", name, e?.message ?? e));
-        state[name] = { id, text };
+        state[name] = await showQueue(b, state[name], queueText(snap, name), (...a) => log(...a, name));
       }
       writeJson(PATHS.queue, state);
     } catch (e: any) {

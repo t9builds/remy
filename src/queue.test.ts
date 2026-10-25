@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { formatQueue, queueOf, questionOf } from "./queue";
+import type { Messenger } from "./messenger";
+import { coalesce, digestWorthy, formatQueue, queueOf, questionOf, showQueue } from "./queue";
 import type { Pr, SessionView, Snapshot } from "./snapshot";
 
 let n = 0;
@@ -56,4 +57,73 @@ test("formats one line per item and counts the busy ones", () => {
     "*Waiting on you (1)*\n🟠 *<https://github.com/o/r/pull/7|risotto>* · CI failing: unit → reply \"fix CI\"\n      _fix login timeout_\n_1 more working on their own_",
   );
   expect(formatQueue([], [busy])).toBe("✅ *Nothing waits on you.*\n_1 more working on their own_");
+});
+
+test("questionOf skips question marks in URLs and code, and keeps the wording", () => {
+  expect(questionOf("Opened PR: https://github.com/o/r/pull/7?w=1\nCI is green.")).toBeUndefined();
+  expect(questionOf("Renamed `get_user?` to `fetch_user`. Done.")).toBeUndefined();
+  expect(questionOf("Is the 5? Not sure, but tests pass.")).toBeUndefined();
+  expect(questionOf("Shall I merge https://github.com/o/r/pull/7?")).toBe("Shall I merge https://github.com/o/r/pull/7?");
+  expect(questionOf("- Should I rename `snake_case` in C#?")).toBe("Should I rename `snake_case` in C#?");
+  expect(questionOf('> Which one, "a" or "b?"')).toBe('Which one, "a" or "b?"');
+});
+
+const messenger = (update: (id: string, text: string) => Promise<void>) => {
+  const calls: string[] = [];
+  const m = {
+    post: async (text: string) => (calls.push(`post ${text}`), "new"),
+    update: async (id: string, text: string) => (calls.push(`update ${id} ${text}`), update(id, text)),
+    pin: async (id: string) => void calls.push(`pin ${id}`),
+  } as unknown as Messenger;
+  return { m, calls };
+};
+const quiet = () => {};
+
+test("showQueue edits in place, and posts and pins only when the old message is gone", async () => {
+  const ok = messenger(async () => {});
+  expect(await showQueue(ok.m, { id: "old", text: "a" }, "b", quiet)).toEqual({ id: "old", text: "b" });
+  expect(await showQueue(ok.m, { id: "old", text: "b" }, "b", quiet)).toEqual({ id: "old", text: "b" });
+  expect(await showQueue(ok.m, undefined, "c", quiet)).toEqual({ id: "new", text: "c" });
+  expect(ok.calls).toEqual(["update old b", "post c", "pin new"]);
+
+  const gone = messenger(async () => {
+    throw new Error("telegram editMessageText: 400 Bad Request: message to edit not found");
+  });
+  expect(await showQueue(gone.m, { id: "old", text: "a" }, "b", quiet)).toEqual({ id: "new", text: "b" });
+  expect(gone.calls).toEqual(["update old b", "post b", "pin new"]);
+});
+
+test("showQueue keeps the old message after an edit fails for another reason, so the next refresh retries", async () => {
+  const offline = messenger(async () => {
+    throw new Error("telegram editMessageText: 429 Too Many Requests: retry after 5");
+  });
+  expect(await showQueue(offline.m, { id: "old", text: "a" }, "b", quiet)).toEqual({ id: "old", text: "a" });
+  expect(offline.calls).toEqual(["update old b"]);
+});
+
+test("coalesce shares one run per delay, and a longer delay still runs after a shorter one", async () => {
+  let runs = 0;
+  const later = coalesce(() => runs++);
+  later(5);
+  later(5);
+  later(30);
+  later(5);
+  await Bun.sleep(15);
+  expect(runs).toBe(1);
+  await Bun.sleep(30);
+  expect(runs).toBe(2);
+});
+
+test("digests keep only merges and ended sessions", () => {
+  const c = (what: string, detail = "") => ({ session: "s", sessionId: "s", cwd: "/r", what, detail });
+  const all = [
+    c("merged"),
+    c("ended"),
+    c("pr_state", "#7 open, CI pass → #7 merged, CI pass"),
+    c("pr_opened"),
+    c("ci", "CI fail"),
+    c("status"),
+    c("pr_state", "#7 draft, CI pass → #7 open, CI pass"),
+  ];
+  expect(all.filter(digestWorthy).map((x) => x.what)).toEqual(["merged", "ended", "pr_state"]);
 });
