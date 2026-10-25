@@ -15480,7 +15480,7 @@ import { createConnection, createServer } from "net";
 var plugin_default = {
   name: "remy",
   displayName: "Remy",
-  version: "0.11.0",
+  version: "0.12.0",
   description: "A coordinator session that tracks all your Claude Code sessions and their PRs and talks to you through Slack or Telegram.",
   author: { name: "Tomas Svatek" },
   repository: "https://github.com/t9builds/remy",
