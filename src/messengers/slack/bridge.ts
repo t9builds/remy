@@ -22,7 +22,7 @@ import {
   permissionText,
   type Sink,
 } from "../messenger";
-import { fromUser, Slack, type SlackMessage, socketMode } from "./client";
+import { fromUser, Slack, SlackError, type SlackMessage, socketMode } from "./client";
 import { formatTranscript, requestText, type SlackTask, taskEvent, taskId } from "./task";
 import { ChannelWatcher, type Trigger, type WatchState } from "./watch";
 
@@ -225,9 +225,16 @@ export class SlackBridge implements Messenger {
     // Thread replies don't show up in history; check the DM threads Remy posted in.
     if (this.tick++ % 2 === 0) {
       for (const [root, t] of dmThreadsToRead(this.state.threads)) {
-        for (const m of await this.slack.replies(channel, root, t.lastSeen)) {
-          t.lastSeen = m.ts;
-          await this.handleInbound(m, root);
+        try {
+          for (const m of await this.slack.replies(channel, root, t.lastSeen)) {
+            t.lastSeen = m.ts;
+            await this.handleInbound(m, root);
+          }
+        } catch (e) {
+          // The user deleted the root message: that thread is gone, the others still need reading.
+          if (!(e instanceof SlackError && e.code === "thread_not_found")) throw e;
+          this.log("thread gone", root);
+          delete this.state.threads[root];
         }
       }
     }
@@ -380,13 +387,14 @@ export class SlackBridge implements Messenger {
 }
 
 /**
- * The DM threads whose replies a poll reads: those Remy asked a question in first, then any it posted in, newest
- * first. A handful, since each costs a Slack read.
+ * The DM threads whose replies a poll reads: those with a question still open first, then any Remy posted in,
+ * newest first. A handful, since each costs a Slack read.
  */
 export function dmThreadsToRead(threads: Record<string, ThreadInfo>, limit = 5) {
+  const open = (t: ThreadInfo) => t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS;
   return Object.entries(threads)
     .filter(([, t]) => !t.channel)
-    .sort(([, a], [, b]) => Number(b.expectReply) - Number(a.expectReply) || b.postedAt - a.postedAt)
+    .sort(([, a], [, b]) => Number(open(b)) - Number(open(a)) || b.postedAt - a.postedAt)
     .slice(0, limit);
 }
 

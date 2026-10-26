@@ -2238,9 +2238,16 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, {
     }
     if (this.tick++ % 2 === 0) {
       for (const [root, t] of dmThreadsToRead(this.state.threads)) {
-        for (const m of await this.slack.replies(channel, root, t.lastSeen)) {
-          t.lastSeen = m.ts;
-          await this.handleInbound(m, root);
+        try {
+          for (const m of await this.slack.replies(channel, root, t.lastSeen)) {
+            t.lastSeen = m.ts;
+            await this.handleInbound(m, root);
+          }
+        } catch (e) {
+          if (!(e instanceof SlackError && e.code === "thread_not_found"))
+            throw e;
+          this.log("thread gone", root);
+          delete this.state.threads[root];
         }
       }
     }
@@ -2373,7 +2380,8 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, {
   }
 }
 function dmThreadsToRead(threads, limit = 5) {
-  return Object.entries(threads).filter(([, t]) => !t.channel).sort(([, a], [, b]) => Number(b.expectReply) - Number(a.expectReply) || b.postedAt - a.postedAt).slice(0, limit);
+  const open = (t) => t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS;
+  return Object.entries(threads).filter(([, t]) => !t.channel).sort(([, a], [, b]) => Number(open(b)) - Number(open(a)) || b.postedAt - a.postedAt).slice(0, limit);
 }
 var DM_SCOPES = ["chat:write", "im:history", "im:read", "im:write"];
 var CHANNEL_SCOPES = [
@@ -3483,12 +3491,17 @@ async function spawnAgent(opts) {
 var MARK = ["\uD83D\uDD34", "\uD83D\uDFE0", "\uD83D\uDFE1", "\uD83D\uDFE2", "\u26AA"];
 var short = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}\u2026` : s).replace(/\s+/g, " ").trim();
 var unwrap = (l) => l.trim().replace(/^(?:(?:[#>]+|[-+*](?=\s)|[*_]+)\s*)+/, "").replace(/[*_]+$/, "").trim();
-var asks = (l) => /\?["'\u201D)]*$/.test(l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, "").trim());
+var CODE_OR_URL = /`[^`]*`|https?:\/\/\S*[^\s?]/g;
+var asks = (l) => /\?["'\u201D)]*$/.test(l.replace(CODE_OR_URL, "").trim());
 function asksThenYou(l) {
-  const plain = l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, (m) => " ".repeat(m.length));
+  const plain = l.replace(CODE_OR_URL, (m) => " ".repeat(m.length));
+  const cue = /^(?:(?:once|when|if|after|as soon as) you\b|let me know\b|tell me\b)/i;
   const marks = [...plain.matchAll(/\?["'\u201D)]*\s+/g)];
-  const mark = marks.findLast((m) => /\b(you|your|let me know|tell me)\b/i.test(l.slice(m.index + m[0].length)));
-  return mark ? l.slice(0, mark.index + mark[0].trimEnd().length) : undefined;
+  const mark = marks.findLast((m) => cue.test(l.slice(m.index + m[0].length)));
+  if (!mark)
+    return;
+  const before = [...plain.slice(0, mark.index).matchAll(/[.!?]["'\u201D)]*\s+/g)].at(-1);
+  return l.slice(before ? before.index + before[0].length : 0, mark.index + mark[0].trimEnd().length);
 }
 function questionOf(last) {
   const lines = (last ?? "").split(`

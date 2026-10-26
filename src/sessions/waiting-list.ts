@@ -32,19 +32,26 @@ const unwrap = (l: string) =>
     .replace(/[*_]+$/, "")
     .trim();
 
+/** Code and URLs, whose punctuation isn't the line's own. */
+const CODE_OR_URL = /`[^`]*`|https?:\/\/\S*[^\s?]/g;
+
 /** Whether a line asks something: it ends in a question mark that isn't part of a URL or of code. */
-const asks = (l: string) => /\?["'”)]*$/.test(l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, "").trim());
+const asks = (l: string) => /\?["'”)]*$/.test(l.replace(CODE_OR_URL, "").trim());
 
 /**
  * A question followed by what happens once the user answers it, on one line: "Which colour? Once you tell me, I'll
- * write it down." Only text addressed to the user counts as the follow-up, so "Is the 5? Not sure." doesn't.
+ * write it down." The follow-up must open by addressing the user, so "Is the 5? Not sure, but your tests pass."
+ * doesn't count. Returns just the question, from the sentence it starts.
  */
 function asksThenYou(l: string): string | undefined {
-  // Blank out code and URLs, keeping positions, so their question marks don't count.
-  const plain = l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, (m) => " ".repeat(m.length));
+  // Blank out code and URLs, keeping positions, so their punctuation doesn't count.
+  const plain = l.replace(CODE_OR_URL, (m) => " ".repeat(m.length));
+  const cue = /^(?:(?:once|when|if|after|as soon as) you\b|let me know\b|tell me\b)/i;
   const marks = [...plain.matchAll(/\?["'”)]*\s+/g)];
-  const mark = marks.findLast((m) => /\b(you|your|let me know|tell me)\b/i.test(l.slice(m.index + m[0].length)));
-  return mark ? l.slice(0, mark.index + mark[0].trimEnd().length) : undefined;
+  const mark = marks.findLast((m) => cue.test(l.slice(m.index + m[0].length)));
+  if (!mark) return undefined;
+  const before = [...plain.slice(0, mark.index).matchAll(/[.!?]["'”)]*\s+/g)].at(-1);
+  return l.slice(before ? before.index + before[0].length : 0, mark.index + mark[0].trimEnd().length);
 }
 
 /**
