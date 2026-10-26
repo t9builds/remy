@@ -401,7 +401,16 @@ export default defineFactory({
 | `gate(name, { maxLines, protect })` | Remy | Changed lines, protected paths, CI, and that each verdict covers the PR's current head; new commits send the PR back to the step that hasn't seen them |
 | `action("merge" \| "deploy" \| "notify")` | Remy | Merges with `gh pr merge --match-head-commit`, runs the environment's `deploy` command, tells you the change is through |
 
-Any skill can be an agent step: Remy adds the PR, the rules and the `remy report` line to its prompt, and reads only that report, never the agent's text. Remy ships `/remy:review`, `/remy:verify` and `/remy:release-check`, so a pipeline works before you bring skills of your own.
+Any skill can be an agent step: Remy adds the PR, the rules and the `remy report` line to its prompt, and reads only that report, never the agent's text. Remy ships default skills, so a pipeline works before you bring your own:
+
+| Skill | What it does |
+|---|---|
+| `/remy:review` | Three reviewers in parallel, each through one lens: correctness (the claim, edge cases, security, what it breaks beyond the diff), design (the repo's own rules, root causes, structure, complexity) and proof (tests, and the app run for real). The verifier checks each finding against the code, hands the real ones to a fixer agent, pushes, and records the review on the PR. With `repeat: "until-clean"`, a fresh round reviews every fix |
+| `/remy:verify` | Runs the change: on an environment after a deploy, or from the PR's checkout before the merge (an agent step without `env`) |
+| `/remy:release-check` | Decides whether a verified change can go to production on its own |
+| `/remy:create-verification-skill` | Not a step: run it once in a repo to write the repo's own `verify-<app>` skill, which launches the app, drives it like a user and captures evidence. `/remy:review` and `/remy:verify` follow it when it's there |
+
+The defaults judge a change by the repo's own written rules (`AGENTS.md` or `CLAUDE.md`, ADRs, lint and dependency rules), so most teams shape them by writing those down. To steer one step, add `instructions` (`agent("review", { skill: "/remy:review", instructions: "Migrations need a rollback." })`). To replace one, name your own skill or a skill pack's: `agent("review", { skill: "/our-review" })`.
 
 How far Remy goes on its own is the lower of the repo's `autonomy` and yours in `~/.remy/config.json`. A teammate who clones a repo set to `deploy-prod` gets `notify` until they raise their own:
 
@@ -438,3 +447,9 @@ bun src/cli.ts status   # run the CLI from source
 ```
 
 Where code goes and which module may import which: [AGENTS.md](AGENTS.md).
+
+Remy runs its own factory on its PRs: [.remy/factory.ts](.remy/factory.ts). To use it, add this repo to `extensions.repos` and raise your `autonomy` to `merge` in `~/.remy/config.json`.
+
+## Credits
+
+The review lenses, the reviewer prompt and the judgment of findings, and `/remy:create-verification-skill` are adapted from [pstack](https://github.com/cursor/plugins/tree/main/pstack) by Lauren Tan (MIT). Its license is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -52,8 +52,20 @@ One stage of a pipeline: an agent step, a wait, a gate or an action.
 _Avoid_: stage, job, task
 
 **Verifier**:
-An agent that checks a change it didn't write, fixes what it finds and records a verdict.
-_Avoid_: reviewer
+An agent that checks a change it didn't write: its reviewers find what's wrong, its fixer fixes it, and it records a verdict.
+_Avoid_: checker
+
+**Reviewer**:
+A verifier's subagent that looks for problems in a change through one lens (correctness, design or proof) and changes nothing.
+_Avoid_: verifier, critic
+
+**Finding**:
+A problem a reviewer reports, with where it is and the evidence; the verifier sorts each one into fix, person or dismissed.
+_Avoid_: issue, comment
+
+**Fixer**:
+The agent a verifier hands its confirmed findings to; it fixes them and commits, and the verifier pushes.
+_Avoid_: author
 
 **Release check**:
 An agent step that decides whether a verified change goes to production on its own or waits for a person.
