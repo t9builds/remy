@@ -16,7 +16,22 @@ import { deploy, deployed, mergePr, prDetail, readReports, repoRootOf } from "./
 import { type Loaded, loadFactory } from "./load";
 import { advance, type Env, isActive, type Run, YES } from "./pipeline";
 
-const USAGE_LIMIT = /usage limit|limit reached|rate.?limit|out of (extra )?usage/i;
+/** Claude Code's own words for a reached limit, e.g. "You've hit your session limit · resets 8:10pm (Europe/Prague)". */
+const LIMIT_NOTICE =
+  /^(You've hit your\b[^.\n]{0,40}\blimit\b|Claude AI usage limit reached|API Error: (429\b|.*\brate.?limit))/i;
+
+/**
+ * Whether a turn ended on Claude Code's limit notice: the whole last message is that notice. An agent's own words about
+ * rate limits (a review of Slack polling, say) mention the same terms and must not pause the factory.
+ */
+export const endedOnUsageLimit = (last = "") => {
+  const text = last.trim();
+  return text.length <= 200 && LIMIT_NOTICE.test(text);
+};
+
+/** Whether `claude --bg` refused to start an agent because of a limit: its output carries the notice on a line of its own. */
+export const spawnHitUsageLimit = (message = "") =>
+  message.split(/\n|: /).some((part) => LIMIT_NOTICE.test(part.trim()));
 const BACKOFF_MS = 30 * 60_000;
 /** Runs that need nothing more are dropped after this long. */
 const KEEP_MS = 7 * 24 * 3_600_000;
@@ -102,7 +117,7 @@ export const createFactory =
           });
           return { name: r.name, id: r.id };
         } catch (e: any) {
-          if (USAGE_LIMIT.test(String(e?.message))) backoffUntil = Date.now() + BACKOFF_MS;
+          if (spawnHitUsageLimit(String(e?.message))) backoffUntil = Date.now() + BACKOFF_MS;
           throw e;
         }
       },
@@ -189,7 +204,7 @@ export const createFactory =
     // A step agent that stopped on a usage limit: pause new agents, and give the step to a fresh one later.
     remy.on("session.stopped", ({ session, last }) => {
       const run = Object.values(runs).find((r) => r.agent?.name === session.name);
-      if (!run || !USAGE_LIMIT.test(last ?? "")) return;
+      if (!run || !endedOnUsageLimit(last)) return;
       backoffUntil = Date.now() + BACKOFF_MS;
       run.agent = undefined;
       run.stage = "running";

@@ -7,7 +7,7 @@ import { ExtensionHost } from "../../extension-host/host";
 import type { Config } from "../../sdk/config";
 import type { SessionRef } from "../../sdk/extension";
 import { PLUGIN_ROOT } from "../../shared/paths";
-import { createFactory, isReady } from "./factory";
+import { createFactory, endedOnUsageLimit, isReady, spawnHitUsageLimit } from "./factory";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
 import { gateBlockers, type PrDetail, type Run } from "./pipeline";
@@ -162,4 +162,23 @@ test("formatRuns", () => {
     `#7 acme-corp/api · waits for you · gate merge: touches protected db/x.sql · ${pr.url}`,
   );
   expect(formatRuns([])).toBe("No PRs in the factory.");
+});
+
+test("a turn that ends on Claude Code's limit notice pauses the factory; an agent talking about rate limits doesn't", () => {
+  expect(endedOnUsageLimit("You've hit your session limit · resets 8:10pm (Europe/Prague)")).toBe(true);
+  expect(endedOnUsageLimit("Claude AI usage limit reached|1793047932")).toBe(true);
+  expect(endedOnUsageLimit("API Error: 429 rate_limit_error")).toBe(true);
+  // What paused the factory on 2026-10-26: a verifier summing up its design reviewer.
+  expect(
+    endedOnUsageLimit(
+      "Design reviewer's in. Its rate-limit concern is bounded: worst case is about 37 `conversations.replies` calls a minute.",
+    ),
+  ).toBe(false);
+  expect(endedOnUsageLimit("Fixed: the poller backs off when Slack says you've hit your rate limit.")).toBe(false);
+  expect(endedOnUsageLimit(undefined)).toBe(false);
+});
+
+test("a spawn that Claude Code refused for a limit pauses the factory", () => {
+  expect(spawnHitUsageLimit("claude --bg failed (1): You've hit your session limit · resets 8:10pm")).toBe(true);
+  expect(spawnHitUsageLimit("claude --bg failed (1): Workspace not trusted")).toBe(false);
 });

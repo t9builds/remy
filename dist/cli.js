@@ -1193,7 +1193,12 @@ function closed(run, d, f, env) {
 }
 
 // src/extensions/factory/factory.ts
-var USAGE_LIMIT = /usage limit|limit reached|rate.?limit|out of (extra )?usage/i;
+var LIMIT_NOTICE = /^(You've hit your\b[^.\n]{0,40}\blimit\b|Claude AI usage limit reached|API Error: (429\b|.*\brate.?limit))/i;
+var endedOnUsageLimit = (last = "") => {
+  const text = last.trim();
+  return text.length <= 200 && LIMIT_NOTICE.test(text);
+};
+var spawnHitUsageLimit = (message = "") => message.split(/\n|: /).some((part) => LIMIT_NOTICE.test(part.trim()));
 var BACKOFF_MS = 30 * 60000;
 var KEEP_MS = 7 * 24 * 3600000;
 var isReady = (s) => !s.role && !!s.pr?.head && s.pr.state === "OPEN" && !s.pr.draft && s.pr.ci !== "fail" && s.pr.review !== "CHANGES_REQUESTED" && s.status !== "busy";
@@ -1259,7 +1264,7 @@ var createFactory = (world = {}) => (remy) => {
         });
         return { name: r.name, id: r.id };
       } catch (e) {
-        if (USAGE_LIMIT.test(String(e?.message)))
+        if (spawnHitUsageLimit(String(e?.message)))
           backoffUntil = Date.now() + BACKOFF_MS;
         throw e;
       }
@@ -1343,7 +1348,7 @@ var createFactory = (world = {}) => (remy) => {
   });
   remy.on("session.stopped", ({ session, last }) => {
     const run = Object.values(runs).find((r) => r.agent?.name === session.name);
-    if (!run || !USAGE_LIMIT.test(last ?? ""))
+    if (!run || !endedOnUsageLimit(last))
       return;
     backoffUntil = Date.now() + BACKOFF_MS;
     run.agent = undefined;
