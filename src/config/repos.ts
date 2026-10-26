@@ -2,6 +2,7 @@
 import { existsSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { Config } from "../sdk/config";
+import type { TrustedRepo } from "../sdk/extension";
 
 /** The checkout `repo` names: a path to one, or a folder name under one of `roots`. */
 export function resolveRepo(repo: string, roots: string[]): string {
@@ -15,7 +16,9 @@ export function resolveRepo(repo: string, roots: string[]): string {
 }
 
 /** The checkouts of the repos `extensions.repos` lists, whose own code may run in your daemon. A repo that isn't found is an error. */
-export function trustedRepos(config: Config): { repo: string; root?: string; error?: string }[] {
+export function trustedRepos(
+  config: Config,
+): ((TrustedRepo & { error?: undefined }) | { repo: string; root?: undefined; error: string })[] {
   return (config.extensions?.repos ?? []).map((repo) => {
     try {
       const root = resolveRepo(repo, config.repoRoots);

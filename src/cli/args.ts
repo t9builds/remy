@@ -1,3 +1,4 @@
+/** Flag parsing shared by the `remy` commands. */
 import { type ParseArgsConfig, parseArgs } from "node:util";
 
 /** Flags for one command; unknown ones are an error. */

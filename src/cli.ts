@@ -6,7 +6,7 @@ import { factory, report } from "./cli/commands/factory";
 import { post } from "./cli/commands/post";
 import { spawn } from "./cli/commands/spawn";
 import { start } from "./cli/commands/start";
-import { changes, queue, status } from "./cli/commands/status";
+import { changes, status, waitingList } from "./cli/commands/status";
 import { doctor } from "./cli/doctor";
 import { runHook } from "./cli/hook";
 import { setup } from "./cli/setup";
@@ -37,7 +37,7 @@ const HELP = formatHelp("remy — a coordinator for your Claude Code sessions, i
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   hook: () => runHook(),
   status,
-  queue,
+  queue: waitingList,
   changes: () => changes(),
   spawn,
   factory,

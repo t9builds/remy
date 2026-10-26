@@ -1,3 +1,4 @@
+/** Closing agents: removing a session and its worktree, and recording the ones closed because their PR merged. */
 import type { Pr } from "../sdk/extension";
 import { type Spawned, spawnedEntry } from "./spawned";
 

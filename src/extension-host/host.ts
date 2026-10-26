@@ -15,6 +15,7 @@ import type {
   PostOptions,
   Remy,
   SessionRef,
+  TrustedRepo,
   WaitingEntry,
 } from "../sdk/extension";
 import { readJson, writeJson } from "../shared/json-file";
@@ -205,7 +206,7 @@ export class ExtensionHost {
         },
       },
       sessions: () => deps.sessions(),
-      trustedRepos: () => trustedRepos(deps.config).flatMap((r) => (r.root ? [{ repo: r.repo, root: r.root }] : [])),
+      trustedRepos: () => trustedRepos(deps.config).filter((r): r is TrustedRepo => r.root !== undefined),
       config: deps.config,
       log: (...a) => deps.log(`[${ext}]`, ...a),
     };

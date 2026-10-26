@@ -8,7 +8,7 @@
  *   Slack threads, `/queue` and the factory are built-in ones (src/extensions/).
  * - Every `digestMinutes`, diffs the session/PR snapshot and posts a notice of merged PRs and ended sessions, if
  *   any, itself (shared/notices.ts).
- * - Keeps one pinned "waiting on you" message per workspace (daemon/waiting-list.ts), edited in place after each session event.
+ * - Keeps one pinned "waiting on you" message per workspace (daemon/pinned-waiting-list.ts), edited in place after each session event.
  * - Answers the coordinator's post / update, and relays the coordinator's own permission prompts.
  * The coordinator's channel (src/channel.ts) reaches all this over the link (link/); what's pushed while no
  * coordinator is connected waits here until one is. Sessions are routed to a workspace by GitHub repo or folder
@@ -40,10 +40,11 @@ import { ensureDir, readJson, writeJson } from "../shared/json-file";
 import { formatNotice } from "../shared/notices";
 import { PATHS, REMY_DIR } from "../shared/paths";
 import { VERSION } from "../shared/version";
+import { coalesce } from "./coalesce";
 import { heldBefore, keepHeld } from "./held";
 import { type Emitted, hookEvents, sessionRef, snapshotEvents } from "./observe";
+import { composeWaitingList, showWaitingList } from "./pinned-waiting-list";
 import { tailLines } from "./tail";
-import { coalesce, composeWaitingList, showWaitingList } from "./waiting-list";
 
 const log = (...a: unknown[]) => {
   try {

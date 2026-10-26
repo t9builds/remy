@@ -1,3 +1,4 @@
+/** A PR's CI, rolled up from gh's checks into one verdict. */
 import type { Ci } from "../sdk/extension";
 
 /** A PR's CI from gh's `statusCheckRollup`: failing beats pending beats passing, and the names of the failing checks. */

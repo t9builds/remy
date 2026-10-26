@@ -29,7 +29,7 @@ export async function status(args: string[]) {
   console.log(values.json ? JSON.stringify(s, null, 2) : formatTable(s, statusPaint));
 }
 
-export async function queue(args: string[]) {
+export async function waitingList(args: string[]) {
   const { values } = parse(args, { json: { type: "boolean" } });
   const s = await takeSnapshot();
   const items = waitingListOf(s);

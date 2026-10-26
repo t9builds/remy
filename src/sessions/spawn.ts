@@ -1,3 +1,4 @@
+/** Starting a background agent in a repo, in its own worktree by default, with a free nickname. */
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { loadConfig } from "../config/config";
@@ -6,7 +7,7 @@ import type { SpawnResult } from "../sdk/extension";
 import { readJson, writeJson } from "../shared/json-file";
 import { PATHS } from "../shared/paths";
 import { listAgents } from "./agents";
-import { type Nicknames, pickNickname, takenNames } from "./names";
+import { type Nicknames, pickNickname, takenNames } from "./nicknames";
 import type { Spawned } from "./spawned";
 
 const SESSION_ENV = new Set([

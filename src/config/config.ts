@@ -1,3 +1,4 @@
+/** `~/.remy/config.json`: loading, defaults and saving it, which workspace a session belongs to, and the tokens beside it. */
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";

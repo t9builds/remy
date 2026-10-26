@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { Messenger } from "../messengers/messenger";
 import type { Pr, WaitingEntry } from "../sdk/extension";
 import type { SessionView, Snapshot } from "../sessions/snapshot";
-import { coalesce, composeWaitingList, showWaitingList } from "./waiting-list";
+import { composeWaitingList, showWaitingList } from "./pinned-waiting-list";
 
 const messenger = (update: (id: string, text: string) => Promise<void>) => {
   const calls: string[] = [];
@@ -35,19 +35,6 @@ test("showWaitingList keeps the old message after an edit fails for another reas
   });
   expect(await showWaitingList(offline.m, { id: "old", text: "a" }, "b", quiet)).toEqual({ id: "old", text: "a" });
   expect(offline.calls).toEqual(["update old b"]);
-});
-
-test("coalesce shares one run per delay, and a longer delay still runs after a shorter one", async () => {
-  let runs = 0;
-  const later = coalesce(() => runs++);
-  later(5);
-  later(5);
-  later(30);
-  later(5);
-  await Bun.sleep(15);
-  expect(runs).toBe(1);
-  await Bun.sleep(30);
-  expect(runs).toBe(2);
 });
 
 const view = (name: string, over: Partial<SessionView> = {}): SessionView => ({
