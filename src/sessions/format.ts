@@ -1,6 +1,6 @@
 /** Sessions as text: one line each for `remy status`, or one in detail. */
 import type { Ci, Pr } from "../sdk/extension";
-import { aboutOf } from "./names";
+import { aboutOf } from "./nicknames";
 import type { SessionView, Snapshot } from "./snapshot";
 
 /** Optional styling for `formatTable`; the CLI passes colors, the coordinator gets plain text. */

@@ -6,7 +6,7 @@ import { PATHS } from "../shared/paths";
 import { listAgents } from "./agents";
 import { readEvents } from "./events";
 import { gitInfo, prInfo } from "./git";
-import { aboutOf, type Nicknames } from "./names";
+import { aboutOf, type Nicknames } from "./nicknames";
 import { type Spawned, spawnedEntry } from "./spawned";
 
 export type SessionView = {

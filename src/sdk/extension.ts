@@ -33,6 +33,9 @@ export type Pr = {
 export type SpawnResult = { name: string; label: string; id?: string; cwd: string; worktree: boolean; output: string };
 
 /** A Claude Code session as extensions see it. */
+/** A repo in `extensions.repos` that was found on disk: its name and its checkout. */
+export type TrustedRepo = { repo: string; root: string };
+
 export type SessionRef = {
   name: string;
   sessionId: string;
@@ -182,7 +185,7 @@ export interface Remy {
   /** Sessions as Remy last saw them. */
   sessions(): SessionRef[];
   /** The repos in `extensions.repos` that were found: whose own code (`.remy/`) you trust to run in your daemon. */
-  trustedRepos(): { repo: string; root: string }[];
+  trustedRepos(): TrustedRepo[];
   /** Your ~/.remy/config.json, as the daemon loaded it. */
   readonly config: Readonly<Config>;
   log(...a: unknown[]): void;

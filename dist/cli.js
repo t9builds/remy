@@ -553,7 +553,7 @@ class ExtensionHost {
         }
       },
       sessions: () => deps.sessions(),
-      trustedRepos: () => trustedRepos(deps.config).flatMap((r) => r.root ? [{ repo: r.repo, root: r.root }] : []),
+      trustedRepos: () => trustedRepos(deps.config).filter((r) => r.root !== undefined),
       config: deps.config,
       log: (...a) => deps.log(`[${ext}]`, ...a)
     };
@@ -587,7 +587,7 @@ async function importExtension(path) {
 // src/extension-host/load.ts
 import { join as join7 } from "path";
 
-// src/extensions/factory/index.ts
+// src/extensions/factory/factory.ts
 import { existsSync as existsSync6, statSync as statSync5 } from "fs";
 import { join as join6 } from "path";
 
@@ -1192,7 +1192,7 @@ function closed(run, d, f, env) {
   return false;
 }
 
-// src/extensions/factory/index.ts
+// src/extensions/factory/factory.ts
 var USAGE_LIMIT = /usage limit|limit reached|rate.?limit|out of (extra )?usage/i;
 var BACKOFF_MS = 30 * 60000;
 var KEEP_MS = 7 * 24 * 3600000;
@@ -1412,14 +1412,6 @@ function mergedCleanup(remy) {
   remy.on("tick", async () => void await Promise.all(remy.sessions().map(closeIfMerged)));
 }
 
-// src/extensions/queue-command.ts
-function queueCommand(remy) {
-  remy.registerCommand("queue", {
-    description: "What waits on you, most urgent first",
-    run: (_, ctx) => remy.waitingList.text(ctx.workspace)
-  });
-}
-
 // src/extensions/slack-tasks.ts
 function slackTasks(remy) {
   remy.on("message", (m) => {
@@ -1428,11 +1420,19 @@ function slackTasks(remy) {
   });
 }
 
+// src/extensions/waiting-list-command.ts
+function waitingListCommand(remy) {
+  remy.registerCommand("queue", {
+    description: "What waits on you, most urgent first",
+    run: (_, ctx) => remy.waitingList.text(ctx.workspace)
+  });
+}
+
 // src/extensions/index.ts
 var BUILTINS = {
   "merged-cleanup": mergedCleanup,
   "slack-tasks": slackTasks,
-  queue: queueCommand,
+  queue: waitingListCommand,
   factory: factory_default
 };
 
@@ -2925,7 +2925,7 @@ async function openWorkspaces(workspaces, sink, opts) {
 }
 var quietSink = { push: async () => {}, permission: async () => {}, log: () => {} };
 
-// src/sessions/agents.ts
+// src/sessions/run.ts
 async function run2(cmd, cwd) {
   try {
     const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "ignore" });
@@ -2935,6 +2935,8 @@ async function run2(cmd, cwd) {
     return;
   }
 }
+
+// src/sessions/agents.ts
 async function listAgents() {
   const out = await run2(["claude", "agents", "--json"]);
   if (!out)
@@ -3130,7 +3132,7 @@ var KITCHEN_NAMES = [
   "panettone"
 ];
 
-// src/sessions/names.ts
+// src/sessions/nicknames.ts
 var RESERVE_MS = 3 * 24 * 3600000;
 var KEEP_MS3 = 30 * 24 * 3600000;
 function takenNames(live, nicknames, spawned, now = Date.now()) {
@@ -3252,15 +3254,6 @@ function readEvents() {
 }
 
 // src/sessions/git.ts
-async function run3(cmd, cwd) {
-  try {
-    const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "ignore" });
-    const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
-    return code === 0 ? out.trim() : undefined;
-  } catch {
-    return;
-  }
-}
 var GITHUB_REMOTE = /github\.com[:/](.+?)(\.git)?$/;
 var repoCache = new Map;
 function githubRepoOf(cwd) {
@@ -3273,16 +3266,16 @@ function githubRepoOf(cwd) {
   return repoCache.get(cwd);
 }
 async function gitInfo(cwd) {
-  const branch = await run3(["git", "branch", "--show-current"], cwd);
+  const branch = await run2(["git", "branch", "--show-current"], cwd);
   if (branch === undefined)
     return {};
-  const top = await run3(["git", "rev-parse", "--show-toplevel"], cwd);
-  const remote = await run3(["git", "remote", "get-url", "origin"], cwd);
+  const top = await run2(["git", "rev-parse", "--show-toplevel"], cwd);
+  const remote = await run2(["git", "remote", "get-url", "origin"], cwd);
   const repo = remote?.match(GITHUB_REMOTE)?.[1] ?? top?.split("/").pop();
   return { branch: branch || undefined, repo };
 }
 async function prInfo(cwd, branch) {
-  const out = await run3([
+  const out = await run2([
     "gh",
     "pr",
     "view",
@@ -3562,6 +3555,19 @@ var plugin_default = {
 // src/shared/version.ts
 var VERSION = plugin_default.version;
 
+// src/daemon/coalesce.ts
+function coalesce(run) {
+  const timers = new Map;
+  return (ms) => {
+    if (timers.has(ms))
+      return;
+    timers.set(ms, setTimeout(() => {
+      timers.delete(ms);
+      run();
+    }, ms));
+  };
+}
+
 // src/daemon/held.ts
 import { unlinkSync as unlinkSync2 } from "fs";
 function heldBefore() {
@@ -3637,6 +3643,57 @@ function hookEvents(e, session) {
   return [];
 }
 
+// src/daemon/pinned-waiting-list.ts
+async function showWaitingList(m, prev, text, log) {
+  if (prev?.text === text)
+    return prev;
+  if (prev) {
+    try {
+      await m.update(prev.id, text);
+      return { id: prev.id, text };
+    } catch (e) {
+      const why = String(e?.message ?? e);
+      if (/message is not modified/i.test(why))
+        return { id: prev.id, text };
+      if (!MESSAGE_GONE.test(why)) {
+        log("waiting list edit failed, will retry", why);
+        return prev;
+      }
+      log("waiting list message gone, posting a new one", why);
+    }
+  }
+  const id = await m.post(text);
+  await m.pin?.(id).catch((e) => log("waiting list pin failed", e?.message ?? e));
+  return { id, text };
+}
+var MESSAGE_GONE = /message to edit not found|message can't be edited|message_not_found|cant_update_message/i;
+function composeWaitingList(snap, workspace, entries, workspaceOf) {
+  const sessions = snap.sessions.filter((s) => workspaceOf(s) === workspace);
+  const claimed = new Set(entries.flatMap((e) => e.session ? [e.session] : []));
+  const fromExtensions = entries.flatMap((e) => {
+    if (e.hide)
+      return [];
+    const of = e.session ? sessions.find((s) => s.name === e.session) : undefined;
+    const where = e.workspace ?? (of ? workspace : undefined);
+    if (where && where !== workspace)
+      return [];
+    return [
+      {
+        session: e.label,
+        sessionId: `extension:${e.key}`,
+        cwd: "",
+        rank: e.rank,
+        why: e.why,
+        action: e.action,
+        pr: e.url
+      }
+    ];
+  });
+  const own = waitingListOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
+  const items = [...own, ...fromExtensions].sort((a, b) => a.rank - b.rank);
+  return formatWaitingList(items, sessions);
+}
+
 // src/daemon/tail.ts
 import { closeSync, openSync, readSync, statSync as statSync7 } from "fs";
 function tailLines(path, onLine, everyMs = 2000) {
@@ -3668,68 +3725,6 @@ function tailLines(path, onLine, everyMs = 2000) {
       if (l)
         onLine(l);
   }, everyMs);
-}
-
-// src/daemon/waiting-list.ts
-async function showWaitingList(m, prev, text, log) {
-  if (prev?.text === text)
-    return prev;
-  if (prev) {
-    try {
-      await m.update(prev.id, text);
-      return { id: prev.id, text };
-    } catch (e) {
-      const why = String(e?.message ?? e);
-      if (/message is not modified/i.test(why))
-        return { id: prev.id, text };
-      if (!MESSAGE_GONE.test(why)) {
-        log("waiting list edit failed, will retry", why);
-        return prev;
-      }
-      log("waiting list message gone, posting a new one", why);
-    }
-  }
-  const id = await m.post(text);
-  await m.pin?.(id).catch((e) => log("waiting list pin failed", e?.message ?? e));
-  return { id, text };
-}
-var MESSAGE_GONE = /message to edit not found|message can't be edited|message_not_found|cant_update_message/i;
-function coalesce(run) {
-  const timers = new Map;
-  return (ms) => {
-    if (timers.has(ms))
-      return;
-    timers.set(ms, setTimeout(() => {
-      timers.delete(ms);
-      run();
-    }, ms));
-  };
-}
-function composeWaitingList(snap, workspace, entries, workspaceOf) {
-  const sessions = snap.sessions.filter((s) => workspaceOf(s) === workspace);
-  const claimed = new Set(entries.flatMap((e) => e.session ? [e.session] : []));
-  const fromExtensions = entries.flatMap((e) => {
-    if (e.hide)
-      return [];
-    const of = e.session ? sessions.find((s) => s.name === e.session) : undefined;
-    const where = e.workspace ?? (of ? workspace : undefined);
-    if (where && where !== workspace)
-      return [];
-    return [
-      {
-        session: e.label,
-        sessionId: `extension:${e.key}`,
-        cwd: "",
-        rank: e.rank,
-        why: e.why,
-        action: e.action,
-        pr: e.url
-      }
-    ];
-  });
-  const own = waitingListOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
-  const items = [...own, ...fromExtensions].sort((a, b) => a.rank - b.rank);
-  return formatWaitingList(items, sessions);
 }
 
 // src/daemon/daemon.ts
@@ -4576,7 +4571,7 @@ async function status2(args) {
   }
   console.log(values.json ? JSON.stringify(s, null, 2) : formatTable(s, statusPaint));
 }
-async function queue(args) {
+async function waitingList(args) {
   const { values } = parse(args, { json: { type: "boolean" } });
   const s = await takeSnapshot();
   const items = waitingListOf(s);
@@ -6323,7 +6318,7 @@ var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, 
 var COMMANDS = {
   hook: () => runHook(),
   status: status2,
-  queue,
+  queue: waitingList,
   changes: () => changes(),
   spawn,
   factory,

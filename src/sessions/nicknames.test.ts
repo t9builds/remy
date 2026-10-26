@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { KITCHEN_NAMES } from "./kitchen-names";
-import { aboutOf, pickNickname, takenNames } from "./names";
+import { aboutOf, pickNickname, takenNames } from "./nicknames";
 
 test("kitchen names are unique, plain words and none contains another", () => {
   expect(new Set(KITCHEN_NAMES).size).toBe(KITCHEN_NAMES.length);

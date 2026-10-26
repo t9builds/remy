@@ -37,21 +37,6 @@ export async function showWaitingList(
 /** Errors that mean the message can't be edited any more: Telegram's, then Slack's. */
 const MESSAGE_GONE = /message to edit not found|message can't be edited|message_not_found|cant_update_message/i;
 
-/** Calls `run` `ms` after the first call for that delay; calls with the same delay in between share it. */
-export function coalesce(run: () => void) {
-  const timers = new Map<number, ReturnType<typeof setTimeout>>();
-  return (ms: number) => {
-    if (timers.has(ms)) return;
-    timers.set(
-      ms,
-      setTimeout(() => {
-        timers.delete(ms);
-        run();
-      }, ms),
-    );
-  };
-}
-
 /** The workspace's list, with only its own sessions, and what extensions put on it. */
 export function composeWaitingList(
   snap: Snapshot,

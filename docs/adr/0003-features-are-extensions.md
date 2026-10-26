@@ -7,7 +7,7 @@ status: accepted
 The core is only the relay: messengers, sessions, spawning, the waiting list and permissions. Every other behavior is an extension: a TypeScript module that exports `(remy) => void`, modelled on pi's extensions.
 
 - **Events it subscribes to:** `session.started`, `session.asks`, `session.stopped`, `session.ended`, `pr.opened`, `pr.ready`, `pr.ci`, `pr.merged`, `message`, `tick`.
-- **Actions it calls:** `post`, `ask`, `spawn`, `close`, `queue.add`, `coordinator.tell`, `registerCommand`, `state`.
+- **Actions it calls:** `post`, `ask`, `spawn`, `close`, `waitingList.add`, `coordinator.tell`, `registerCommand`, `state`.
 
 The built-in behaviors use the same API: closing merged agents, tasks from Slack threads, and the factory. That proves the API is enough. Every team's development cycle is different, so Remy's opinions must be replaceable rather than configurable switches in the core.
 

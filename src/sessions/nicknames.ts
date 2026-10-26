@@ -1,3 +1,4 @@
+/** Naming sessions after kitchen words: which names are free, and what each named session is about. */
 import { readJson, writeJson } from "../shared/json-file";
 import { PATHS } from "../shared/paths";
 import { KITCHEN_NAMES } from "./kitchen-names";

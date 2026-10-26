@@ -6,7 +6,7 @@ import { DEFAULTS } from "../../config/config";
 import { ExtensionHost } from "../../extension-host/host";
 import type { Config } from "../../sdk/config";
 import type { SessionRef } from "../../sdk/extension";
-import { createFactory, isReady } from ".";
+import { createFactory, isReady } from "./factory";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
 import type { Run } from "./pipeline";

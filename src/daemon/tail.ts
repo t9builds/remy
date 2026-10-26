@@ -1,3 +1,4 @@
+/** Follows a file as lines are appended to it; the daemon reads the hooks' events this way. */
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 
 /** Calls `onLine` with each line appended to `path` from now on, checking every `everyMs`; follows the file when it's rotated. */

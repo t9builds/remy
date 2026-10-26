@@ -4,7 +4,7 @@
  */
 import { listAgents } from "../sessions/agents";
 import { appendEvent, type RemyEvent } from "../sessions/events";
-import { nameSession } from "../sessions/names";
+import { nameSession } from "../sessions/nicknames";
 
 export async function runHook() {
   // The coordinator's own turns would echo back into it, so it never reports itself.

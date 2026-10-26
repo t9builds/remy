@@ -1,3 +1,4 @@
+/** `~/.remy/events.jsonl`, the log the hooks append to and the daemon reads; rotated so it stays small. */
 import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { ensureDir } from "../shared/json-file";
 import { PATHS } from "../shared/paths";

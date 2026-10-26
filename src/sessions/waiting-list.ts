@@ -1,9 +1,9 @@
 /**
  * What waits on the user, most urgent first: the one list to read instead of a stream of messages. Built from a
  * snapshot, so it holds only what is true now; the daemon keeps it as one message per workspace, edited in place
- * (daemon/waiting-list.ts).
+ * (daemon/pinned-waiting-list.ts).
  */
-import { aboutOf } from "./names";
+import { aboutOf } from "./nicknames";
 import type { SessionView, Snapshot } from "./snapshot";
 
 export type WaitingItem = {
