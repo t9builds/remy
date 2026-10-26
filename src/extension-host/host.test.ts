@@ -15,7 +15,7 @@ function host(over: Partial<HostDeps> = {}) {
   const posts: { text: string; opts: PostOptions & { expect_reply?: boolean } }[] = [];
   const told: { text: string; meta: Record<string, string> }[] = [];
   const logs: string[] = [];
-  let queueChanges = 0;
+  let waitingListChanges = 0;
   const h = new ExtensionHost({
     post: async (text, opts) => (posts.push({ text, opts }), `id${posts.length}`),
     spawn: async () => ({ name: "saffron", label: "api-x", id: "abc", cwd: "/r/api", worktree: true, output: "" }),
@@ -23,13 +23,13 @@ function host(over: Partial<HostDeps> = {}) {
     tell: (text, meta) => void told.push({ text, meta }),
     sessions: () => [],
     config: DEFAULTS,
-    queueChanged: () => void queueChanges++,
-    queueText: async (w) => `list for ${w}`,
+    waitingListChanged: () => void waitingListChanges++,
+    waitingListText: async (w) => `list for ${w}`,
     log: (...a) => void logs.push(a.join(" ")),
     stateDir: join(dir, "state"),
     ...over,
   });
-  return { h, posts, told, logs, queueChanges: () => queueChanges };
+  return { h, posts, told, logs, waitingListChanges: () => waitingListChanges };
 }
 
 describe("extension host", () => {
@@ -83,23 +83,23 @@ describe("extension host", () => {
     const answer = remy.ask("Ship api#7 to production?", { session: "factory:api#7", workspace: "work" });
     await Bun.sleep(0);
     expect(posts).toEqual([{ text: "Ship api#7 to production?", opts: { session: "factory:api#7", workspace: "work", expect_reply: true } }]);
-    expect(h.queueEntries()).toMatchObject([{ rank: 0, label: "factory:api#7", why: 'asks: "Ship api#7 to production?"' }]);
+    expect(h.waitingEntries()).toMatchObject([{ rank: 0, label: "factory:api#7", why: 'asks: "Ship api#7 to production?"' }]);
     expect(h.answer("someone-else", "yes")).toBeFalse();
     expect(h.answer("factory:api#7", "yes, ship it")).toBeTrue();
     expect(await answer).toBe("yes, ship it");
-    expect(h.queueEntries()).toEqual([]);
+    expect(h.waitingEntries()).toEqual([]);
   });
 
-  test("queue entries, coordinator.tell and state", async () => {
-    const { h, told, queueChanges } = host();
+  test("waiting-list entries, coordinator.tell and state", async () => {
+    const { h, told, waitingListChanges } = host();
     let remy!: Remy;
     await h.load("ext", "test", (r) => void (remy = r));
-    remy.queue.add({ key: "k", rank: 1, label: "api#7", why: "release check failed", action: "look at it" });
-    remy.queue.add({ key: "k", rank: 2, label: "api#7", why: "replaced", action: "look" });
-    expect(h.queueEntries()).toMatchObject([{ key: "k", why: "replaced" }]);
-    remy.queue.remove("k");
-    expect(h.queueEntries()).toEqual([]);
-    expect(queueChanges()).toBe(3);
+    remy.waitingList.add({ key: "k", rank: 1, label: "api#7", why: "release check failed", action: "look at it" });
+    remy.waitingList.add({ key: "k", rank: 2, label: "api#7", why: "replaced", action: "look" });
+    expect(h.waitingEntries()).toMatchObject([{ key: "k", why: "replaced" }]);
+    remy.waitingList.remove("k");
+    expect(h.waitingEntries()).toEqual([]);
+    expect(waitingListChanges()).toBe(3);
     remy.coordinator.tell("hello", { workspace: "work" });
     expect(told).toEqual([{ text: "hello", meta: { kind: "extension", workspace: "work", extension: "ext" } }]);
     remy.state.set("count", 2);

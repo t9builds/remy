@@ -3,7 +3,7 @@
  * since the last digest. The wording is code, so it's the same every time and costs nothing.
  */
 
-/** What a notice says something about: a change between two looks at the sessions (sessions/snapshot.ts). */
+/** What a notice says something about: a change between two looks at the sessions (sessions/changes.ts). */
 export type Change = { session: string; repo?: string; what: string; detail: string; pr?: string };
 
 /** Changes a notice reports: merges and ended sessions. The pinned list shows the rest. */

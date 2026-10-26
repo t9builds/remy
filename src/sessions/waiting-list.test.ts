@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { formatQueue, queueOf, questionOf } from "./waiting-list";
+import { formatWaitingList, waitingListOf, questionOf } from "./waiting-list";
 import type { SessionView, Snapshot } from "./snapshot";
 import type { Pr } from "../sdk/extension";
 
@@ -21,7 +21,7 @@ test("questionOf finds the last line that asks something", () => {
 });
 
 test("ranks questions, then red CI, then reviews, then ready PRs, then agents without a PR", () => {
-  const q = queueOf(
+  const q = waitingListOf(
     snap(
       session({ name: "ready", pr: pr() }),
       session({ name: "nopr" }),
@@ -37,7 +37,7 @@ test("ranks questions, then red CI, then reviews, then ready PRs, then agents wi
 });
 
 test("leaves out busy sessions, pending CI, closed PRs and interactive sessions with nothing to show", () => {
-  const q = queueOf(
+  const q = waitingListOf(
     snap(
       session({ status: "busy", pr: pr({ ci: "fail" }), lastEvent: stop("ok?") }),
       session({ pr: pr({ ci: "pending" }) }),
@@ -52,11 +52,11 @@ test("formats one line per item and counts the busy ones", () => {
   const busy = session({ status: "busy" });
   const red = session({ name: "risotto", about: "fix login timeout", pr: pr({ ci: "fail", failing: ["unit"] }) });
   const s = snap(busy, red);
-  const text = formatQueue(queueOf(s), s.sessions);
+  const text = formatWaitingList(waitingListOf(s), s.sessions);
   expect(text).toBe(
     "*Waiting on you (1)*\n🟠 *<https://github.com/o/r/pull/7|risotto>* · CI failing: unit → reply \"fix CI\"\n      _fix login timeout_\n_1 more working on their own_",
   );
-  expect(formatQueue([], [busy])).toBe("✅ *Nothing waits on you.*\n_1 more working on their own_");
+  expect(formatWaitingList([], [busy])).toBe("✅ *Nothing waits on you.*\n_1 more working on their own_");
 });
 
 test("questionOf skips question marks in URLs and code, and keeps the wording", () => {

@@ -18,13 +18,13 @@ export const PATHS = {
   events: join(REMY_DIR, "events.jsonl"),
   snapshot: join(REMY_DIR, "snapshot.json"),
   /** Per workspace, the pinned "waiting on you" message: its id and what it says. */
-  queue: join(REMY_DIR, "queue.json"),
+  waitingList: join(REMY_DIR, "queue.json"),
   spawned: join(REMY_DIR, "spawned.json"),
   nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
   /** The daemon's log; the coordinator's channel writes here too. */
   log: join(REMY_DIR, "daemon.log"),
-  /** Where the daemon listens for the coordinator's channel (link.ts). */
+  /** Where the daemon listens for the coordinator's channel (link/). */
   socket: join(REMY_DIR, "daemon.sock"),
   /** Events held for the coordinator when the daemon stopped, delivered by the next daemon. */
   held: join(REMY_DIR, "held.json"),

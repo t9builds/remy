@@ -1,14 +1,14 @@
 /** The pinned "waiting on you" message the daemon keeps in each workspace. */
 import type { Messenger } from "../messengers/messenger";
-import type { QueueEntry } from "../sdk/extension";
+import type { WaitingEntry } from "../sdk/extension";
 import type { SessionView, Snapshot } from "../sessions/snapshot";
-import { formatQueue, type QueueItem, queueOf } from "../sessions/waiting-list";
+import { formatWaitingList, type WaitingItem, waitingListOf } from "../sessions/waiting-list";
 
 /**
  * Show `text` in the message `prev` points to, or post and pin a new one when that message is gone. Returns what to
  * remember: still `prev` after an edit that failed for another reason (offline, rate limited), so the next refresh retries.
  */
-export async function showQueue(m: Messenger, prev: { id: string; text: string } | undefined, text: string, log: (...a: unknown[]) => void) {
+export async function showWaitingList(m: Messenger, prev: { id: string; text: string } | undefined, text: string, log: (...a: unknown[]) => void) {
   if (prev?.text === text) return prev;
   if (prev) {
     try {
@@ -18,14 +18,14 @@ export async function showQueue(m: Messenger, prev: { id: string; text: string }
       const why = String(e?.message ?? e);
       if (/message is not modified/i.test(why)) return { id: prev.id, text };
       if (!MESSAGE_GONE.test(why)) {
-        log("queue edit failed, will retry", why);
+        log("waiting list edit failed, will retry", why);
         return prev;
       }
-      log("queue message gone, posting a new one", why);
+      log("waiting list message gone, posting a new one", why);
     }
   }
   const id = await m.post(text);
-  await m.pin?.(id).catch((e: any) => log("queue pin failed", e?.message ?? e));
+  await m.pin?.(id).catch((e: any) => log("waiting list pin failed", e?.message ?? e));
   return { id, text };
 }
 
@@ -48,11 +48,11 @@ export function coalesce(run: () => void) {
 }
 
 /** The workspace's list, with only its own sessions, and what extensions put on it. */
-export function composeQueue(snap: Snapshot, workspace: string, entries: QueueEntry[], workspaceOf: (s: SessionView) => string) {
+export function composeWaitingList(snap: Snapshot, workspace: string, entries: WaitingEntry[], workspaceOf: (s: SessionView) => string) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s) === workspace);
   // An extension's entry about a session replaces the session's own line.
   const claimed = new Set(entries.flatMap((e) => (e.session ? [e.session] : [])));
-  const fromExtensions: QueueItem[] = entries.flatMap((e) => {
+  const fromExtensions: WaitingItem[] = entries.flatMap((e) => {
     if (e.hide) return [];
     const of = e.session ? sessions.find((s) => s.name === e.session) : undefined;
     const where = e.workspace ?? (of ? workspace : undefined);
@@ -61,7 +61,7 @@ export function composeQueue(snap: Snapshot, workspace: string, entries: QueueEn
   });
   // Stable: within a rank, sessions first, then extensions' entries in the order they came. A session's own
   // question stays even when an extension speaks for its PR.
-  const own = queueOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
+  const own = waitingListOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
   const items = [...own, ...fromExtensions].sort((a, b) => a.rank - b.rank);
-  return formatQueue(items, sessions);
+  return formatWaitingList(items, sessions);
 }

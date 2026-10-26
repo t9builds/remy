@@ -1,6 +1,6 @@
 /**
  * What the channel server needs from a chat app (Slack or Telegram): post and edit messages, ask the user to approve
- * the coordinator's own tool calls, and read the user's messages. Each workspace in the config gets one; bridges.ts
+ * the coordinator's own tool calls, and read the user's messages. Each workspace in the config gets one; workspaces.ts
  * builds it.
  *
  * Ids are opaque strings each messenger makes and reads back: the coordinator copies them from event tags into

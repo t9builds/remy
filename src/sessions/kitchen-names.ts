@@ -1,6 +1,6 @@
 /**
  * Session nicknames: well-known dishes and ingredients, one lowercase word each. remy names every session it sees
- * with one of these (see nickname.ts), so a name is easy to say and type from a phone.
+ * with one of these (see names.ts), so a name is easy to say and type from a phone.
  * Rules, checked by nickname.test.ts: no duplicates, a-z only, and no name inside another, because
  * `claude attach` and `claude logs` also match part of a name.
  */

@@ -57,8 +57,8 @@ async function hostWith(config: Config, sessions: SessionRef[]) {
     tell: () => {},
     sessions: () => sessions,
     config,
-    queueChanged: () => {},
-    queueText: async () => "",
+    waitingListChanged: () => {},
+    waitingListText: async () => "",
     log: () => {},
     stateDir: join(dir, `state-${Math.random()}`),
   });
@@ -74,12 +74,12 @@ test("a ready PR in a listed repo starts a run; an unlisted repo's or a notify-l
   const sessions = [ref({ cwd: listed }), ref({ name: "sage", sessionId: "s2", cwd: other, pr: { ...pr, number: 8, url: "https://github.com/acme-corp/web/pull/8" } })];
   const { h } = await hostWith(config, sessions);
   await h.emit("tick", { at: 1 });
-  const entries = h.queueEntries();
+  const entries = h.waitingEntries();
   expect(entries.map((e) => [e.key, !!e.hide])).toEqual([[pr.url, true]]);
 
   const notify = await hostWith({ ...config, autonomy: "notify" }, sessions);
   await notify.h.emit("tick", { at: 1 });
-  expect(notify.h.queueEntries()).toEqual([]);
+  expect(notify.h.waitingEntries()).toEqual([]);
 });
 
 test("formatRuns", () => {

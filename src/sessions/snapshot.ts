@@ -17,7 +17,7 @@ export type SessionView = {
   cwd: string;
   startedAt: number;
   spawned: boolean;
-  /** Set for agents the factory started for a pipeline step (factory/); they report through `remy report`. */
+  /** Set for agents the factory started for a pipeline step (extensions/factory/); they report through `remy report`. */
   role?: string;
   /** What the session is for: a spawned agent's task, else the first prompt of a session remy named. */
   about?: string;

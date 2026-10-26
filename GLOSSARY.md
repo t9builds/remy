@@ -24,7 +24,7 @@ A background session Remy started for a task.
 _Avoid_: worker, bot
 
 **Waiting list**:
-The one list of everything that needs the user now, most urgent first.
+The one list of everything that needs the user now, most urgent first. `/queue` and `remy queue` show it; in code and docs it's the waiting list.
 _Avoid_: queue, inbox, notifications
 
 **Judgment call**:

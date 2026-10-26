@@ -72,7 +72,7 @@ export type Events = {
   "pr.merged": { session: SessionRef; pr: Pr };
   /**
    * The user wrote in a workspace. `kind` is "user_message", or "task_request" for a Slack channel thread the user
-   * mentioned the bot in or reacted to (`task` is its id; see task.ts). `session` is set when it's a reply to an agent.
+   * mentioned the bot in or reacted to (`task` is its id; see messengers/slack/task.ts). `session` is set when it's a reply to an agent.
    */
   message: { workspace: string; text: string; kind: "user_message" | "task_request"; session?: string; thread?: string; meta: Record<string, string> };
   /** Every `tickSeconds`, after Remy looked at the sessions again. */
@@ -91,7 +91,7 @@ export type PostOptions = {
 };
 
 /** One line of the waiting list. Rank 0 is the most urgent: 0 question, 1 red CI, 2 changes requested, 3 ready, 4 stopped. */
-export type QueueEntry = {
+export type WaitingEntry = {
   /** Unique per extension; adding the same key again replaces it. */
   key: string;
   rank: 0 | 1 | 2 | 3 | 4;
@@ -149,8 +149,8 @@ export interface Remy {
    * what happened. `merged`: an agent closed because this PR merged; it then counts as merged (`remy status --merged`).
    */
   close(session: string, opts?: { merged?: Pr }): Promise<string>;
-  queue: {
-    add(entry: QueueEntry): void;
+  waitingList: {
+    add(entry: WaitingEntry): void;
     remove(key: string): void;
     /** The workspace's waiting list as the pinned message shows it. */
     text(workspace: string): Promise<string>;

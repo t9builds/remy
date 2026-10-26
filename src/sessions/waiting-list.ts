@@ -6,7 +6,7 @@
 import { aboutOf } from "./names";
 import type { SessionView, Snapshot } from "./snapshot";
 
-export type QueueItem = {
+export type WaitingItem = {
   session: string;
   sessionId: string;
   cwd: string;
@@ -37,7 +37,7 @@ export function questionOf(last: string | undefined): string | undefined {
 }
 
 /** Why `s` waits on the user, if it does. A session counts once, under its most urgent reason. */
-function itemOf(s: SessionView): Omit<QueueItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
+function itemOf(s: SessionView): Omit<WaitingItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt") return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
@@ -53,8 +53,8 @@ function itemOf(s: SessionView): Omit<QueueItem, "session" | "sessionId" | "cwd"
   return undefined;
 }
 
-export function queueOf(snapshot: Snapshot): QueueItem[] {
-  const items: (QueueItem & { since: number })[] = [];
+export function waitingListOf(snapshot: Snapshot): WaitingItem[] {
+  const items: (WaitingItem & { since: number })[] = [];
   for (const s of snapshot.sessions) {
     const it = itemOf(s);
     if (it) items.push({ ...it, session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, pr: s.pr?.url, since: s.lastEvent?.ts ?? s.startedAt });
@@ -63,8 +63,8 @@ export function queueOf(snapshot: Snapshot): QueueItem[] {
   return items.sort((a, b) => a.rank - b.rank || a.since - b.since).map(({ since, ...it }) => it);
 }
 
-/** The queue in mrkdwn, one line per item, for the pinned message; `plain` writes links out for a terminal. */
-export function formatQueue(items: QueueItem[], sessions: SessionView[] = [], plain = false): string {
+/** The waiting list in mrkdwn, one line per item, for the pinned message; `plain` writes links out for a terminal. */
+export function formatWaitingList(items: WaitingItem[], sessions: SessionView[] = [], plain = false): string {
   const busy = sessions.filter((s) => s.status === "busy").length;
   const tail = busy ? `\n_${busy} more working on their own_` : "";
   if (!items.length) return `✅ *Nothing waits on you.*${tail}`;

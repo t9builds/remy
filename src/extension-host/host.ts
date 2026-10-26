@@ -4,7 +4,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { Command, CommandContext, EventName, Events, Extension, PostOptions, QueueEntry, Remy, SessionRef } from "../sdk/extension";
+import type { Command, CommandContext, EventName, Events, Extension, PostOptions, WaitingEntry, Remy, SessionRef } from "../sdk/extension";
 import { trustedRepos } from "../config/repos";
 import { readJson, writeJson } from "../shared/json-file";
 import type { Config } from "../sdk/config";
@@ -14,12 +14,12 @@ export type HostDeps = {
   post(text: string, opts: PostOptions & { expect_reply?: boolean }): Promise<string>;
   spawn: Remy["spawn"];
   close: Remy["close"];
-  queueText(workspace: string): Promise<string>;
+  waitingListText(workspace: string): Promise<string>;
   tell(text: string, meta: Record<string, string>): void;
   sessions(): SessionRef[];
   config: Config;
   /** The waiting list changed. */
-  queueChanged(): void;
+  waitingListChanged(): void;
   log(...a: unknown[]): void;
   /** Where extensions keep their `state`. */
   stateDir: string;
@@ -38,7 +38,7 @@ export class ExtensionHost {
   readonly loaded: Loaded[] = [];
   private handlers = new Map<EventName, Handler[]>();
   private commands = new Map<string, { ext: string; command: Command }>();
-  private entries = new Map<string, QueueEntry & { ext: string }>();
+  private entries = new Map<string, WaitingEntry & { ext: string }>();
   private asks = new Map<string, { ext: string; resolve: (answer: string) => void }>();
 
   constructor(private deps: HostDeps) {}
@@ -110,13 +110,13 @@ export class ExtensionHost {
     if (!a) return false;
     this.asks.delete(session);
     this.entries.delete(`${a.ext}\0ask:${session}`);
-    this.deps.queueChanged();
+    this.deps.waitingListChanged();
     a.resolve(text);
     return true;
   }
 
   /** What extensions put on the waiting list. */
-  queueEntries(): QueueEntry[] {
+  waitingEntries(): WaitingEntry[] {
     return [...this.entries.values()].map(({ ext, ...e }) => e);
   }
 
@@ -128,9 +128,9 @@ export class ExtensionHost {
   private api(ext: string): Remy {
     const deps = this.deps;
     const statePath = join(deps.stateDir, `${ext.replace(/[^\w.-]+/g, "_")}.json`);
-    const addEntry = (e: QueueEntry) => {
+    const addEntry = (e: WaitingEntry) => {
       this.entries.set(`${ext}\0${e.key}`, { ...e, ext });
-      deps.queueChanged();
+      deps.waitingListChanged();
     };
     return {
       name: ext,
@@ -148,19 +148,19 @@ export class ExtensionHost {
         } catch (e) {
           this.asks.delete(opts.session);
           this.entries.delete(`${ext}\0${key}`);
-          deps.queueChanged();
+          deps.waitingListChanged();
           throw e;
         }
         return answer;
       },
       spawn: (opts) => deps.spawn(opts),
       close: (session, opts) => deps.close(session, opts),
-      queue: {
+      waitingList: {
         add: addEntry,
         remove: (key) => {
-          if (this.entries.delete(`${ext}\0${key}`)) deps.queueChanged();
+          if (this.entries.delete(`${ext}\0${key}`)) deps.waitingListChanged();
         },
-        text: (workspace) => deps.queueText(workspace),
+        text: (workspace) => deps.waitingListText(workspace),
       },
       coordinator: { tell: (text, meta = {}) => deps.tell(text, { kind: "extension", ...meta, extension: ext }) },
       registerCommand: (name, command) => {

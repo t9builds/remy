@@ -22,7 +22,7 @@ export function formatChecks(rows: CheckRow[]) {
     .join("\n");
 }
 
-/** Colors for `formatTable` in snapshot.ts. */
+/** Colors for `formatTable` (sessions/format.ts). */
 export const statusPaint = {
   name: (s: string) => pc.bold(s),
   status: (status: string, s: string) => (status === "waiting" ? pc.yellow(s) : status === "busy" ? pc.cyan(s) : pc.dim(s)),

@@ -1,16 +1,16 @@
 /**
  * `remy daemon`: the long-running process that owns the relay, so it stays up when the coordinator restarts.
  * - Reads your messages in each configured workspace and pushes them to the coordinator. A workspace is a Slack
- *   workspace (slack-bridge.ts, which also starts tasks from channel threads) or a Telegram chat (telegram-bridge.ts).
+ *   workspace (messengers/slack/, which also starts tasks from channel threads) or a Telegram chat (messengers/telegram/).
  * - Tails ~/.remy/events.jsonl and pushes an agent that needs input, or that ended its turn on a question, right away.
  * - Every `tickSeconds`, looks at the sessions and their PRs again; with the hook events, that raises the events
- *   extensions get (extensions/). Everything beyond the relay is an extension: closing merged agents, tasks from
- *   Slack threads and `/queue` are built-in ones (extensions/builtin/).
+ *   extensions get (extension-host/). Everything beyond the relay is an extension: closing merged agents, tasks from
+ *   Slack threads, `/queue` and the factory are built-in ones (src/extensions/).
  * - Every `digestMinutes`, diffs the session/PR snapshot and posts a notice of merged PRs and ended sessions, if
- *   any, itself (notices.ts).
- * - Keeps one pinned "waiting on you" message per workspace (queue.ts), edited in place after each session event.
+ *   any, itself (shared/notices.ts).
+ * - Keeps one pinned "waiting on you" message per workspace (daemon/waiting-list.ts), edited in place after each session event.
  * - Answers the coordinator's post / update, and relays the coordinator's own permission prompts.
- * The coordinator's channel (channel.ts) reaches all this over the link (link.ts); what's pushed while no
+ * The coordinator's channel (src/channel.ts) reaches all this over the link (link/); what's pushed while no
  * coordinator is connected waits here until one is. Sessions are routed to a workspace by GitHub repo or folder
  * (see `workspaceFor`).
  */
@@ -39,7 +39,7 @@ import { listAgents } from "../sessions/agents";
 import { spawnedEntry, type Spawned } from "../sessions/spawned";
 import { heldBefore, keepHeld } from "./held";
 import { tailLines } from "./tail";
-import { coalesce, composeQueue, showQueue } from "./waiting-list";
+import { coalesce, composeWaitingList, showWaitingList } from "./waiting-list";
 import { snapshotDiff } from "../sessions/changes";
 import { coordinatorTools } from "../link/coordinator-tools";
 import { LinkServer } from "../link/server";
@@ -65,12 +65,12 @@ let lastActive = "";
 async function push(kind: string, content: string, meta: Record<string, string> = {}) {
   const clean = Object.fromEntries(Object.entries(meta).filter(([, v]) => v));
   if (kind === "user_message" && meta.workspace) lastActive = meta.workspace;
-  if (kind === "user_message") scheduleQueue(QUEUE_AFTER_USER_MS);
+  if (kind === "user_message") scheduleWaitingList(WAITING_LIST_AFTER_USER_MS);
   if (kind === "user_message" || kind === "task_request") {
     // A reply to an extension's question answers it, not the coordinator.
     if (kind === "user_message" && meta.session && host.answer(meta.session, content)) return log("answer for an extension", meta.session);
     void host.emit("message", { workspace: meta.workspace ?? "", text: content, kind, session: meta.session || undefined, thread: meta.thread || undefined, meta: clean });
-    // Task requests go to the coordinator only through an extension (builtin/slack-tasks.ts).
+    // Task requests go to the coordinator only through an extension (extensions/slack-tasks.ts).
     if (kind === "task_request") return;
   }
   tell(kind, content, clean);
@@ -213,13 +213,13 @@ async function refOf(sessionId: string, cwd?: string): Promise<SessionRef> {
 
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
-  scheduleQueue();
+  scheduleWaitingList();
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
     // Give whoever sits at that terminal a chance first; ping only if it's still blocked.
     setTimeout(async () => {
       agentsCache.at = 0;
-      scheduleQueue();
+      scheduleWaitingList();
       const s = await sessionInfo(e.session_id);
       if (s.status && s.status !== "waiting") return;
       if (debounced(`input:${e.session_id}`)) return;
@@ -255,9 +255,9 @@ function tailEvents() {
 async function digest() {
   try {
     const { snapshot, changes: diffed, first } = await snapshotDiff();
-    await refreshQueue(snapshot);
+    await refreshWaitingList(snapshot);
     if (first) return;
-    // An agent closed because its PR merged was announced when it was closed (builtin/merged-cleanup.ts).
+    // An agent closed because its PR merged was announced when it was closed (extensions/merged-cleanup.ts).
     const spawned = readJson<Spawned>(PATHS.spawned, {});
     const changes = diffed.filter((c) => !closedAsMerged(spawned, c.sessionId));
     // One notice per workspace, each with only that workspace's sessions.
@@ -270,39 +270,39 @@ async function digest() {
   }
 }
 
-// ---------- Queue ----------
+// ---------- Waiting list ----------
 
-type QueueState = Record<string, { id: string; text: string }>;
-let queueRun = Promise.resolve();
+type WaitingListState = Record<string, { id: string; text: string }>;
+let waitingListRun = Promise.resolve();
 
-const QUEUE_AFTER_EVENT_MS = 10_000;
+const WAITING_LIST_AFTER_EVENT_MS = 10_000;
 /** After the user writes, long enough for an agent they answered to be busy again. */
-const QUEUE_AFTER_USER_MS = 30_000;
+const WAITING_LIST_AFTER_USER_MS = 30_000;
 
-const queueAfter = coalesce(() => void refreshQueue());
-/** Refresh the queue after `ms`; events that come close together share one refresh, and each delay keeps its own. */
-function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
-  queueAfter(ms);
+const waitingListAfter = coalesce(() => void refreshWaitingList());
+/** Refresh the waiting list after `ms`; events that come close together share one refresh, and each delay keeps its own. */
+function scheduleWaitingList(ms = WAITING_LIST_AFTER_EVENT_MS) {
+  waitingListAfter(ms);
 }
 
 /** The workspace's list, with only its own sessions, and what extensions put on it. */
-const queueText = (snap: Snapshot, workspace: string) => composeQueue(snap, workspace, host.queueEntries(), (s) => workspaceOf(s.cwd, s.repo));
+const waitingListText = (snap: Snapshot, workspace: string) => composeWaitingList(snap, workspace, host.waitingEntries(), (s) => workspaceOf(s.cwd, s.repo));
 
 /** Keep each workspace's "waiting on you" message current: edit it in place, or post and pin one when there is none. */
-function refreshQueue(snapshot?: Snapshot) {
-  queueRun = queueRun.then(async () => {
+function refreshWaitingList(snapshot?: Snapshot) {
+  waitingListRun = waitingListRun.then(async () => {
     try {
       const snap = snapshot ?? (await takeSnapshot());
-      const state = readJson<QueueState>(PATHS.queue, {});
+      const state = readJson<WaitingListState>(PATHS.waitingList, {});
       for (const [name, b] of bridges) {
-        state[name] = await showQueue(b, state[name], queueText(snap, name), (...a) => log(...a, name));
+        state[name] = await showWaitingList(b, state[name], waitingListText(snap, name), (...a) => log(...a, name));
       }
-      writeJson(PATHS.queue, state);
+      writeJson(PATHS.waitingList, state);
     } catch (e: any) {
-      log("queue error", e?.message ?? e);
+      log("waiting list error", e?.message ?? e);
     }
   });
-  return queueRun;
+  return waitingListRun;
 }
 
 // ---------- Start ----------
@@ -364,7 +364,7 @@ async function observe() {
     lastSnapshot = next;
     await emit(snapshotEvents(prev, next, viewWorkspace));
     if (prev) await host.emit("tick", { at: next.takenAt });
-    await refreshQueue(next);
+    await refreshWaitingList(next);
   } catch (e: any) {
     log("observe error", e?.message ?? e);
   } finally {
@@ -394,9 +394,9 @@ function newHost() {
     tell: (text, meta) => tell(meta.kind ?? "extension", text, meta),
     sessions: () => (lastSnapshot?.sessions ?? []).map((s) => sessionRef(s, viewWorkspace(s))),
     config,
-    queueChanged: () => scheduleQueue(1_000),
+    waitingListChanged: () => scheduleWaitingList(1_000),
     // Asked for by the user (`/queue`): as it is now, not as of the last look.
-    queueText: async (workspace) => queueText(await takeSnapshot(), workspace),
+    waitingListText: async (workspace) => waitingListText(await takeSnapshot(), workspace),
     log,
     stateDir: join(REMY_DIR, "state"),
   });
