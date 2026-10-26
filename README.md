@@ -96,16 +96,16 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | Piece | What it does |
 |---|---|
 | Plugin hooks (`Stop`, `Notification`, `SessionEnd`) | Every session appends its events to `~/.remy/events.jsonl` |
-| Plugin hook (`UserPromptSubmit`) | Names a session that has no name yet after a dish or ingredient (`src/kitchen-names.ts`), on its first prompt, and keeps that prompt in `~/.remy/nicknames.json` as what the session is about |
-| `remy status` | Joins `claude agents --json`, each session's git branch and `gh pr view` |
-| `src/queue.ts` | Ranks what waits on you from that snapshot; the daemon keeps it as one message per workspace (`~/.remy/queue.json`) |
-| `remy daemon` (`src/daemon.ts`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, posts the merged/ended notices itself (`src/notices.ts`), runs extensions and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
-| `src/extensions/` | The extension API (`api.ts`), the host that runs extensions in the daemon, and the built-in ones: closing merged agents, Slack-thread tasks, `/queue`, the factory |
-| `src/factory/` | The factory's pipelines: authoring helpers (`define.ts`, imported as `remy/factory`), the run state machine (`pipeline.ts`) and gh / Cloud Build / shell (`live.ts`) |
-| `remy` channel (`src/channel.ts`) | Runs inside the coordinator session only. A thin client of the daemon over `~/.remy/daemon.sock` (`src/link.ts`): pushes the daemon's events into the session and gives Claude `post` / `update` |
-| `src/bridges.ts` | Picks the Slack or Telegram bridge for each workspace; both implement `Messenger` (`src/messenger.ts`) |
-| `src/slack-bridge.ts` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in (`src/watch.ts`) |
-| `src/telegram-bridge.ts` | Telegram: your chat with your bot, read by long polling, with Slack-style formatting converted to Telegram's (`src/telegram-format.ts`) |
+| Plugin hook (`UserPromptSubmit`) | Names a session that has no name yet after a dish or ingredient (`src/sessions/kitchen-names.ts`), on its first prompt, and keeps that prompt in `~/.remy/nicknames.json` as what the session is about |
+| `remy status` (`src/sessions/`) | Joins `claude agents --json`, each session's git branch and `gh pr view` |
+| `src/sessions/waiting-list.ts` | Ranks what waits on you from that snapshot; the daemon keeps it as one message per workspace (`~/.remy/queue.json`) |
+| `remy daemon` (`src/daemon/`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, posts the merged/ended notices itself (`src/shared/notices.ts`), runs extensions and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
+| `src/sdk/` | What extensions and a repo's `.remy/factory.ts` import: the extension API (`extension.ts`) and the pipeline helpers (`factory.ts`, imported as `remy/factory`) |
+| `src/extension-host/` and `src/extensions/` | The host that runs extensions in the daemon, and the built-in ones: closing merged agents, Slack-thread tasks, `/queue`, and the factory (`src/extensions/factory/`: the run state machine, and gh / Cloud Build / shell) |
+| `remy` channel (`src/channel.ts`) | Runs inside the coordinator session only. A thin client of the daemon over `~/.remy/daemon.sock` (`src/link/`): pushes the daemon's events into the session and gives Claude `post` / `update` |
+| `src/messengers/` | The Slack or Telegram bridge for each workspace, or both; each implements `Messenger` (`messenger.ts`) |
+| `src/messengers/slack/` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in |
+| `src/messengers/telegram/` | Telegram: your chat with your bot, read by long polling, with Slack-style formatting converted to Telegram's |
 | `remy spawn` | `claude --bg -n <kitchen-name> -w <repo-and-task> --permission-mode auto "<task>"` in the chosen repo |
 | `coordinator.md` | The coordinator's instructions, appended to its system prompt |
 
@@ -322,11 +322,11 @@ A path covers the folder and everything inside it, not sibling folders that shar
 
 ## Extensions
 
-Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/builtin/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `queue` answers `/queue`, and `factory` runs [pipelines](#factory). Turn one off with `extensions.disabled` and write your own instead.
+Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `queue` answers `/queue`, and `factory` runs [pipelines](#factory). Turn one off with `extensions.disabled` and write your own instead.
 
 ```ts
 // ~/.remy/extensions/red-ci.ts
-import type { Remy } from "<remy plugin folder>/src/extensions/api";
+import type { Remy } from "<remy plugin folder>/src/sdk/extension";
 
 export default (remy: Remy) => {
   remy.on("pr.ci", async ({ session, pr }) => {
@@ -432,7 +432,9 @@ The factory runs only in repos listed in `extensions.repos`, and only on PRs of 
 
 ```sh
 bun install
-bun test && bun run typecheck
+bun run check   # types, lint and format, module boundaries, unused code, tests, and dist/ matching the source
 bun run build   # bundles src/channel.ts and src/cli.ts (which runs the daemon) into dist/, which is committed
 bun src/cli.ts status   # run the CLI from source
 ```
+
+Where code goes and which module may import which: [AGENTS.md](AGENTS.md).
