@@ -2,8 +2,9 @@
  * A task started from a Slack thread (a mention of the bot or the trigger emoji). The channel server writes it to
  * ~/.remy/tasks/<id>/task.json; `remy spawn --slack-task <id>` turns it into the agent's prompt.
  */
-import { PATHS, readJson } from "../../config/config";
 import type { SlackAttachment, SlackBlock, SlackMessage } from "./client";
+import { PATHS } from "../../shared/paths";
+import { readJson } from "../../shared/json-file";
 
 export type SlackTask = {
   id: string;

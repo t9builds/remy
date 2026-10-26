@@ -1,10 +1,11 @@
 /** The real world for pipeline.ts: gh for PRs and merges, Cloud Build or a shell command for deploys, the reports file. */
 import { appendFileSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { ensureDir, PATHS } from "../../config/config";
-import { ciOf } from "../../sessions/snapshot";
 import type { Environment } from "../../sdk/factory";
 import type { Build, PrDetail, Report } from "./pipeline";
+import { ensureDir } from "../../shared/json-file";
+import { PATHS } from "../../shared/paths";
+import { ciOf } from "../../shared/ci";
 
 /** `out` is stdout, which JSON is read from; `err` is stderr, where gh and gcloud say what went wrong. */
 async function run(cmd: string[], cwd?: string) {

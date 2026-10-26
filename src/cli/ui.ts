@@ -3,9 +3,9 @@
  * the coordinator, which runs `remy status` through Bash, reads plain text.
  */
 import pc from "picocolors";
-import type { MessengerKind } from "../config/config";
 import type { Check } from "../messengers/messenger";
-import type { Ci } from "../sessions/snapshot";
+import type { MessengerKind } from "../sdk/config";
+import type { Ci } from "../sdk/extension";
 
 export { pc };
 

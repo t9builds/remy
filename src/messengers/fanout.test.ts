@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import type { BothMode, MessengerKind } from "../config/config";
 import { decodeId, encodeId, Fanout } from "./fanout";
 import type { Messenger, PostOptions, Sink } from "./messenger";
+import type { BothMode, MessengerKind } from "../sdk/config";
 
 /** A messenger that records what it was asked to do and can play the user writing to it. */
 function fakeApp(kind: MessengerKind) {

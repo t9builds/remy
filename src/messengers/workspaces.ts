@@ -2,12 +2,13 @@
  * The one place that turns a workspace into a Messenger: its Slack bridge, its Telegram bridge, or a Fanout over
  * both. Everything else talks to a `Messenger`.
  */
-import { messengerLabel, messengersOf, readToken, type MessengerKind, type Workspace } from "../config/config";
+import { messengerLabel, messengersOf, readToken } from "../config/config";
 import { Fanout } from "./fanout";
 import { blocking, type Check, type Messenger, type Sink } from "./messenger";
 import { SlackBridge, slackChecks } from "./slack/bridge";
 import { Telegram } from "./telegram/client";
 import { TelegramBridge, telegramChecks } from "./telegram/bridge";
+import type { MessengerKind, Workspace } from "../sdk/config";
 
 type Opts = { triggerEmoji: string };
 

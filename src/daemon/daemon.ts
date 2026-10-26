@@ -14,23 +14,36 @@
  * coordinator is connected waits here until one is. Sessions are routed to a workspace by GitHub repo or folder
  * (see `workspaceFor`).
  */
-import { appendFileSync, openSync, readSync, closeSync, statSync, unlinkSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { describeMessengers, openWorkspaces, type Off } from "../messengers/workspaces";
-import { configStamp, ensureDir, loadConfig, PATHS, readJson, REMY_DIR, workspaceFor, writeJson, type Config } from "../config/config";
+import { configStamp, loadConfig, workspaceFor } from "../config/config";
 import type { EventName, Events, PostOptions, SessionRef } from "../sdk/extension";
 import { ExtensionHost } from "../extension-host/host";
 import { loadExtensions } from "../extension-host/load";
 import { hookEvents, sessionRef, snapshotEvents, type Emitted } from "./observe";
 import type { RemyEvent } from "../sessions/events";
-import { coordinatorTools, LinkServer, RESTART_EXIT, VERSION, type DaemonStatus, type LinkEvent, type Request } from "../link/link";
 import { closeAndRecord, closedAsMerged } from "../sessions/close";
 import type { Messenger, Sink } from "../messengers/messenger";
 import { formatNotice } from "../shared/notices";
-import { coalesce, formatQueue, queueOf, questionOf, showQueue, type QueueItem } from "../sessions/waiting-list";
+import { questionOf } from "../sessions/waiting-list";
 import { threadRef } from "../messengers/slack/bridge";
-import { githubRepoOf, listAgents, snapshotDiff, spawnedEntry, takeSnapshot, type SessionView, type Snapshot, type Spawned } from "../sessions/snapshot";
+import { takeSnapshot, type SessionView, type Snapshot } from "../sessions/snapshot";
 import { spawnAgent } from "../sessions/spawn";
+import { ensureDir, readJson, writeJson } from "../shared/json-file";
+import { PATHS, REMY_DIR } from "../shared/paths";
+import { VERSION } from "../shared/version";
+import type { Config } from "../sdk/config";
+import { githubRepoOf } from "../sessions/git";
+import { listAgents } from "../sessions/agents";
+import { spawnedEntry, type Spawned } from "../sessions/spawned";
+import { heldBefore, keepHeld } from "./held";
+import { tailLines } from "./tail";
+import { coalesce, composeQueue, showQueue } from "./waiting-list";
+import { snapshotDiff } from "../sessions/changes";
+import { coordinatorTools } from "../link/coordinator-tools";
+import { LinkServer } from "../link/server";
+import { RESTART_EXIT, type DaemonStatus, type LinkEvent, type Request } from "../link/protocol";
 
 const log = (...a: unknown[]) => {
   try {
@@ -230,34 +243,11 @@ async function onEvent(e: RemyEvent) {
 }
 
 function tailEvents() {
-  let offset = 0;
-  try {
-    offset = statSync(PATHS.events).size; // only events from now on
-  } catch {}
-  let partial = "";
-  setInterval(() => {
-    let size = 0;
+  tailLines(PATHS.events, (l) => {
     try {
-      size = statSync(PATHS.events).size;
-    } catch {
-      return;
-    }
-    if (size < offset) offset = 0; // rotated
-    if (size === offset) return;
-    const fd = openSync(PATHS.events, "r");
-    const buf = Buffer.alloc(size - offset);
-    readSync(fd, buf, 0, buf.length, offset);
-    closeSync(fd);
-    offset = size;
-    const lines = (partial + buf.toString("utf8")).split("\n");
-    partial = lines.pop() ?? "";
-    for (const l of lines) {
-      if (!l) continue;
-      try {
-        onEvent(JSON.parse(l)).catch((err) => log("event error", err));
-      } catch {}
-    }
-  }, 2_000);
+      onEvent(JSON.parse(l)).catch((err) => log("event error", err));
+    } catch {}
+  });
 }
 
 // ---------- Digest ----------
@@ -296,24 +286,7 @@ function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
 }
 
 /** The workspace's list, with only its own sessions, and what extensions put on it. */
-function queueText(snap: Snapshot, workspace: string) {
-  const sessions = snap.sessions.filter((s) => workspaceOf(s.cwd, s.repo) === workspace);
-  const entries = host.queueEntries();
-  // An extension's entry about a session replaces the session's own line.
-  const claimed = new Set(entries.flatMap((e) => (e.session ? [e.session] : [])));
-  const fromExtensions: QueueItem[] = entries.flatMap((e) => {
-    if (e.hide) return [];
-    const of = e.session ? sessions.find((s) => s.name === e.session) : undefined;
-    const where = e.workspace ?? (of ? workspace : undefined);
-    if (where && where !== workspace) return [];
-    return [{ session: e.label, sessionId: `extension:${e.key}`, cwd: "", rank: e.rank, why: e.why, action: e.action, pr: e.url }];
-  });
-  // Stable: within a rank, sessions first, then extensions' entries in the order they came. A session's own
-  // question stays even when an extension speaks for its PR.
-  const own = queueOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
-  const items = [...own, ...fromExtensions].sort((a, b) => a.rank - b.rank);
-  return formatQueue(items, sessions);
-}
+const queueText = (snap: Snapshot, workspace: string) => composeQueue(snap, workspace, host.queueEntries(), (s) => workspaceOf(s.cwd, s.repo));
 
 /** Keep each workspace's "waiting on you" message current: edit it in place, or post and pin one when there is none. */
 function refreshQueue(snapshot?: Snapshot) {
@@ -438,20 +411,6 @@ function shutdown(code: number) {
   if (link) keepHeld(link.heldEvents);
   log("stopped", link?.heldEvents.length ? `keeping ${link.heldEvents.length} held` : "");
   process.exit(code);
-}
-
-/** Events the previous daemon held when it stopped or crashed. */
-function heldBefore(): LinkEvent[] {
-  const held = readJson<LinkEvent[]>(PATHS.held, []);
-  return Array.isArray(held) ? held : [];
-}
-
-/** Kept on disk as it changes, so a crash or a kill doesn't lose what waits for the coordinator. */
-function keepHeld(events: readonly LinkEvent[]) {
-  try {
-    if (events.length) writeJson(PATHS.held, events);
-    else unlinkSync(PATHS.held);
-  } catch {}
 }
 
 /** Run the daemon in the foreground until it's stopped. */

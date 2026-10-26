@@ -4,8 +4,10 @@
  */
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { readJson, writeJson, type Config } from "../config/config";
 import type { Command, CommandContext, EventName, Events, Extension, PostOptions, QueueEntry, Remy, SessionRef } from "../sdk/extension";
+import { trustedRepos } from "../config/repos";
+import { readJson, writeJson } from "../shared/json-file";
+import type { Config } from "../sdk/config";
 
 export type HostDeps = {
   /** Post with the daemon's routing (session thread, session workspace). */
@@ -181,6 +183,7 @@ export class ExtensionHost {
         },
       },
       sessions: () => deps.sessions(),
+      trustedRepos: () => trustedRepos(deps.config).flatMap((r) => (r.root ? [{ repo: r.repo, root: r.root }] : [])),
       config: deps.config,
       log: (...a) => deps.log(`[${ext}]`, ...a),
     };

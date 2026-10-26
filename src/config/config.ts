@@ -1,97 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
-
-/**
- * The plugin's folder, the nearest one up with `.claude-plugin/plugin.json`: the bundle runs from dist/, the source
- * from src/ and below.
- */
-export const PLUGIN_ROOT = (() => {
-  for (let dir = import.meta.dir; dir !== dirname(dir); dir = dirname(dir)) if (existsSync(join(dir, ".claude-plugin", "plugin.json"))) return dir;
-  return resolve(import.meta.dir, "..");
-})();
-
-export const REMY_DIR = process.env.REMY_DIR ?? join(homedir(), ".remy");
-export const PATHS = {
-  config: join(REMY_DIR, "config.json"),
-  events: join(REMY_DIR, "events.jsonl"),
-  snapshot: join(REMY_DIR, "snapshot.json"),
-  /** Per workspace, the pinned "waiting on you" message: its id and what it says. */
-  queue: join(REMY_DIR, "queue.json"),
-  spawned: join(REMY_DIR, "spawned.json"),
-  nicknames: join(REMY_DIR, "nicknames.json"),
-  mcpConfig: join(REMY_DIR, "mcp.json"),
-  /** The daemon's log; the coordinator's channel writes here too. */
-  log: join(REMY_DIR, "daemon.log"),
-  /** Where the daemon listens for the coordinator's channel (link.ts). */
-  socket: join(REMY_DIR, "daemon.sock"),
-  /** Events held for the coordinator when the daemon stopped, delivered by the next daemon. */
-  held: join(REMY_DIR, "held.json"),
-  /** Verdicts factory agents report with `remy report`, and `remy factory retry` requests, one JSON line each. */
-  reports: join(REMY_DIR, "reports.jsonl"),
-  /** Where each PR stands in its factory pipeline; written only by the daemon's factory extension. */
-  factory: join(REMY_DIR, "state", "builtin_factory.json"),
-  /** One folder per Slack task: task.json plus files downloaded from the thread. */
-  taskDir: (id: string) => join(REMY_DIR, "tasks", id),
-  slackState: (workspace: string) => join(REMY_DIR, `slack-state.${workspace}.json`),
-  telegramState: (workspace: string) => join(REMY_DIR, `telegram-state.${workspace}.json`),
-  tokenFile: (workspace: string, kind: TokenKind) => join(REMY_DIR, `${kind}-token.${workspace}`),
-};
+import { join, resolve, sep } from "node:path";
+import { ensureDir, readJson, writeJson } from "../shared/json-file";
+import { PATHS } from "../shared/paths";
+import type { Config, MessengerKind, Workspace } from "../sdk/config";
 
 /** Slack bot token (xoxb-), Slack app-level token (xapp-), Telegram bot token. */
 export type TokenKind = "slack-bot" | "slack-app" | "telegram-bot";
-export type Transport = "poll" | "socket";
 
-/** Which sessions report to a workspace. */
-export type Routing = {
-  /** Short label, e.g. "work" or "personal". Names the keychain entries and state file. */
-  name: string;
-  /** GitHub repos whose sessions report here, as "owner/name"; `*` matches anything, e.g. "acme-corp/*". Follows a repo into its worktrees. */
-  repos?: string[];
-  /** Sessions whose folder is under one of these report here. */
-  paths?: string[];
-};
-
-export type MessengerKind = "slack" | "telegram";
 export const MESSENGERS: MessengerKind[] = ["slack", "telegram"];
 export const messengerLabel = (k: MessengerKind) => (k === "slack" ? "Slack" : "Telegram");
-
-export type SlackSettings = {
-  /** Your Slack member ID (U…) in this workspace. Only messages from this user reach the coordinator. */
-  userId: string;
-  /**
-   * How remy reads your DMs. "poll" works when teammates share the Slack app.
-   * "socket" (Socket Mode) is instant but only for an app nobody else runs remy with:
-   * Slack hands each event to any one open connection.
-   */
-  transport: Transport;
-  /** Default repo per Slack channel for tasks started from a thread, e.g. { "bugs": "api" }. Repo as for `remy spawn --repo`. */
-  channelRepos?: Record<string, string>;
-};
-
-/** Your private chat with your own Telegram bot. A bot serves one remy: Telegram hands its updates to a single reader. */
-export type TelegramSettings = {
-  /** Your Telegram user ID. Only messages from this user reach the coordinator; it is also the chat remy writes to. */
-  userId: number;
-};
-
-/**
- * With Slack and Telegram both connected:
- * - "mirror": everything goes to both, and what you write in one shows in the other.
- * - "pings": everything goes to `main`; the other gets only questions and permission prompts.
- * - "follow": messages go to whichever you last wrote from (`main` until you have).
- */
-export type BothMode = "mirror" | "pings" | "follow";
-
-/** Where remy talks to you about a set of sessions: Slack, Telegram, or both. */
-export type Workspace = Routing & {
-  slack?: SlackSettings;
-  telegram?: TelegramSettings;
-  /** How Slack and Telegram work together when both are set. Default "mirror". */
-  both?: BothMode;
-  /** The app that gets everything with "pings", and that "follow" starts with. Default "slack". */
-  main?: MessengerKind;
-};
 
 export const messengersOf = (ws: Workspace) => MESSENGERS.filter((k) => ws[k]);
 
@@ -102,47 +20,6 @@ function migrateWorkspace(w: any): Workspace {
   if (messenger === "telegram") return { ...routing, telegram: { userId: telegramUserId } };
   return { ...routing, slack: { userId: slackUserId ?? "", transport: transport ?? "poll", channelRepos } };
 }
-
-export type Config = {
-  workspaces: Workspace[];
-  /** Folders that hold your repos; `remy spawn --repo <name>` looks here. */
-  repoRoots: string[];
-  /** Prompt sent to a spawned agent. `{task}` is replaced with the task text. */
-  spawnTemplate: string;
-  /** Permission mode for spawned agents. */
-  spawnPermissionMode: string;
-  /** Create a git worktree for each spawned agent (`claude -w`). */
-  spawnWorktree: boolean;
-  /** Minutes between change digests. */
-  digestMinutes: number;
-  /** Session name of the coordinator itself. */
-  coordinatorName: string;
-  /**
-   * Context-window percentage (1–100) at which the coordinator compacts, passed as `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`.
-   * 0 keeps Claude Code's default; a value already set in the shell wins.
-   */
-  coordinatorCompactPct: number;
-  /** Reacting with this emoji (Slack name, no colons) to a message starts a task, like mentioning the bot. */
-  triggerEmoji: string;
-  /** Seconds between looks at the sessions and their PRs, which raise extension events; also the `tick` interval. */
-  tickSeconds: number;
-  /**
-   * The most you allow your own Remy to do with a change (ADR-0006): "notify", "verify", "merge", "deploy-dev" or
-   * "deploy-prod". A repo's factory.ts sets the most its team allows; the lower of the two applies.
-   */
-  autonomy: "notify" | "verify" | "merge" | "deploy-dev" | "deploy-prod";
-  /** Factory agents (verifiers, checks) running at once, on your subscription. */
-  maxFactoryAgents: number;
-  /** Extensions beyond your own in ~/.remy/extensions (extensions/load.ts). */
-  extensions?: {
-    /** Repos whose .remy/extensions run in your daemon: paths, or names under `repoRoots`. */
-    repos?: string[];
-    /** npm packages installed in ~/.remy. */
-    packages?: string[];
-    /** Extensions not to load, by name: a built-in ("merged-cleanup", "slack-tasks", "queue"), a file name, "<repo>/<file>" or a package. */
-    disabled?: string[];
-  };
-};
 
 export const DEFAULTS: Config = {
   workspaces: [],
@@ -169,26 +46,6 @@ export function compactPct(value: unknown): number | undefined {
 export function compactEnv(value: unknown, shell: Record<string, string | undefined> = process.env): Record<string, string> {
   const pct = compactPct(value);
   return pct && !shell.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE ? { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(pct) } : {};
-}
-
-export function ensureDir() {
-  if (!existsSync(REMY_DIR)) mkdirSync(REMY_DIR, { recursive: true, mode: 0o700 });
-}
-
-export function readJson<T>(path: string, fallback: T): T {
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-/** Write via a temp file so a reader never sees half a file. */
-export function writeJson(path: string, value: unknown, mode = 0o600) {
-  ensureDir();
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", { mode });
-  renameSync(tmp, path);
 }
 
 export function expandHome(p: string) {

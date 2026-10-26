@@ -8,11 +8,14 @@
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { PATHS, readJson, readToken, writeJson, type SlackSettings } from "../../config/config";
+import { readToken } from "../../config/config";
 import { AWAIT_ANSWER_MS, parseVerdict, permissionText, type Check, type Messenger, type PermissionRequest, type PostOptions, type Sink } from "../messenger";
 import { Slack, socketMode, type SlackMessage } from "./client";
 import { formatTranscript, requestText, taskEvent, taskId, type SlackTask } from "./task";
 import { ChannelWatcher, type Trigger, type WatchState } from "./watch";
+import { PATHS } from "../../shared/paths";
+import { readJson, writeJson } from "../../shared/json-file";
+import type { SlackSettings } from "../../sdk/config";
 
 /** A thread Remy follows, keyed by its root ts. `channel` is set for channel threads; DM threads leave it out. */
 type ThreadInfo = {

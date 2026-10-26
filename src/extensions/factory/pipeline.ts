@@ -8,7 +8,7 @@
  * Pure apart from `env`, so every path is tested with a fake world (pipeline.test.ts).
  */
 import { atLeast, levelOf, type AgentStep, type Environment, type Factory, type GateStep, type Level, type Step } from "../../sdk/factory";
-import type { Ci } from "../../sessions/snapshot";
+import type { Ci } from "../../sdk/extension";
 
 /** What an agent reported with `remy report`, or the user's `remy factory retry`. */
 export type Report = {

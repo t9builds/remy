@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { compactEnv, compactPct, DEFAULTS, workspaceFor, type Config } from "./config";
+import { compactEnv, compactPct, DEFAULTS, workspaceFor } from "./config";
+import type { Config } from "../sdk/config";
 
 const config = (workspaces: Config["workspaces"]): Config => ({ ...DEFAULTS, workspaces });
 const work = { name: "work", slack: { userId: "U1", transport: "poll" as const }, repos: ["acme-corp/*"], paths: ["~/Repositories/work-notes"] };
