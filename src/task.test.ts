@@ -52,3 +52,46 @@ test("the agent prompt frames the thread as information and carries the request"
   expect(p).toContain("longer than shown");
   expect(p).not.toContain("Attachments");
 });
+
+test("transcript shows what apps post in cards and unfurls, under the app's name", () => {
+  const out = formatTranscript(
+    [
+      {
+        ts: "1700000000.000100",
+        user: "UAPP",
+        bot_id: "BAPP",
+        bot_profile: { name: "Tracker" },
+        text: "Alex created <https://tracker.dev/issue/ACME-12|ACME-12> Turn off reminder pings",
+        attachments: [{ from_url: "https://tracker.dev/issue/ACME-12" }],
+      },
+      {
+        ts: "1700000060.000100",
+        user: "UAPP",
+        bot_id: "BAPP",
+        bot_profile: { name: "Tracker" },
+        text: "",
+        attachments: [
+          {
+            fallback: "ACME-12 has been accepted from triage",
+            blocks: [{ type: "section", text: { text: "<https://tracker.dev/issue/ACME-12|ACME-12 Turn off reminder pings> has been accepted from triage" } }],
+          },
+        ],
+      },
+      { ts: "1700000120.000100", bot_id: "BHOOK", username: "Alerts", text: "", attachments: [{ fallback: "Build failed on main" }] },
+      {
+        ts: "1700000180.000100",
+        user: "UAPP",
+        bot_id: "BAPP",
+        text: "",
+        blocks: [{ type: "header", text: { text: "Deploy" } }, { type: "context", elements: [{ text: "api" }, { text: "v2" }] }],
+        attachments: [{ title: "Run 7", title_link: "https://ci.dev/7", text: "passed", fields: [{ title: "Env", value: "dev" }] }],
+      },
+    ],
+    names,
+    { triggerTs: "x", triggerNote: "" },
+  );
+  expect(out).toContain("Tracker: Alex created ACME-12 (https://tracker.dev/issue/ACME-12) Turn off reminder pings\n[");
+  expect(out).toContain("Tracker: > ACME-12 Turn off reminder pings (https://tracker.dev/issue/ACME-12) has been accepted from triage");
+  expect(out).toContain("Alerts: > Build failed on main");
+  expect(out).toContain("UAPP: Deploy\n    api v2\n    > Run 7 (https://ci.dev/7)\n    > passed\n    > Env: dev");
+});

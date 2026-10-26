@@ -1,3 +1,14 @@
+/**
+ * Web API arguments as a form. Every method accepts a form, but some (conversations.replies among them) reject
+ * a JSON body with invalid_arguments. Undefined values are left out; objects are sent as JSON strings.
+ */
+export function formBody(params: Record<string, unknown>) {
+  const form = new URLSearchParams();
+  for (const [k, v] of Object.entries(params))
+    if (v !== undefined && v !== null) form.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
+  return form;
+}
+
 /** Minimal Slack Web API client over fetch. Retries once on 429 using Retry-After. */
 export class Slack {
   constructor(private token: string) {}
@@ -5,8 +16,8 @@ export class Slack {
   async call<T = any>(method: string, params: Record<string, unknown> = {}, isRetry = false): Promise<T> {
     const res = await fetch(`https://slack.com/api/${method}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${this.token}`, "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify(params),
+      headers: { Authorization: `Bearer ${this.token}` },
+      body: formBody(params),
     });
     if (res.status === 429 && !isRetry) {
       const wait = Number(res.headers.get("retry-after") ?? "5");
@@ -176,6 +187,26 @@ export type SlackMessage = {
   latest_reply?: string;
   reactions?: { name: string; users?: string[] }[];
   files?: { name?: string; mimetype?: string; size?: number; url_private_download?: string }[];
+  /** Apps: the app's name. */
+  bot_profile?: { name?: string };
+  username?: string;
+  blocks?: SlackBlock[];
+  attachments?: SlackAttachment[];
+};
+
+/** The parts of Block Kit blocks that carry text. */
+export type SlackBlock = { type: string; text?: { text?: string }; fields?: { text?: string }[]; elements?: { text?: string | { text?: string } }[] };
+
+/** A legacy attachment or a link unfurl, as apps such as issue trackers post them. */
+export type SlackAttachment = {
+  fallback?: string;
+  pretext?: string;
+  title?: string;
+  title_link?: string;
+  text?: string;
+  fields?: { title?: string; value?: string }[];
+  blocks?: SlackBlock[];
+  from_url?: string;
 };
 
 export class SlackError extends Error {
