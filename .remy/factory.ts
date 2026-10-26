@@ -10,7 +10,7 @@ export default defineFactory({
     agent("verify", {
       skill: "/remy:verify",
       instructions:
-        "Run the checkout's code with REMY_DIR=<fresh temporary folder> on each command (e.g. REMY_DIR=<folder> bun src/cli.ts ...), never exported and never against ~/.remy or the running daemon, and don't post to real Slack or Telegram. Run `remy report` without it, or the daemon never sees your verdict.",
+        "Run `bun install` first. Run the checkout's code with REMY_DIR=<fresh temporary folder> on each command (e.g. REMY_DIR=<folder> bun src/cli.ts ...), never exported and never against ~/.remy or the running daemon, and don't post to real Slack or Telegram. Run `remy report` without it, or the daemon never sees your verdict.",
     }),
     // CI green and every verdict on the current head. Size and paths are the reviewers' call: a person is asked
     // only for what is critical (ADR-0009).

@@ -2,6 +2,8 @@
 status: accepted
 ---
 
+> Which calls go to a person is narrowed by [ADR-0009](0009-agents-decide-people-only-for-critical.md).
+
 # A verifier runs parallel reviewers and hands their findings to a fixer, within one step
 
 [ADR-0005](0005-agents-verify-humans-judge.md) says the verification that replaces human review has to be stronger than a skim of the diff. One agent reading a diff once is that skim: it checks what it thinks of first, and stops when it's satisfied.
@@ -9,8 +11,8 @@ status: accepted
 The default `/remy:review` therefore splits the work inside the one `review` step:
 
 1. **Reviewers.** Three subagents read the PR in parallel, each through one lens: correctness, design, proof. They only report findings, each with a location and evidence.
-2. **Judgment.** The verifier traces every finding against the code and puts it in one bucket: fix, person, or dismissed. Nits are dismissed, so rounds converge.
-3. **Fixer.** A separate subagent fixes everything in "fix", at its root, with a test for each correctness fix. The verifier checks its diff and pushes.
+2. **Judgment.** The verifier traces every finding against the code and puts it in one bucket: fix, decided, person, or dismissed. Nits are dismissed, so rounds converge.
+3. **Fixer.** A separate subagent fixes everything in "fix" and the decided calls that change code, at its root, with a test for each correctness fix. The verifier checks its diff and pushes.
 4. **Record.** The verifier posts the findings and their outcomes on the PR, and reports `pass`, `fixed` or `fail`.
 
 With `repeat: "until-clean"`, a `fixed` sends the PR to a fresh verifier, so fixes are reviewed by agents that didn't make them. A change gets through on its own once a round finds nothing to fix and nothing for a person.

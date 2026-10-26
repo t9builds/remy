@@ -60,12 +60,20 @@ A verifier's subagent that looks for problems in a change through one lens (corr
 _Avoid_: verifier, critic
 
 **Finding**:
-A problem a reviewer reports, with where it is and the evidence; the verifier sorts each one into fix, person or dismissed.
+A problem a reviewer reports, with where it is and the evidence; the verifier sorts each one into fix, decided, person or dismissed.
 _Avoid_: issue, comment
 
 **Fixer**:
 The agent a verifier hands its confirmed findings to; it fixes them and commits, and the verifier pushes.
 _Avoid_: author
+
+**Verification skill**:
+A skill a repo owns (`.claude/skills/verify-<app>/`) that launches the app in isolation, drives it the way a user does and captures evidence; the proof reviewer and `/remy:verify` follow it.
+_Avoid_: test script, e2e suite
+
+**Feature map**:
+The folder `features/` inside a verification skill: an index and one file per user-facing feature, saying how to reach it, how to drive it and what end state proves it works.
+_Avoid_: test plan, coverage list
 
 **Release check**:
 An agent step that decides whether a verified change goes to production on its own or waits for a person.

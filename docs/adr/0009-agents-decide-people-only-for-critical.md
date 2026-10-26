@@ -25,4 +25,5 @@ Every other call (policy, design, scope, taste) the verifier makes itself, takin
 
 - Runs end on their own far more often; the waiting list holds only what is critical.
 - Mistakes in non-critical calls reach the default branch, visible in the PR's record. The safety net is the record and the next PR, not a gate.
+- Runs still stop on what code sees, not on a judgment: red CI, a failed verification, and a review still fixing after its `maxRounds`.
 - What counts as critical lives in the review skill's judgment (`skills/review/references/judgment.md`) and the release check, not in code: it is a judgment, and teams with other limits bring their own skills or add gates.
