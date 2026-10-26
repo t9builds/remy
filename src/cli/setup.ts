@@ -6,7 +6,7 @@
 import * as p from "@clack/prompts";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, } from "node:path";
 import { createMessenger, describeMessengers, quietSink } from "../messengers/workspaces";
 import { expandHome, loadConfig, messengerLabel, messengersOf, readToken, saveConfig, storeToken, TOKEN_FORMAT, type TokenKind } from "../config/config";
 import { doctor } from "./doctor";
@@ -148,7 +148,7 @@ async function setupWorkspace(c: Config, name: string) {
   const together = kinds.length > 1 ? await askBoth(existing) : {};
   const routing = await askRouting(c, name, existing);
   const ws: Workspace = { ...routing, ...together };
-  if (kinds.includes("slack")) ws.slack = await setupSlack(c, name, existing?.slack);
+  if (kinds.includes("slack")) ws.slack = await setupSlack(name, existing?.slack);
   if (kinds.includes("telegram")) ws.telegram = await setupTelegram(name, existing?.telegram);
   c.workspaces = existing ? c.workspaces.map((w) => (w === existing ? ws : w)) : [...c.workspaces, ws];
   saveConfig(c);
@@ -237,7 +237,7 @@ const SLACK_APP_STEPS = [
   `3. Reinstall the app and copy the ${pc.bold("Bot User OAuth Token")} (xoxb-…)`,
 ].join("\n");
 
-async function setupSlack(c: Config, name: string, existing?: SlackSettings): Promise<SlackSettings> {
+async function setupSlack(name: string, existing?: SlackSettings): Promise<SlackSettings> {
   p.log.step("Slack");
   const userId = await answer(
     p.text({
@@ -324,7 +324,7 @@ async function pairTelegram(tg: Telegram, username: string, workspace: string): 
   let offset: number | undefined;
   const until = Date.now() + 180_000;
   while (Date.now() < until) {
-    let updates;
+    let updates: Awaited<ReturnType<typeof tg.getUpdates>>;
     try {
       updates = await tg.getUpdates(offset, 20);
     } catch (e) {

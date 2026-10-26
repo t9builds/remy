@@ -77,6 +77,7 @@ async function daemonWithin(ms: number, ok: (s: DaemonStatus) => boolean = () =>
     const s = await daemonStatus();
     if (s && ok(s)) return s;
   }
+  return undefined;
 }
 
 /**

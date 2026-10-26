@@ -14,10 +14,10 @@ import { REMY_DIR } from "../shared/paths";
 import type { Config } from "../sdk/config";
 import { trustedRepos } from "../config/repos";
 
-export const USER_EXTENSIONS = join(REMY_DIR, "extensions");
+const USER_EXTENSIONS = join(REMY_DIR, "extensions");
 
 /** The extension folders of the trusted repos, by repo name. */
-export const repoExtensionDirs = (config: Config) => trustedRepos(config).map((r) => ({ ...r, dir: r.root && join(r.root, ".remy", "extensions") }));
+const repoExtensionDirs = (config: Config) => trustedRepos(config).map((r) => ({ ...r, dir: r.root && join(r.root, ".remy", "extensions") }));
 
 export async function loadExtensions(host: ExtensionHost, config: Config, { builtins = BUILTINS, userDir = USER_EXTENSIONS } = {}) {
   const disabled = new Set(config.extensions?.disabled ?? []);

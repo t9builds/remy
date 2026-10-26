@@ -40,7 +40,7 @@ export async function mergePr(url: string, head: string, method: string) {
 const RUNNING = new Set(["QUEUED", "PENDING", "WORKING", "STATUS_UNKNOWN"]);
 
 /** The Cloud Build state of a commit: any success wins, then one still running, then the newest failure. */
-export function buildOf(builds: { id: string; status: string; createTime?: string }[]): Build {
+function buildOf(builds: { id: string; status: string; createTime?: string }[]): Build {
   const ok = builds.find((b) => b.status === "SUCCESS");
   if (ok) return { status: "success", id: ok.id };
   const running = builds.find((b) => RUNNING.has(b.status));
@@ -106,7 +106,7 @@ export function readReports(): Report[] {
 
 export function appendReport(r: Omit<Report, "at">) {
   ensureDir();
-  appendFileSync(PATHS.reports, JSON.stringify({ ...r, at: Date.now() }) + "\n", { mode: 0o600 });
+  appendFileSync(PATHS.reports, `${JSON.stringify({ ...r, at: Date.now() })}\n`, { mode: 0o600 });
 }
 
 /** The PR's head commit now, which a report covers. */

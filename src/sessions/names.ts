@@ -35,7 +35,7 @@ export function pickNickname(taken: Set<string>, random = Math.random): string {
 export function aboutOf(text: string | undefined, max = 160): string | undefined {
   const line = text?.replace(/\s+/g, " ").trim();
   if (!line) return undefined;
-  return line.length > max ? line.slice(0, max) + "…" : line;
+  return line.length > max ? `${line.slice(0, max)}…` : line;
 }
 
 /**

@@ -92,7 +92,7 @@ function attachmentText(a: SlackAttachment) {
  * What a message says. Apps often leave `text` empty and post blocks or attachments (an issue tracker's card,
  * a link unfurl), so those are added as quoted lines.
  */
-export function messageText(m: SlackMessage) {
+function messageText(m: SlackMessage) {
   const head = m.text || blockText(m.blocks).join("\n");
   const lines = [head];
   for (const a of m.attachments ?? [])

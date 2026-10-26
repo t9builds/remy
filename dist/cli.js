@@ -238,7 +238,7 @@ function readJson(path, fallback) {
 function writeJson(path, value, mode = 384) {
   ensureDir();
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2) + `
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}
 `, { mode });
   renameSync(tmp, path);
 }
@@ -301,7 +301,7 @@ function saveConfig(config) {
 }
 var isCatchAll = (w) => !w.repos?.length && !w.paths?.length;
 function globMatch(pattern, value) {
-  const re = new RegExp("^" + pattern.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "i");
+  const re = new RegExp(`^${pattern.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i");
   return re.test(value);
 }
 function workspaceFor(where, config) {
@@ -357,7 +357,7 @@ function storeToken(workspace, kind, token) {
       throw new Error(`Saving the ${kind} token to the keychain failed: ${r.stderr.toString().trim()}`);
     return;
   }
-  writeFileSync2(PATHS.tokenFile(workspace, kind), token + `
+  writeFileSync2(PATHS.tokenFile(workspace, kind), `${token}
 `, { mode: 384 });
 }
 
@@ -486,7 +486,7 @@ function parseVerdict(text) {
   return v ? { requestId: v[2].toLowerCase(), behavior: v[1].toLowerCase().startsWith("y") ? "allow" : "deny" } : undefined;
 }
 function permissionText(p) {
-  const preview = p.input_preview.length > 1500 ? p.input_preview.slice(0, 1500) + "\u2026" : p.input_preview;
+  const preview = p.input_preview.length > 1500 ? `${p.input_preview.slice(0, 1500)}\u2026` : p.input_preview;
   return `\uD83D\uDD12 *remy wants to run ${p.tool_name}*: ${p.description}
 \`\`\`${preview}\`\`\``;
 }
@@ -610,7 +610,8 @@ function socketMode(appToken, onMessage, log) {
       url = (await api.call("apps.connections.open")).url;
     } catch (e) {
       log("socket open failed", e?.message ?? e);
-      setTimeout(connect, backoff = Math.min(backoff * 2, 60000));
+      backoff = Math.min(backoff * 2, 60000);
+      setTimeout(connect, backoff);
       return;
     }
     const ws = new WebSocket(url);
@@ -1205,7 +1206,8 @@ function splitText(text, max = 3500) {
     rest = rest.slice(at).replace(/^\n/, "");
     if (fences(part) % 2) {
       part += "\n```";
-      rest = "```\n" + rest;
+      rest = `\`\`\`
+${rest}`;
     }
     parts.push(part);
   }
@@ -1799,8 +1801,10 @@ function validate(f) {
   const names = new Set;
   f.steps.forEach((s, i) => {
     const at = `step ${i + 1} (${s?.kind} ${s?.name})`;
-    if (!["agent", "wait", "gate", "action"].includes(s?.kind))
-      return errors.push(`${at}: unknown kind`);
+    if (!["agent", "wait", "gate", "action"].includes(s?.kind)) {
+      errors.push(`${at}: unknown kind`);
+      return;
+    }
     if (s.kind === "agent") {
       if (!s.skill)
         errors.push(`${at}: needs a skill`);
@@ -1965,7 +1969,7 @@ function readReports() {
 }
 function appendReport(r) {
   ensureDir();
-  appendFileSync(PATHS.reports, JSON.stringify({ ...r, at: Date.now() }) + `
+  appendFileSync(PATHS.reports, `${JSON.stringify({ ...r, at: Date.now() })}
 `, { mode: 384 });
 }
 async function headOf(url) {
@@ -2046,7 +2050,10 @@ function agentPrompt(run, step, f) {
 function enter(run, stage, now, reason) {
   Object.assign(run, { stage, since: now, reason });
 }
-var hold = (run, now, reason) => (enter(run, "held", now, reason), false);
+var hold = (run, now, reason) => {
+  enter(run, "held", now, reason);
+  return false;
+};
 var approval = (run) => `${run.step}@${run.head}`;
 function next(run, now, to = run.step + 1) {
   Object.assign(run, { step: to, round: 1, stage: "running", since: now, stepSince: now, reason: undefined, agent: undefined, ask: undefined });
@@ -2780,7 +2787,7 @@ function aboutOf(text, max = 160) {
   const line = text?.replace(/\s+/g, " ").trim();
   if (!line)
     return;
-  return line.length > max ? line.slice(0, max) + "\u2026" : line;
+  return line.length > max ? `${line.slice(0, max)}\u2026` : line;
 }
 async function nameSession(input, live) {
   if (!input.session_id || input.session_title || input.agent_id)
@@ -2978,7 +2985,7 @@ var MAX_BYTES = 5 * 1024 * 1024;
 var KEEP_LINES = 2000;
 function appendEvent(ev) {
   ensureDir();
-  appendFileSync2(PATHS.events, JSON.stringify(ev) + `
+  appendFileSync2(PATHS.events, `${JSON.stringify(ev)}
 `, { mode: 384 });
   rotate();
 }
@@ -2988,8 +2995,8 @@ function rotate() {
       return;
     const lines = readFileSync4(PATHS.events, "utf8").trimEnd().split(`
 `);
-    writeFileSync3(PATHS.events, lines.slice(-KEEP_LINES).join(`
-`) + `
+    writeFileSync3(PATHS.events, `${lines.slice(-KEEP_LINES).join(`
+`)}
 `, { mode: 384 });
   } catch {}
 }
@@ -3186,17 +3193,17 @@ function keepHeld(events) {
 }
 
 // src/daemon/tail.ts
-import { closeSync, openSync, readSync, statSync as statSync8 } from "fs";
+import { closeSync, openSync, readSync, statSync as statSync7 } from "fs";
 function tailLines(path, onLine, everyMs = 2000) {
   let offset = 0;
   try {
-    offset = statSync8(path).size;
+    offset = statSync7(path).size;
   } catch {}
   let partial = "";
   return setInterval(() => {
     let size = 0;
     try {
-      size = statSync8(path).size;
+      size = statSync7(path).size;
     } catch {
       return;
     }
@@ -3413,7 +3420,7 @@ function readLines(socket, onMessage) {
 }
 var send = (socket, m) => {
   if (!socket.destroyed)
-    socket.write(JSON.stringify(m) + `
+    socket.write(`${JSON.stringify(m)}
 `);
 };
 
@@ -3421,7 +3428,10 @@ var send = (socket, m) => {
 function answers(path, timeoutMs = 1000) {
   return new Promise((resolve) => {
     const s = createConnection(path);
-    const done = (ok) => (s.destroy(), resolve(ok));
+    const done = (ok) => {
+      s.destroy();
+      resolve(ok);
+    };
     s.setTimeout(timeoutMs, () => done(false));
     s.on("connect", () => done(true));
     s.on("error", () => done(false));
@@ -3506,7 +3516,7 @@ class LinkServer {
       return;
     if (this.coordinator && this.coordinator !== socket) {
       this.handlers.log("link: a newer coordinator connected; closing the old one");
-      this.coordinator.end(JSON.stringify({ type: "replaced" }) + `
+      this.coordinator.end(`${JSON.stringify({ type: "replaced" })}
 `);
     }
     this.coordinator = socket;
@@ -3985,7 +3995,10 @@ class LinkClient {
         this.pending.delete(id);
         reject(new Error(`the remy daemon didn't answer within ${timeoutMs / 1000} s`));
       }, timeoutMs);
-      const settle = (fn) => (clearTimeout(timer), fn());
+      const settle = (fn) => {
+        clearTimeout(timer);
+        fn();
+      };
       this.pending.set(id, { resolve: (v) => settle(() => resolve(v)), reject: (e) => settle(() => reject(e)) });
       send(s, { type: "request", id, request, args });
     });
@@ -4229,6 +4242,7 @@ async function daemonWithin(ms, ok = () => true) {
     if (s && ok(s))
       return s;
   }
+  return;
 }
 async function ensureDaemon(cwd) {
   const running = await daemonStatus();
@@ -4319,7 +4333,7 @@ async function runHook() {
 function trim(s, n) {
   if (typeof s !== "string" || !s)
     return;
-  return s.length > n ? s.slice(0, n) + "\u2026" : s;
+  return s.length > n ? `${s.slice(0, n)}\u2026` : s;
 }
 
 // node_modules/@clack/core/dist/index.mjs
@@ -5786,7 +5800,7 @@ async function setupWorkspace(c, name) {
   const routing = await askRouting(c, name, existing);
   const ws = { ...routing, ...together };
   if (kinds.includes("slack"))
-    ws.slack = await setupSlack(c, name, existing?.slack);
+    ws.slack = await setupSlack(name, existing?.slack);
   if (kinds.includes("telegram"))
     ws.telegram = await setupTelegram(name, existing?.telegram);
   c.workspaces = existing ? c.workspaces.map((w) => w === existing ? ws : w) : [...c.workspaces, ws];
@@ -5859,7 +5873,7 @@ var SLACK_APP_STEPS = [
   `3. Reinstall the app and copy the ${import_picocolors.default.bold("Bot User OAuth Token")} (xoxb-\u2026)`
 ].join(`
 `);
-async function setupSlack(c, name, existing) {
+async function setupSlack(name, existing) {
   log2.step("Slack");
   const userId = await answer(text({
     message: `Your Slack member ID ${import_picocolors.default.dim("(profile \u2192 \u22EE \u2192 Copy member ID)")}`,

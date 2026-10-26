@@ -41,5 +41,5 @@ export async function runHook() {
 
 function trim(s: unknown, n: number): string | undefined {
   if (typeof s !== "string" || !s) return undefined;
-  return s.length > n ? s.slice(0, n) + "…" : s;
+  return s.length > n ? `${s.slice(0, n)}…` : s;
 }

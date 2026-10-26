@@ -14,7 +14,7 @@ test("snake_case, globs and lone stars stay as they are", () => {
 
 test("long text splits at line breaks", () => {
   const parts = splitText(["a".repeat(30), "b".repeat(30), "c".repeat(30)].join("\n"), 70);
-  expect(parts).toEqual(["a".repeat(30) + "\n" + "b".repeat(30), "c".repeat(30)]);
+  expect(parts).toEqual([`${"a".repeat(30)}\n${"b".repeat(30)}`, "c".repeat(30)]);
 });
 
 test("a code block cut in two is closed and reopened, so both parts render", () => {

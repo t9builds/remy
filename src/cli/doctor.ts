@@ -14,7 +14,7 @@ function sh(cmd: string[]) {
 }
 
 /** The daemon's row: running, of this version and with the current config. Not running only warns: `remy start` starts it. */
-export function daemonCheck(s: DaemonStatus | undefined): CheckRow {
+function daemonCheck(s: DaemonStatus | undefined): CheckRow {
   if (!s) return { label: "remy daemon running", ok: false, optional: true, hint: "`remy start` starts it, or run it as a service (README → Run the daemon as a service)" };
   const label = `remy daemon ${s.version} running (pid ${s.pid}${s.coordinator ? ", coordinator connected" : s.held ? `, ${s.held} held for the coordinator` : ""})`;
   const why = s.version !== VERSION ? `remy ${VERSION} is installed` : s.config !== configStamp() ? "the config changed since it started" : "";

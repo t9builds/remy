@@ -63,6 +63,6 @@ export function parseVerdict(text: string): { requestId: string; behavior: "allo
 
 /** The permission request, in mrkdwn like every message. */
 export function permissionText(p: PermissionRequest) {
-  const preview = p.input_preview.length > 1500 ? p.input_preview.slice(0, 1500) + "…" : p.input_preview;
+  const preview = p.input_preview.length > 1500 ? `${p.input_preview.slice(0, 1500)}…` : p.input_preview;
   return `🔒 *remy wants to run ${p.tool_name}*: ${p.description}\n\`\`\`${preview}\`\`\``;
 }

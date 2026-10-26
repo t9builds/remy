@@ -12,7 +12,7 @@ const runSync: Run = (cmd) => {
  * Close a session: `claude rm` deletes it and its worktree; when that refuses (uncommitted or unpushed work),
  * `claude stop` ends it and the worktree stays. Returns what happened.
  */
-export function closeSession(id: string, run: Run = runSync): string {
+function closeSession(id: string, run: Run = runSync): string {
   const rm = run(["claude", "rm", id]);
   return rm.ok ? "session and worktree removed" : run(["claude", "stop", id]).ok ? `stopped; worktree kept (${rm.out})` : `not removed (${rm.out})`;
 }

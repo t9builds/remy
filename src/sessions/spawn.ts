@@ -1,5 +1,5 @@
-import { existsSync, statSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { existsSync, } from "node:fs";
+import { basename, join, } from "node:path";
 import { loadConfig } from "../config/config";
 import { resolveRepo } from "../config/repos";
 import { pickNickname, takenNames, type Nicknames } from "./names";

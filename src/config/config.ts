@@ -8,7 +8,7 @@ import type { Config, MessengerKind, Workspace } from "../sdk/config";
 /** Slack bot token (xoxb-), Slack app-level token (xapp-), Telegram bot token. */
 export type TokenKind = "slack-bot" | "slack-app" | "telegram-bot";
 
-export const MESSENGERS: MessengerKind[] = ["slack", "telegram"];
+const MESSENGERS: MessengerKind[] = ["slack", "telegram"];
 export const messengerLabel = (k: MessengerKind) => (k === "slack" ? "Slack" : "Telegram");
 
 export const messengersOf = (ws: Workspace) => MESSENGERS.filter((k) => ws[k]);
@@ -78,7 +78,7 @@ export function saveConfig(config: Config) {
 const isCatchAll = (w: Workspace) => !w.repos?.length && !w.paths?.length;
 
 function globMatch(pattern: string, value: string) {
-  const re = new RegExp("^" + pattern.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "i");
+  const re = new RegExp(`^${pattern.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i");
   return re.test(value);
 }
 
@@ -139,5 +139,5 @@ export function storeToken(workspace: string, kind: TokenKind, token: string) {
     if (r.exitCode !== 0 || saved !== token) throw new Error(`Saving the ${kind} token to the keychain failed: ${r.stderr.toString().trim()}`);
     return;
   }
-  writeFileSync(PATHS.tokenFile(workspace, kind), token + "\n", { mode: 0o600 });
+  writeFileSync(PATHS.tokenFile(workspace, kind), `${token}\n`, { mode: 0o600 });
 }

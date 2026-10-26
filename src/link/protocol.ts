@@ -67,5 +67,5 @@ export function readLines(socket: Socket, onMessage: (m: any) => void) {
 }
 
 export const send = (socket: Socket, m: ToDaemon | ToClient) => {
-  if (!socket.destroyed) socket.write(JSON.stringify(m) + "\n");
+  if (!socket.destroyed) socket.write(`${JSON.stringify(m)}\n`);
 };

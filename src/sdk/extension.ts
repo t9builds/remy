@@ -117,6 +117,7 @@ export type CommandContext = { workspace: string; session?: string; thread?: str
 export type Command = {
   description: string;
   /** What to answer; nothing posts nothing. */
+  // biome-ignore lint/suspicious/noConfusingVoidType: a command that answers nothing may return nothing.
   run(args: string, ctx: CommandContext): Promise<string | void> | string | void;
 };
 

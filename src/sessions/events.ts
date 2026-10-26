@@ -24,7 +24,7 @@ const KEEP_LINES = 2000;
 /** Add an event to the file, which is cut back to its newest lines once it grows past `MAX_BYTES`. */
 export function appendEvent(ev: RemyEvent) {
   ensureDir();
-  appendFileSync(PATHS.events, JSON.stringify(ev) + "\n", { mode: 0o600 });
+  appendFileSync(PATHS.events, `${JSON.stringify(ev)}\n`, { mode: 0o600 });
   rotate();
 }
 
@@ -32,7 +32,7 @@ function rotate() {
   try {
     if (statSync(PATHS.events).size < MAX_BYTES) return;
     const lines = readFileSync(PATHS.events, "utf8").trimEnd().split("\n");
-    writeFileSync(PATHS.events, lines.slice(-KEEP_LINES).join("\n") + "\n", { mode: 0o600 });
+    writeFileSync(PATHS.events, `${lines.slice(-KEEP_LINES).join("\n")}\n`, { mode: 0o600 });
   } catch {}
 }
 
