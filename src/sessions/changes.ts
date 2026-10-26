@@ -4,7 +4,15 @@ import { PATHS } from "../shared/paths";
 import { prLabel } from "./format";
 import { type SessionView, type Snapshot, takeSnapshot } from "./snapshot";
 
-export type Change = { session: string; sessionId: string; cwd: string; repo?: string; what: string; detail: string; pr?: string };
+export type Change = {
+  session: string;
+  sessionId: string;
+  cwd: string;
+  repo?: string;
+  what: string;
+  detail: string;
+  pr?: string;
+};
 
 export function diff(prev: Snapshot | undefined, next: Snapshot): Change[] {
   if (!prev) return [];
@@ -23,14 +31,16 @@ export function diff(prev: Snapshot | undefined, next: Snapshot): Change[] {
     if (p.status !== s.status) add(s, "status", `${p.status} → ${s.status}`);
     if (!p.pr && s.pr) add(s, "pr_opened", prLabel(s.pr));
     else if (p.pr && s.pr) {
-      if (p.pr.state !== s.pr.state || p.pr.draft !== s.pr.draft) add(s, "pr_state", `${prLabel(p.pr)} → ${prLabel(s.pr)}`);
+      if (p.pr.state !== s.pr.state || p.pr.draft !== s.pr.draft)
+        add(s, "pr_state", `${prLabel(p.pr)} → ${prLabel(s.pr)}`);
       if (p.pr.ci !== s.pr.ci && s.pr.ci !== "pending")
         add(s, "ci", `CI ${s.pr.ci}${s.pr.failing.length ? `: ${s.pr.failing.join(", ")}` : ""}`);
       if (p.pr.review !== s.pr.review && s.pr.review) add(s, "review", s.pr.review.toLowerCase().replace(/_/g, " "));
     }
   }
   // Factory agents end when the factory closes them after their report: not news.
-  for (const p of prev.sessions) if (!after.has(p.sessionId) && !p.role) add(p, "ended", p.pr ? `last PR ${prLabel(p.pr)}` : "session closed");
+  for (const p of prev.sessions)
+    if (!after.has(p.sessionId) && !p.role) add(p, "ended", p.pr ? `last PR ${prLabel(p.pr)}` : "session closed");
   return changes;
 }
 

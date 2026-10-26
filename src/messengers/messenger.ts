@@ -58,7 +58,9 @@ const VERDICT = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i;
 /** "yes abcde" / "no abcde" answers a permission request. */
 export function parseVerdict(text: string): { requestId: string; behavior: "allow" | "deny" } | undefined {
   const v = VERDICT.exec(text);
-  return v ? { requestId: v[2]!.toLowerCase(), behavior: v[1]!.toLowerCase().startsWith("y") ? "allow" : "deny" } : undefined;
+  return v
+    ? { requestId: v[2]!.toLowerCase(), behavior: v[1]!.toLowerCase().startsWith("y") ? "allow" : "deny" }
+    : undefined;
 }
 
 /** The permission request, in mrkdwn like every message. */

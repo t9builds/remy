@@ -14,7 +14,9 @@ export async function spawn(args: string[]) {
   });
   const task = positionals.join(" ").trim();
   if (!values.repo || !task)
-    throw new Error(`usage: ${pc.cyan("remy spawn --repo <repo> [--name <name>] [--slack-task <id>] [--no-worktree] [--mode <mode>] <task…>")}`);
+    throw new Error(
+      `usage: ${pc.cyan("remy spawn --repo <repo> [--name <name>] [--slack-task <id>] [--no-worktree] [--mode <mode>] <task…>")}`,
+    );
   // A task from a Slack thread: `task` is the coordinator's brief, the thread goes into the prompt, and the agent reports there.
   const slack = values["slack-task"] ? loadTask(values["slack-task"]) : undefined;
   const r = await spawnAgent({

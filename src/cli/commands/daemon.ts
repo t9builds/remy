@@ -1,9 +1,9 @@
 /** `remy daemon`: run the daemon in the foreground (for launchd or systemd), or stop the one that runs. */
 import { runDaemon } from "../../daemon/daemon";
+import { askDaemon } from "../../link/client";
 import { PATHS } from "../../shared/paths";
 import { parse } from "../args";
 import { pc } from "../ui";
-import { askDaemon } from "../../link/client";
 
 export async function daemon(args: string[]) {
   const sub = parse(args, {}).positionals[0];

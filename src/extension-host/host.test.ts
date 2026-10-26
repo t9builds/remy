@@ -3,10 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS } from "../config/config";
+import type { Config } from "../sdk/config";
 import type { PostOptions, Remy } from "../sdk/extension";
 import { ExtensionHost, type HostDeps } from "./host";
 import { loadExtensions } from "./load";
-import type { Config } from "../sdk/config";
 
 const dir = mkdtempSync(join(tmpdir(), "remy-ext-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -36,7 +36,11 @@ describe("extension host", () => {
   test("hands events to every handler; one failing doesn't stop the others", async () => {
     const { h, logs } = host();
     const got: string[] = [];
-    await h.load("bad", "test", (remy) => remy.on("tick", () => { throw new Error("boom"); }));
+    await h.load("bad", "test", (remy) =>
+      remy.on("tick", () => {
+        throw new Error("boom");
+      }),
+    );
     await h.load("good", "test", (remy) => remy.on("tick", ({ at }) => void got.push(`tick ${at}`)));
     await h.emit("tick", { at: 5 });
     expect(got).toEqual(["tick 5"]);
@@ -66,7 +70,9 @@ describe("extension host", () => {
 
   test("commands: answered, unknown, already taken", async () => {
     const { h } = host();
-    await h.load("a", "test", (remy) => remy.registerCommand("echo", { description: "Echo", run: (args, ctx) => `${ctx.workspace}: ${args}` }));
+    await h.load("a", "test", (remy) =>
+      remy.registerCommand("echo", { description: "Echo", run: (args, ctx) => `${ctx.workspace}: ${args}` }),
+    );
     await h.load("b", "test", (remy) => remy.registerCommand("echo", { description: "again", run: () => "" }));
     expect(await h.command("/echo hi there", { workspace: "work" })).toBe("work: hi there");
     expect(await h.command("/echo@remy_bot", { workspace: "work" })).toBe("work: ");
@@ -82,8 +88,12 @@ describe("extension host", () => {
     await h.load("factory", "test", (r) => void (remy = r));
     const answer = remy.ask("Ship api#7 to production?", { session: "factory:api#7", workspace: "work" });
     await Bun.sleep(0);
-    expect(posts).toEqual([{ text: "Ship api#7 to production?", opts: { session: "factory:api#7", workspace: "work", expect_reply: true } }]);
-    expect(h.waitingEntries()).toMatchObject([{ rank: 0, label: "factory:api#7", why: 'asks: "Ship api#7 to production?"' }]);
+    expect(posts).toEqual([
+      { text: "Ship api#7 to production?", opts: { session: "factory:api#7", workspace: "work", expect_reply: true } },
+    ]);
+    expect(h.waitingEntries()).toMatchObject([
+      { rank: 0, label: "factory:api#7", why: 'asks: "Ship api#7 to production?"' },
+    ]);
     expect(h.answer("someone-else", "yes")).toBeFalse();
     expect(h.answer("factory:api#7", "yes, ship it")).toBeTrue();
     expect(await answer).toBe("yes, ship it");
@@ -115,21 +125,34 @@ describe("loading", () => {
   mkdirSync(userDir, { recursive: true });
   mkdirSync(join(repo, ".git"), { recursive: true });
   mkdirSync(join(repo, ".remy", "extensions", "standup"), { recursive: true });
-  const ext = (tag: string) => `export default (remy) => remy.registerCommand(${JSON.stringify(tag)}, { description: "", run: () => ${JSON.stringify(tag)} });\n`;
+  const ext = (tag: string) =>
+    `export default (remy) => remy.registerCommand(${JSON.stringify(tag)}, { description: "", run: () => ${JSON.stringify(tag)} });\n`;
   writeFileSync(join(userDir, "mine.ts"), ext("mine"));
   writeFileSync(join(userDir, "notes.md"), "not an extension");
   writeFileSync(join(userDir, "broken.ts"), "export const nothing = 1;\n");
   writeFileSync(join(repo, ".remy", "extensions", "standup", "index.ts"), ext("standup"));
   writeFileSync(join(repo, ".remy", "extensions", "off.ts"), ext("off"));
-  const config = (extensions: Config["extensions"]): Config => ({ ...DEFAULTS, repoRoots: [join(dir, "repos")], extensions });
+  const config = (extensions: Config["extensions"]): Config => ({
+    ...DEFAULTS,
+    repoRoots: [join(dir, "repos")],
+    extensions,
+  });
 
   test("built-ins, yours, and only listed repos'", async () => {
     const { h } = host();
     await loadExtensions(h, config({}), { builtins: { hello: () => {} }, userDir });
-    expect(h.loaded.map((l) => [l.name, !l.error])).toEqual([["builtin:hello", true], ["broken", false], ["mine", true]]);
+    expect(h.loaded.map((l) => [l.name, !l.error])).toEqual([
+      ["builtin:hello", true],
+      ["broken", false],
+      ["mine", true],
+    ]);
 
     const listed = host().h;
-    await loadExtensions(listed, config({ repos: ["api", "missing"], disabled: ["hello", "api/off"], packages: ["remy-ext-nope"] }), { builtins: { hello: () => {} }, userDir });
+    await loadExtensions(
+      listed,
+      config({ repos: ["api", "missing"], disabled: ["hello", "api/off"], packages: ["remy-ext-nope"] }),
+      { builtins: { hello: () => {} }, userDir },
+    );
     expect(listed.loaded.map((l) => [l.name, !l.error])).toEqual([
       ["broken", false],
       ["mine", true],

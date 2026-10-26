@@ -8,8 +8,8 @@
  * session's thread or reply chain.
  */
 import { messengerLabel } from "../config/config";
-import type { Messenger, PermissionRequest, PostOptions, Sink } from "./messenger";
 import type { BothMode, MessengerKind } from "../sdk/config";
+import type { Messenger, PermissionRequest, PostOptions, Sink } from "./messenger";
 
 type Parts = Partial<Record<MessengerKind, string>>;
 
@@ -76,7 +76,10 @@ export class Fanout implements Messenger {
       if (k === from) continue;
       if (session) m.answered(session);
       const echo = this.mode === "mirror" || (this.mode === "pings" && k === this.main);
-      if (echo) await m.post(`💬 _You, in ${messengerLabel(from)}:_ ${text}`, { session: session || undefined }).catch((e) => this.log("echo failed", k, e?.message ?? e));
+      if (echo)
+        await m
+          .post(`💬 _You, in ${messengerLabel(from)}:_ ${text}`, { session: session || undefined })
+          .catch((e) => this.log("echo failed", k, e?.message ?? e));
     }
   }
 
@@ -111,11 +114,13 @@ export class Fanout implements Messenger {
   }
 
   async update(id: string, text: string) {
-    for (const [k, part] of Object.entries(decodeId(id)) as [MessengerKind, string][]) await this.members.get(k)?.update(part, text);
+    for (const [k, part] of Object.entries(decodeId(id)) as [MessengerKind, string][])
+      await this.members.get(k)?.update(part, text);
   }
 
   async pin(id: string) {
-    for (const [k, part] of Object.entries(decodeId(id)) as [MessengerKind, string][]) await this.members.get(k)?.pin?.(part);
+    for (const [k, part] of Object.entries(decodeId(id)) as [MessengerKind, string][])
+      await this.members.get(k)?.pin?.(part);
   }
 
   async askPermission(p: PermissionRequest) {

@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
-import { openWorkspaces, quietSink } from "./workspaces";
 import type { Workspace } from "../sdk/config";
+import { openWorkspaces, quietSink } from "./workspaces";
 
 const realFetch = globalThis.fetch;
 afterAll(() => {

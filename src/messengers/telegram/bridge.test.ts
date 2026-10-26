@@ -2,8 +2,8 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TgMessage, TgUpdate } from "./client";
 import { TelegramBridge } from "./bridge";
+import type { TgMessage, TgUpdate } from "./client";
 
 const ME = 1001;
 const dir = mkdtempSync(join(tmpdir(), "remy-tg-"));
@@ -47,7 +47,8 @@ function bridge() {
     {
       push: async (kind, content, meta = {}) => void pushed.push({ kind, content, meta }),
       permission: async (id, behavior) => void verdicts.push([id, behavior]),
-      command: async (workspace, text) => (/^\/queue(@\w+)?$/.test(text) ? `*Waiting on you (1)* in ${workspace}` : undefined),
+      command: async (workspace, text) =>
+        /^\/queue(@\w+)?$/.test(text) ? `*Waiting on you (1)* in ${workspace}` : undefined,
       log: () => {},
     },
     join(dir, `state-${++n}.json`),
@@ -55,7 +56,13 @@ function bridge() {
   let update = 100;
   const msg = (text: string, extra: Partial<TgMessage> = {}): TgUpdate => ({
     update_id: ++update,
-    message: { message_id: update * 10, from: { id: ME, first_name: "Me" }, chat: { id: ME, type: "private" }, text, ...extra },
+    message: {
+      message_id: update * 10,
+      from: { id: ME, first_name: "Me" },
+      chat: { id: ME, type: "private" },
+      text,
+      ...extra,
+    },
   });
   return { b, tg, pushed, verdicts, msg };
 }
@@ -65,7 +72,9 @@ test("the first start skips what was sent before; later messages from the owner 
   tg.queue.push([msg("old"), msg("older")]);
   tg.queue.push([msg("what's running?")]);
   await b.pollOnce(0);
-  expect(pushed.map((p) => [p.kind, p.content, p.meta.workspace])).toEqual([["user_message", "what's running?", "personal"]]);
+  expect(pushed.map((p) => [p.kind, p.content, p.meta.workspace])).toEqual([
+    ["user_message", "what's running?", "personal"],
+  ]);
 });
 
 test("strangers, groups and other bots are ignored", async () => {
@@ -88,7 +97,9 @@ test("messages about a session chain as replies, and a reply to any of them is t
   expect(started).toMatch(/^\d+$/);
 
   tg.queue.push([]);
-  tg.queue.push([msg("stream it", { reply_to_message: { message_id: Number(asked), chat: { id: ME, type: "private" } } })]);
+  tg.queue.push([
+    msg("stream it", { reply_to_message: { message_id: Number(asked), chat: { id: ME, type: "private" } } }),
+  ]);
   await b.pollOnce(0);
   const p = pushed[0]!;
   expect([p.content, p.meta.session]).toEqual(["stream it", "api-export"]);
@@ -96,20 +107,35 @@ test("messages about a session chain as replies, and a reply to any of them is t
   // The coordinator answers in the same chain, which a later reply also maps back.
   await b.post("Sent to api-export.", { thread: p.meta.thread });
   expect(tg.sent[2]!.replyTo).toBe(Number(p.meta.thread));
-  tg.queue.push([msg("thanks", { reply_to_message: { message_id: tg.sent[2]!.id, chat: { id: ME, type: "private" } } })]);
+  tg.queue.push([
+    msg("thanks", { reply_to_message: { message_id: tg.sent[2]!.id, chat: { id: ME, type: "private" } } }),
+  ]);
   await b.pollOnce(0);
   expect(pushed[1]!.meta.session).toBe("api-export");
 });
 
 test("permission prompts get buttons; a tap or a typed answer resolves them", async () => {
   const { b, tg, verdicts, msg } = bridge();
-  await b.askPermission({ request_id: "abcde", tool_name: "Bash", description: "run a command", input_preview: "rm -rf build" });
+  await b.askPermission({
+    request_id: "abcde",
+    tool_name: "Bash",
+    description: "run a command",
+    input_preview: "rm -rf build",
+  });
   expect(JSON.stringify(tg.sent[0]!.buttons)).toContain("perm:allow:abcde");
 
   tg.queue.push([]);
   tg.queue.push([
     { update_id: 300, callback_query: { id: "q1", from: { id: 999 }, data: "perm:allow:abcde" } },
-    { update_id: 301, callback_query: { id: "q2", from: { id: ME }, data: "perm:deny:abcde", message: { message_id: tg.sent[0]!.id, chat: { id: ME, type: "private" }, text: "remy wants to run Bash" } } },
+    {
+      update_id: 301,
+      callback_query: {
+        id: "q2",
+        from: { id: ME },
+        data: "perm:deny:abcde",
+        message: { message_id: tg.sent[0]!.id, chat: { id: ME, type: "private" }, text: "remy wants to run Bash" },
+      },
+    },
     msg("yes fghij"),
   ]);
   await b.pollOnce(0);
@@ -124,7 +150,9 @@ test("the next message about a session chains to remy's last one, not to the use
   const { b, tg, msg } = bridge();
   const asked = await b.post("stream or email?", { session: "api-export", expect_reply: true });
   tg.queue.push([]);
-  tg.queue.push([msg("stream it", { reply_to_message: { message_id: Number(asked), chat: { id: ME, type: "private" } } })]);
+  tg.queue.push([
+    msg("stream it", { reply_to_message: { message_id: Number(asked), chat: { id: ME, type: "private" } } }),
+  ]);
   await b.pollOnce(0);
   await b.post("api-export opened PR #88", { session: "api-export" });
   expect(tg.sent.at(-1)!.replyTo).toBe(Number(asked));
@@ -138,7 +166,10 @@ test("a plain message while an agent's question is open names that agent, until 
   await b.pollOnce(0);
   expect([pushed[0]!.meta.session, pushed[0]!.meta.awaiting]).toEqual(["", "api-export"]);
 
-  tg.queue.push([msg("yes, stream", { reply_to_message: { message_id: Number(asked), chat: { id: ME, type: "private" } } }), msg("what's running?")]);
+  tg.queue.push([
+    msg("yes, stream", { reply_to_message: { message_id: Number(asked), chat: { id: ME, type: "private" } } }),
+    msg("what's running?"),
+  ]);
   await b.pollOnce(0);
   expect(pushed[1]!.meta.session).toBe("api-export");
   expect(pushed[2]!.meta.awaiting).toBe("");

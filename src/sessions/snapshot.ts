@@ -29,14 +29,15 @@ export type SessionView = {
 
 export type Snapshot = { takenAt: number; sessions: SessionView[] };
 
-
 const DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
 
 export async function takeSnapshot(): Promise<Snapshot> {
   const config = loadConfig();
   const spawned = readJson<Spawned>(PATHS.spawned, {});
   const nicknames = readJson<Nicknames>(PATHS.nicknames, {});
-  const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName && !spawnedEntry(spawned, a.name, a.sessionId)?.merged);
+  const agents = (await listAgents()).filter(
+    (a) => a.name !== config.coordinatorName && !spawnedEntry(spawned, a.name, a.sessionId)?.merged,
+  );
 
   // The newest hook event per session carries its current cwd (a session may have moved into a worktree).
   const latest = new Map<string, ReturnType<typeof readEvents>[number]>();
@@ -81,4 +82,3 @@ export function findSession(sessions: SessionView[], name: string): SessionView 
       : `no running session "${name}"; \`remy status\` lists them`,
   );
 }
-

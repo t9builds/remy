@@ -1,14 +1,15 @@
 /** `remy status`, `remy queue` and `remy changes`: what the sessions are doing, read in a terminal or by the coordinator. */
+
+import { snapshotDiff } from "../../sessions/changes";
+import { formatMerged } from "../../sessions/close";
 import { formatSession, formatTable } from "../../sessions/format";
 import { findSession, takeSnapshot } from "../../sessions/snapshot";
-import { formatMerged } from "../../sessions/close";
 import type { Spawned } from "../../sessions/spawned";
 import { formatWaitingList, waitingListOf } from "../../sessions/waiting-list";
 import { readJson } from "../../shared/json-file";
 import { PATHS } from "../../shared/paths";
 import { parse } from "../args";
 import { statusPaint } from "../ui";
-import { snapshotDiff } from "../../sessions/changes";
 
 export async function status(args: string[]) {
   const { values, positionals } = parse(args, { json: { type: "boolean" }, merged: { type: "boolean" } });
@@ -37,5 +38,11 @@ export async function queue(args: string[]) {
 
 export async function changes() {
   const { changes, first } = await snapshotDiff();
-  console.log(first ? "Baseline stored; nothing to compare yet." : changes.length ? JSON.stringify(changes, null, 2) : "No changes.");
+  console.log(
+    first
+      ? "Baseline stored; nothing to compare yet."
+      : changes.length
+        ? JSON.stringify(changes, null, 2)
+        : "No changes.",
+  );
 }

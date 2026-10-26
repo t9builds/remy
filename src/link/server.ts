@@ -102,7 +102,9 @@ export class LinkServer {
     readLines(socket, (m: ToDaemon) => {
       if (m.type === "hello") return void this.hello(socket);
       if (m.type === "permission_request")
-        return void this.handlers.permissionRequest(m.params).catch((e) => this.handlers.log("link: permission request failed", e?.message ?? e));
+        return void this.handlers
+          .permissionRequest(m.params)
+          .catch((e) => this.handlers.log("link: permission request failed", e?.message ?? e));
       if (m.type === "request")
         this.handlers.request(m.request, m.args).then(
           (result) => send(socket, { type: "response", id: m.id, result }),

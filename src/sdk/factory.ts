@@ -118,10 +118,26 @@ export type Factory = {
 };
 
 export const defineFactory = (f: Factory): Factory => f;
-export const agent = (name: string, opts: Omit<AgentStep, "kind" | "name">): AgentStep => ({ kind: "agent", name, ...opts });
-export const wait = (name: WaitStep["name"], opts: Omit<WaitStep, "kind" | "name"> = {}): WaitStep => ({ kind: "wait", name, ...opts });
-export const gate = (name: string, opts: Omit<GateStep, "kind" | "name"> = {}): GateStep => ({ kind: "gate", name, ...opts });
-export const action = (name: ActionStep["name"], opts: Omit<ActionStep, "kind" | "name"> = {}): ActionStep => ({ kind: "action", name, ...opts });
+export const agent = (name: string, opts: Omit<AgentStep, "kind" | "name">): AgentStep => ({
+  kind: "agent",
+  name,
+  ...opts,
+});
+export const wait = (name: WaitStep["name"], opts: Omit<WaitStep, "kind" | "name"> = {}): WaitStep => ({
+  kind: "wait",
+  name,
+  ...opts,
+});
+export const gate = (name: string, opts: Omit<GateStep, "kind" | "name"> = {}): GateStep => ({
+  kind: "gate",
+  name,
+  ...opts,
+});
+export const action = (name: ActionStep["name"], opts: Omit<ActionStep, "kind" | "name"> = {}): ActionStep => ({
+  kind: "action",
+  name,
+  ...opts,
+});
 
 /** The autonomy level a step needs. */
 export function levelOf(step: Step): Level {
@@ -134,7 +150,8 @@ export function levelOf(step: Step): Level {
 export function validate(f: Factory): string[] {
   const errors: string[] = [];
   if (!Array.isArray(f?.steps) || !f.steps.length) return ["it has no steps"];
-  if (f.autonomy && !LEVELS.includes(f.autonomy)) errors.push(`autonomy "${f.autonomy}" isn't one of ${LEVELS.join(", ")}`);
+  if (f.autonomy && !LEVELS.includes(f.autonomy))
+    errors.push(`autonomy "${f.autonomy}" isn't one of ${LEVELS.join(", ")}`);
   const names = new Set<string>();
   f.steps.forEach((s, i) => {
     const at = `step ${i + 1} (${s?.kind} ${s?.name})`;
@@ -148,13 +165,23 @@ export function validate(f: Factory): string[] {
       names.add(s.name);
     }
     if (s.kind === "wait" && !["ci", "deploy"].includes(s.name)) errors.push(`${at}: wait is "ci" or "deploy"`);
-    if (s.kind === "action" && !["merge", "deploy", "notify"].includes(s.name)) errors.push(`${at}: action is "merge", "deploy" or "notify"`);
+    if (s.kind === "action" && !["merge", "deploy", "notify"].includes(s.name))
+      errors.push(`${at}: action is "merge", "deploy" or "notify"`);
     if ((s.kind === "wait" && s.name === "deploy") || (s.kind === "action" && s.name === "deploy")) {
       if (!s.env) errors.push(`${at}: needs env`);
       else if (!f.environments?.[s.env]) errors.push(`${at}: no environment "${s.env}" in environments`);
     }
-    if (s.kind === "action" && s.name === "deploy" && s.env && f.environments?.[s.env] && !f.environments[s.env]!.deploy) errors.push(`${at}: environment "${s.env}" has no deploy command`);
+    if (
+      s.kind === "action" &&
+      s.name === "deploy" &&
+      s.env &&
+      f.environments?.[s.env] &&
+      !f.environments[s.env]!.deploy
+    )
+      errors.push(`${at}: environment "${s.env}" has no deploy command`);
   });
-  for (const s of f.steps) if (s.kind === "gate") for (const v of s.verdicts ?? []) if (!names.has(v)) errors.push(`gate ${s.name}: no agent step "${v}"`);
+  for (const s of f.steps)
+    if (s.kind === "gate")
+      for (const v of s.verdicts ?? []) if (!names.has(v)) errors.push(`gate ${s.name}: no agent step "${v}"`);
   return errors;
 }

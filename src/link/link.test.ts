@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { askDaemon, LinkClient } from "./client";
-import { LinkServer, type ServerHandlers } from "./server";
 import type { LinkEvent } from "./protocol";
+import { LinkServer, type ServerHandlers } from "./server";
 
 const cleanup: (() => void)[] = [];
 afterEach(() => {
@@ -18,7 +18,12 @@ function socketPath() {
 }
 
 async function server(path: string, handlers: Partial<ServerHandlers> = {}) {
-  const s = new LinkServer(path, { request: async () => "ok", permissionRequest: async () => {}, log: () => {}, ...handlers });
+  const s = new LinkServer(path, {
+    request: async () => "ok",
+    permissionRequest: async () => {},
+    log: () => {},
+    ...handlers,
+  });
   await s.listen();
   cleanup.push(() => s.close());
   return s;
@@ -27,7 +32,11 @@ async function server(path: string, handlers: Partial<ServerHandlers> = {}) {
 function client(path: string) {
   const events: LinkEvent[] = [];
   const verdicts: string[] = [];
-  const c = new LinkClient(path, { event: (e) => void events.push(e), permission: (id, b) => void verdicts.push(`${b} ${id}`), log: () => {} }, 50).start();
+  const c = new LinkClient(
+    path,
+    { event: (e) => void events.push(e), permission: (id, b) => void verdicts.push(`${b} ${id}`), log: () => {} },
+    50,
+  ).start();
   cleanup.push(() => c.close());
   return { c, events, verdicts };
 }
@@ -39,12 +48,18 @@ async function until(cond: () => boolean, ms = 2_000) {
   }
 }
 
-const ev = (content: string): LinkEvent => ({ kind: "user_message", content, meta: { kind: "user_message", workspace: "work" } });
+const ev = (content: string): LinkEvent => ({
+  kind: "user_message",
+  content,
+  meta: { kind: "user_message", workspace: "work" },
+});
 
 describe("link", () => {
   test("holds events while no coordinator is connected and delivers them in order after the greeting", async () => {
     const path = socketPath();
-    const s = await server(path, { greeting: async () => [{ kind: "system", content: "hello", meta: { kind: "system" } }] });
+    const s = await server(path, {
+      greeting: async () => [{ kind: "system", content: "hello", meta: { kind: "system" } }],
+    });
     s.push(ev("one"));
     s.push(ev("two"));
     expect(s.heldEvents.length).toBe(2);
@@ -78,7 +93,9 @@ describe("link", () => {
     const s = await server(path, { permissionRequest: async (p) => void asked.push(p.request_id) });
     const { c, verdicts } = client(path);
     await until(() => s.connected);
-    expect(c.permissionRequest({ request_id: "abcde", tool_name: "Bash", description: "", input_preview: "" })).toBeTrue();
+    expect(
+      c.permissionRequest({ request_id: "abcde", tool_name: "Bash", description: "", input_preview: "" }),
+    ).toBeTrue();
     await until(() => asked.length === 1);
     s.permission("abcde", "allow");
     await until(() => verdicts.length === 1);
@@ -115,7 +132,9 @@ describe("link", () => {
   test("a second daemon can't take a live socket, but replaces a stale one", async () => {
     const path = socketPath();
     await server(path);
-    await expect(new LinkServer(path, { request: async () => 0, permissionRequest: async () => {}, log: () => {} }).listen()).rejects.toThrow("already running");
+    await expect(
+      new LinkServer(path, { request: async () => 0, permissionRequest: async () => {}, log: () => {} }).listen(),
+    ).rejects.toThrow("already running");
     const stale = socketPath();
     writeFileSync(stale, "");
     await server(stale);

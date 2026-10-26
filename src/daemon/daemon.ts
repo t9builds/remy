@@ -16,34 +16,34 @@
  */
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { describeMessengers, openWorkspaces, type Off } from "../messengers/workspaces";
 import { configStamp, loadConfig, workspaceFor } from "../config/config";
-import type { EventName, Events, PostOptions, SessionRef } from "../sdk/extension";
 import { ExtensionHost } from "../extension-host/host";
 import { loadExtensions } from "../extension-host/load";
-import { hookEvents, sessionRef, snapshotEvents, type Emitted } from "./observe";
-import type { RemyEvent } from "../sessions/events";
-import { closeAndRecord, closedAsMerged } from "../sessions/close";
+import { coordinatorTools } from "../link/coordinator-tools";
+import { type DaemonStatus, type LinkEvent, RESTART_EXIT, type Request } from "../link/protocol";
+import { LinkServer } from "../link/server";
 import type { Messenger, Sink } from "../messengers/messenger";
-import { formatNotice } from "../shared/notices";
-import { questionOf } from "../sessions/waiting-list";
 import { threadRef } from "../messengers/slack/bridge";
-import { takeSnapshot, type SessionView, type Snapshot } from "../sessions/snapshot";
+import { describeMessengers, type Off, openWorkspaces } from "../messengers/workspaces";
+import type { Config } from "../sdk/config";
+import type { EventName, Events, PostOptions, SessionRef } from "../sdk/extension";
+import { listAgents } from "../sessions/agents";
+import { snapshotDiff } from "../sessions/changes";
+import { closeAndRecord, closedAsMerged } from "../sessions/close";
+import type { RemyEvent } from "../sessions/events";
+import { githubRepoOf } from "../sessions/git";
+import { type SessionView, type Snapshot, takeSnapshot } from "../sessions/snapshot";
 import { spawnAgent } from "../sessions/spawn";
+import { type Spawned, spawnedEntry } from "../sessions/spawned";
+import { questionOf } from "../sessions/waiting-list";
 import { ensureDir, readJson, writeJson } from "../shared/json-file";
+import { formatNotice } from "../shared/notices";
 import { PATHS, REMY_DIR } from "../shared/paths";
 import { VERSION } from "../shared/version";
-import type { Config } from "../sdk/config";
-import { githubRepoOf } from "../sessions/git";
-import { listAgents } from "../sessions/agents";
-import { spawnedEntry, type Spawned } from "../sessions/spawned";
 import { heldBefore, keepHeld } from "./held";
+import { type Emitted, hookEvents, sessionRef, snapshotEvents } from "./observe";
 import { tailLines } from "./tail";
 import { coalesce, composeWaitingList, showWaitingList } from "./waiting-list";
-import { snapshotDiff } from "../sessions/changes";
-import { coordinatorTools } from "../link/coordinator-tools";
-import { LinkServer } from "../link/server";
-import { RESTART_EXIT, type DaemonStatus, type LinkEvent, type Request } from "../link/protocol";
 
 const log = (...a: unknown[]) => {
   try {
@@ -68,8 +68,16 @@ async function push(kind: string, content: string, meta: Record<string, string> 
   if (kind === "user_message") scheduleWaitingList(WAITING_LIST_AFTER_USER_MS);
   if (kind === "user_message" || kind === "task_request") {
     // A reply to an extension's question answers it, not the coordinator.
-    if (kind === "user_message" && meta.session && host.answer(meta.session, content)) return log("answer for an extension", meta.session);
-    void host.emit("message", { workspace: meta.workspace ?? "", text: content, kind, session: meta.session || undefined, thread: meta.thread || undefined, meta: clean });
+    if (kind === "user_message" && meta.session && host.answer(meta.session, content))
+      return log("answer for an extension", meta.session);
+    void host.emit("message", {
+      workspace: meta.workspace ?? "",
+      text: content,
+      kind,
+      session: meta.session || undefined,
+      thread: meta.thread || undefined,
+      meta: clean,
+    });
     // Task requests go to the coordinator only through an extension (extensions/slack-tasks.ts).
     if (kind === "task_request") return;
   }
@@ -98,7 +106,8 @@ let opened!: () => void;
 /** Settles once the workspaces are open; requests wait for it. */
 const ready = new Promise<void>((r) => (opened = r));
 
-const workspaceOf = (cwd?: string, repo?: string) => workspaceFor({ cwd, repo: repo ?? githubRepoOf(cwd) }, active)?.name ?? "";
+const workspaceOf = (cwd?: string, repo?: string) =>
+  workspaceFor({ cwd, repo: repo ?? githubRepoOf(cwd) }, active)?.name ?? "";
 
 function bridgeFor(workspace?: string, cwd?: string): Messenger {
   const b = (workspace && bridges.get(workspace)) || bridges.get(workspaceOf(cwd)) || bridges.values().next().value;
@@ -116,7 +125,8 @@ async function request(name: Request, args: any): Promise<unknown> {
     return name;
   }
   await ready;
-  if (name === "tools") return coordinatorTools(active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", "));
+  if (name === "tools")
+    return coordinatorTools(active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", "));
   if (name === "call") return callTool(String(args?.name), (args?.arguments ?? {}) as Record<string, any>);
   throw new Error(`unknown request: ${name}`);
 }
@@ -144,10 +154,17 @@ async function route(a: { workspace?: string; session?: string; thread?: string 
 
 async function callTool(name: string, a: Record<string, any>) {
   const bridge = await route(a);
-  const rerouted = a.workspace && a.workspace !== bridge.workspace ? ` ("${a.workspace}" is off, so this went to "${bridge.workspace}")` : "";
+  const rerouted =
+    a.workspace && a.workspace !== bridge.workspace
+      ? ` ("${a.workspace}" is off, so this went to "${bridge.workspace}")`
+      : "";
   try {
     if (name === "post") {
-      const id = await bridge.post(String(a.text), { thread: a.thread, session: a.session, expect_reply: a.expect_reply });
+      const id = await bridge.post(String(a.text), {
+        thread: a.thread,
+        session: a.session,
+        expect_reply: a.expect_reply,
+      });
       return { content: [{ type: "text", text: `posted to ${bridge.workspace} id=${id}${rerouted}` }] };
     }
     if (name === "update") {
@@ -156,7 +173,10 @@ async function callTool(name: string, a: Record<string, any>) {
     }
   } catch (e: any) {
     // Slack and Telegram errors carry their own `code`, which isn't a JSON-RPC one: report them as a failed call.
-    return { isError: true, content: [{ type: "text", text: `${name} to ${bridge.workspace} failed: ${e?.message ?? e}` }] };
+    return {
+      isError: true,
+      content: [{ type: "text", text: `${name} to ${bridge.workspace} failed: ${e?.message ?? e}` }],
+    };
   }
   throw new Error(`unknown tool: ${name}`);
 }
@@ -177,7 +197,7 @@ async function agents(maxAgeMs = 20_000) {
 
 async function cwdOfSession(name: string) {
   const row = (await agents()).find((r) => r.name === name);
-  return row ? cwdById.get(row.sessionId) ?? row.cwd : undefined;
+  return row ? (cwdById.get(row.sessionId) ?? row.cwd) : undefined;
 }
 
 /** The Slack thread a spawned agent was started from. A live session must be the spawned one: kitchen names get reused. */
@@ -191,7 +211,13 @@ async function sessionInfo(sessionId: string) {
   const row = (await agents()).find((r) => r.sessionId === sessionId);
   const spawned = readJson<Spawned>(PATHS.spawned, {});
   const spawn = row && spawnedEntry(spawned, row.name, sessionId);
-  return { name: row?.name ?? sessionId.slice(0, 8), status: row?.status, spawned: !!spawn, unattended: !!spawn || row?.kind === "background", merged: !!spawn?.merged };
+  return {
+    name: row?.name ?? sessionId.slice(0, 8),
+    status: row?.status,
+    spawned: !!spawn,
+    unattended: !!spawn || row?.kind === "background",
+    merged: !!spawn?.merged,
+  };
 }
 
 const lastPushed = new Map<string, number>();
@@ -206,9 +232,17 @@ const NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitat
 /** The session as extensions see it, from the last look at the sessions, else from what the hook event says. */
 async function refOf(sessionId: string, cwd?: string): Promise<SessionRef> {
   const seen = lastSnapshot?.sessions.find((s) => s.sessionId === sessionId);
-  if (seen) return sessionRef({ ...seen, cwd: cwd ?? seen.cwd }, workspaceOf(cwd ?? seen.cwd, cwd ? undefined : seen.repo));
+  if (seen)
+    return sessionRef({ ...seen, cwd: cwd ?? seen.cwd }, workspaceOf(cwd ?? seen.cwd, cwd ? undefined : seen.repo));
   const s = await sessionInfo(sessionId);
-  return { name: s.name, sessionId, cwd: cwd ?? "", spawned: s.spawned, status: s.status ?? "", workspace: workspaceOf(cwd) };
+  return {
+    name: s.name,
+    sessionId,
+    cwd: cwd ?? "",
+    spawned: s.spawned,
+    status: s.status ?? "",
+    workspace: workspaceOf(cwd),
+  };
 }
 
 async function onEvent(e: RemyEvent) {
@@ -224,8 +258,18 @@ async function onEvent(e: RemyEvent) {
       if (s.status && s.status !== "waiting") return;
       if (debounced(`input:${e.session_id}`)) return;
       const reason = e.type === "permission_prompt" ? "permission_prompt" : "input";
-      void emit([{ name: "session.asks", payload: { session: await refOf(e.session_id, e.cwd), question: e.message ?? "waiting for input", reason } }]);
-      await push("agent_needs_input", e.message ?? "waiting for input", { workspace, session: s.name, reason: e.type ?? "", cwd: e.cwd ?? "" });
+      void emit([
+        {
+          name: "session.asks",
+          payload: { session: await refOf(e.session_id, e.cwd), question: e.message ?? "waiting for input", reason },
+        },
+      ]);
+      await push("agent_needs_input", e.message ?? "waiting for input", {
+        workspace,
+        session: s.name,
+        reason: e.type ?? "",
+        cwd: e.cwd ?? "",
+      });
     }, 45_000);
     return;
   }
@@ -238,7 +282,11 @@ async function onEvent(e: RemyEvent) {
     if (!questionOf(e.last)) return;
     if (debounced(`done:${e.session_id}`, 30_000)) return;
     const what = e.event === "Stop" ? "finished its turn" : `ended (${e.type ?? "exit"})`;
-    await push("agent_finished", `${s.name} ${what}.\n\nLast message:\n${e.last ?? "(none)"}`, { workspace, session: s.name, cwd: e.cwd ?? "" });
+    await push("agent_finished", `${s.name} ${what}.\n\nLast message:\n${e.last ?? "(none)"}`, {
+      workspace,
+      session: s.name,
+      cwd: e.cwd ?? "",
+    });
   }
 }
 
@@ -286,7 +334,8 @@ function scheduleWaitingList(ms = WAITING_LIST_AFTER_EVENT_MS) {
 }
 
 /** The workspace's list, with only its own sessions, and what extensions put on it. */
-const waitingListText = (snap: Snapshot, workspace: string) => composeWaitingList(snap, workspace, host.waitingEntries(), (s) => workspaceOf(s.cwd, s.repo));
+const waitingListText = (snap: Snapshot, workspace: string) =>
+  composeWaitingList(snap, workspace, host.waitingEntries(), (s) => workspaceOf(s.cwd, s.repo));
 
 /** Keep each workspace's "waiting on you" message current: edit it in place, or post and pin one when there is none. */
 function refreshWaitingList(snapshot?: Snapshot) {
@@ -311,9 +360,14 @@ function refreshWaitingList(snapshot?: Snapshot) {
 async function greeting(): Promise<LinkEvent[]> {
   await ready;
   const note = (content: string): LinkEvent => ({ kind: "system", content, meta: { kind: "system" } });
-  if (!config.workspaces.length) return [note("No workspace is configured. Tell the user in this terminal to run `remy setup`, then `remy start`.")];
+  if (!config.workspaces.length)
+    return [note("No workspace is configured. Tell the user in this terminal to run `remy setup`, then `remy start`.")];
   if (!bridges.size)
-    return [note(`No workspace works: ${off.map((o) => `"${o.workspace}" ${o.messenger} (${o.reason})`).join("; ")}. Tell the user in this terminal; \`remy doctor\` shows what to fix.`)];
+    return [
+      note(
+        `No workspace works: ${off.map((o) => `"${o.workspace}" ${o.messenger} (${o.reason})`).join("; ")}. Tell the user in this terminal; \`remy doctor\` shows what to fix.`,
+      ),
+    ];
   const fallback = workspaceFor({}, active)?.name;
   const notes: LinkEvent[] = [];
   for (const name of new Set(off.map((o) => o.workspace))) {
@@ -321,7 +375,11 @@ async function greeting(): Promise<LinkEvent[]> {
     const why = mine.map((o) => `${o.messenger}: ${o.reason}`).join("; ");
     const fix = `\`remy setup ${name}\`, then restart the daemon`;
     if (bridges.has(name))
-      notes.push(note(`In workspace "${name}", ${mine.map((o) => o.messenger).join(" and ")} is off (${why}). Until it's fixed (${fix}), "${name}" works through its other app only. Mention it in your hello there.`));
+      notes.push(
+        note(
+          `In workspace "${name}", ${mine.map((o) => o.messenger).join(" and ")} is off (${why}). Until it's fixed (${fix}), "${name}" works through its other app only. Mention it in your hello there.`,
+        ),
+      );
     else
       notes.push(
         note(
@@ -377,7 +435,11 @@ function newHost() {
     post: async (text, opts: PostOptions & { expect_reply?: boolean }) => {
       // `route` fills in the thread an agent started from, so post with what it returns.
       const where = { ...opts };
-      return (await route(where)).post(text, { thread: where.thread, session: where.session, expect_reply: where.expect_reply });
+      return (await route(where)).post(text, {
+        thread: where.thread,
+        session: where.session,
+        expect_reply: where.expect_reply,
+      });
     },
     spawn: (opts) => spawnAgent(opts),
     close: async (name, opts) => {
@@ -387,7 +449,8 @@ function newHost() {
       const cleanup = closeAndRecord(spawned, s, opts?.merged);
       writeJson(PATHS.spawned, spawned);
       agentsCache.at = 0;
-      if (lastSnapshot) lastSnapshot = { ...lastSnapshot, sessions: lastSnapshot.sessions.filter((x) => x.sessionId !== s.sessionId) };
+      if (lastSnapshot)
+        lastSnapshot = { ...lastSnapshot, sessions: lastSnapshot.sessions.filter((x) => x.sessionId !== s.sessionId) };
       log("closed", name, cleanup);
       return cleanup;
     },
@@ -442,11 +505,19 @@ export async function runDaemon() {
   active = { ...config, workspaces: config.workspaces.filter((w) => bridges.has(w.name)) };
   // Before the bridges start, so the commands extensions register are there for Telegram's menu.
   await loadExtensions(host, config);
-  for (const l of host.loaded) log(l.error ? `extension ${l.name} (${l.from}) failed: ${l.error}` : `extension ${l.name} loaded (${l.from})`);
+  for (const l of host.loaded)
+    log(l.error ? `extension ${l.name} (${l.from}) failed: ${l.error}` : `extension ${l.name} loaded (${l.from})`);
   opened();
-  log("started", VERSION, [...bridges.keys()].join(","), off.length ? `off: ${off.map((o) => `${o.workspace}/${o.messenger}`).join(",")}` : "");
+  log(
+    "started",
+    VERSION,
+    [...bridges.keys()].join(","),
+    off.length ? `off: ${off.map((o) => `${o.workspace}/${o.messenger}`).join(",")}` : "",
+  );
   for (const b of bridges.values())
-    b.start().catch((e) => push("system", `Workspace "${b.workspace}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`));
+    b.start().catch((e) =>
+      push("system", `Workspace "${b.workspace}" failed to start: ${e?.message ?? e}. Tell the user in this terminal.`),
+    );
   tailEvents();
   await observe(); // the baseline extension events are measured against
   setInterval(observe, Math.max(15, config.tickSeconds) * 1000);

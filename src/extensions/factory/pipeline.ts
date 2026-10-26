@@ -7,8 +7,18 @@
  *
  * Pure apart from `env`, so every path is tested with a fake world (pipeline.test.ts).
  */
-import { atLeast, levelOf, type AgentStep, type Environment, type Factory, type GateStep, type Level, type Step } from "../../sdk/factory";
+
 import type { Ci } from "../../sdk/extension";
+import {
+  type AgentStep,
+  atLeast,
+  type Environment,
+  type Factory,
+  type GateStep,
+  type Level,
+  levelOf,
+  type Step,
+} from "../../sdk/factory";
 
 /** What an agent reported with `remy report`, or the user's `remy factory retry`. */
 export type Report = {
@@ -105,7 +115,8 @@ const PUSH_WAIT_MS = 30 * 60_000;
 
 export const isActive = (r: Run) => r.stage !== "held" && r.stage !== "done";
 /** A reply that is only a yes: "ok but don't" or "go away" is not consent. Slack sends emoji as `:+1:`. */
-export const YES = /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approved?|lgtm|👍[\u{1F3FB}-\u{1F3FF}]?|✅|:\+1:|:thumbsup:|:white_check_mark:)[\s.!]*$/iu;
+export const YES =
+  /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approved?|lgtm|👍[\u{1F3FB}-\u{1F3FF}]?|✅|:\+1:|:thumbsup:|:white_check_mark:)[\s.!]*$/iu;
 
 /** Why Remy won't let a change through a gate, if anything stops it. */
 export function gateBlockers(d: PrDetail, gate: Pick<GateStep, "maxLines" | "protect" | "ci">): string[] {
@@ -114,7 +125,8 @@ export function gateBlockers(d: PrDetail, gate: Pick<GateStep, "maxLines" | "pro
   if (d.review === "CHANGES_REQUESTED") why.push("changes were requested");
   if (gate.ci !== false && d.ci === "fail") why.push("CI fails");
   if (gate.ci !== false && d.ci === "pending") why.push("CI is still running");
-  if (gate.maxLines !== undefined && d.lines > gate.maxLines) why.push(`${d.lines} changed lines (limit ${gate.maxLines})`);
+  if (gate.maxLines !== undefined && d.lines > gate.maxLines)
+    why.push(`${d.lines} changed lines (limit ${gate.maxLines})`);
   if (gate.protect?.length && !d.allFiles) why.push("too many files to check against the protected ones");
   const hit = d.files.find((f) => (gate.protect ?? []).some((p) => new Bun.Glob(p).match(f)));
   if (hit) why.push(`touches protected ${hit}`);
@@ -131,7 +143,11 @@ function agentPrompt(run: Run, step: AgentStep, f: Factory) {
     "",
     `You are the "${step.name}" step of Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}${rounds}. You didn't write this change: look for what's wrong with it, don't set out to confirm it works.`,
     ...(run.about ? [`What it is for: ${run.about}`] : []),
-    ...(step.env ? [`It is deployed to ${step.env}${env?.url ? ` (${env.url})` : ""}${run.mergeSha ? ` as ${run.mergeSha}` : ""}: check it there.`] : []),
+    ...(step.env
+      ? [
+          `It is deployed to ${step.env}${env?.url ? ` (${env.url})` : ""}${run.mergeSha ? ` as ${run.mergeSha}` : ""}: check it there.`,
+        ]
+      : []),
     afterMerge
       ? `Read the change with \`gh pr view ${n}\` and \`gh pr diff ${n}\`. Don't write code, push or open PRs.`
       : `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). If you fix something, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`.`,
@@ -140,7 +156,11 @@ function agentPrompt(run: Run, step: AgentStep, f: Factory) {
     "As the very last step, report your verdict with exactly one of:",
     `  remy report ${step.name} pass --pr ${run.pr} --summary "<one line>"`,
     `  remy report ${step.name} fail --pr ${run.pr} --summary "<one line: what is wrong, for a person to decide>"`,
-    ...(afterMerge ? [] : [`  remy report ${step.name} fixed --pr ${run.pr} --summary "<one line: what you fixed>"   (you pushed fixes; a fresh agent checks again)`]),
+    ...(afterMerge
+      ? []
+      : [
+          `  remy report ${step.name} fixed --pr ${run.pr} --summary "<one line: what you fixed>"   (you pushed fixes; a fresh agent checks again)`,
+        ]),
   ].join("\n");
 }
 
@@ -157,7 +177,16 @@ const hold = (run: Run, now: number, reason: string) => {
 const approval = (run: Run) => `${run.step}@${run.head}`;
 
 function next(run: Run, now: number, to = run.step + 1) {
-  Object.assign(run, { step: to, round: 1, stage: "running", since: now, stepSince: now, reason: undefined, agent: undefined, ask: undefined });
+  Object.assign(run, {
+    step: to,
+    round: 1,
+    stage: "running",
+    since: now,
+    stepSince: now,
+    reason: undefined,
+    agent: undefined,
+    ask: undefined,
+  });
   return true;
 }
 
@@ -169,7 +198,8 @@ function ask(run: Run, env: Env, purpose: NonNullable<Run["ask"]>["purpose"], qu
 }
 
 /** The newest pass or fix each agent step reported in this run. */
-const lastPass = (run: Run, name: string) => run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
+const lastPass = (run: Run, name: string) =>
+  run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
 
 /** Move a run on as far as it can go now. */
 export async function advance(run: Run, f: Factory, autonomy: Level, env: Env): Promise<void> {
@@ -216,7 +246,12 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
   }
   if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(approval(run))) {
     const said = run.reports.findLast((r) => r.verdict === "pass" || r.verdict === "fixed")?.summary;
-    return ask(run, env, "approve", `${describe(step)} for #${run.number} ${run.title}?${said ? ` Last verdict: ${said}.` : ""} Reply yes to go ahead (your autonomy stops at ${autonomy}).`);
+    return ask(
+      run,
+      env,
+      "approve",
+      `${describe(step)} for #${run.number} ${run.title}?${said ? ` Last verdict: ${said}.` : ""} Reply yes to go ahead (your autonomy stops at ${autonomy}).`,
+    );
   }
   if (step.kind === "agent") return agentStep(run, step, f, env);
   if (step.kind === "wait") return waitStep(run, step, f, env);
@@ -225,7 +260,13 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
 }
 
 const describe = (s: Step) =>
-  s.kind === "action" ? (s.name === "merge" ? "Merge" : s.name === "deploy" ? `Deploy to ${s.env}` : "Notify") : `${s.kind} ${s.name}`;
+  s.kind === "action"
+    ? s.name === "merge"
+      ? "Merge"
+      : s.name === "deploy"
+        ? `Deploy to ${s.env}`
+        : "Notify"
+    : `${s.kind} ${s.name}`;
 
 /** The user merged the PR themselves while the run waited: go on after the merge. */
 async function mergedByHand(run: Run, f: Factory, env: Env) {
@@ -243,7 +284,10 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
     const d = await env.pr(run.pr);
     if (!d) return false;
     if (d.state !== "OPEN") return closed(run, d, f, env);
-    if (d.head === run.head) return now - run.since > PUSH_WAIT_MS ? hold(run, now, `${step.name} said it pushed fixes, but the PR didn't change`) : false;
+    if (d.head === run.head)
+      return now - run.since > PUSH_WAIT_MS
+        ? hold(run, now, `${step.name} said it pushed fixes, but the PR didn't change`)
+        : false;
     if (d.ci === "fail") return hold(run, now, `CI fails after ${step.name}'s fixes`);
     if (d.ci === "pending") return false;
     run.head = d.head;
@@ -262,14 +306,20 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
     enter(run, "agent", env.now());
     return false;
   }
-  const report = env.reports().findLast((r) => r.pr === run.pr && r.step === step.name && !r.kind && r.at >= run.agent!.startedAt);
+  const report = env
+    .reports()
+    .findLast((r) => r.pr === run.pr && r.step === step.name && !r.kind && r.at >= run.agent!.startedAt);
   if (!report) {
     const status = await env.agentStatus(run.agent);
     const minutes = step.timeoutMinutes ?? 60;
     if (status === "busy" || status === "waiting")
-      return now - run.agent.startedAt > minutes * 60_000 ? hold(run, now, `${step.name} (${run.agent.name}) has worked for over ${minutes} min without reporting`) : false;
+      return now - run.agent.startedAt > minutes * 60_000
+        ? hold(run, now, `${step.name} (${run.agent.name}) has worked for over ${minutes} min without reporting`)
+        : false;
     // A report may land just after the agent stops, and a new agent may not be listed yet.
-    return now - run.agent.startedAt > GRACE_MS ? hold(run, now, `${step.name} (${run.agent.name}) stopped without reporting`) : false;
+    return now - run.agent.startedAt > GRACE_MS
+      ? hold(run, now, `${step.name} (${run.agent.name}) stopped without reporting`)
+      : false;
   }
   await env.close(run.agent);
   run.agent = undefined;
@@ -278,16 +328,26 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
   if (report.verdict === "pass") return next(run, now);
   if (report.verdict === "fixed") {
     if (step.repeat !== "until-clean") return next(run, now);
-    if (run.round >= (step.maxRounds ?? 3)) return hold(run, now, `${step.name} still fixing after ${run.round} rounds: ${summary}`);
+    if (run.round >= (step.maxRounds ?? 3))
+      return hold(run, now, `${step.name} still fixing after ${run.round} rounds: ${summary}`);
     run.round++;
     enter(run, "awaiting-fix", now);
     return false;
   }
   const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "hold");
-  if (onFail === "ask-human") return ask(run, env, "continue", `${step.name} for #${run.number} ${run.title} says: ${summary}. Go on anyway? Reply yes, or no to stop here.`);
+  if (onFail === "ask-human")
+    return ask(
+      run,
+      env,
+      "continue",
+      `${step.name} for #${run.number} ${run.title} says: ${summary}. Go on anyway? Reply yes, or no to stop here.`,
+    );
   if (onFail === "notify-author") {
     run.urgent = true;
-    await env.notify(run, `🔴 *#${run.number} ${run.title}* failed ${step.name}${run.mergeSha ? ` (live as ${run.mergeSha.slice(0, 7)})` : ""}: ${summary}\n${run.pr}`);
+    await env.notify(
+      run,
+      `🔴 *#${run.number} ${run.title}* failed ${step.name}${run.mergeSha ? ` (live as ${run.mergeSha.slice(0, 7)})` : ""}: ${summary}\n${run.pr}`,
+    );
     return ask(run, env, "fix", `Start an agent on a fix for #${run.number}? Reply yes.`);
   }
   return hold(run, now, `${step.name}: ${summary}`);
@@ -306,12 +366,26 @@ async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Fact
     return late ? hold(run, now, `CI still running after ${minutes} min`) : false;
   }
   if (!run.mergeSha) return hold(run, now, `nothing merged to wait for on ${step.env}`);
-  const target = { ...f.environments![step.env!]!, ...(step.detector ? { detector: step.detector as Environment["detector"] } : {}) };
+  const target = {
+    ...f.environments![step.env!]!,
+    ...(step.detector ? { detector: step.detector as Environment["detector"] } : {}),
+  };
   const b = await env.deployed(run.mergeSha, target, run);
   if (b.status === "success") return next(run, now);
-  if (b.status === "failed") return hold(run, now, `the ${step.env} deploy of ${run.mergeSha.slice(0, 7)} failed${b.id ? ` (${b.id})` : ""}${b.detail ? `: ${b.detail}` : ""}`);
+  if (b.status === "failed")
+    return hold(
+      run,
+      now,
+      `the ${step.env} deploy of ${run.mergeSha.slice(0, 7)} failed${b.id ? ` (${b.id})` : ""}${b.detail ? `: ${b.detail}` : ""}`,
+    );
   if (b.status === "error") run.reason = b.detail;
-  return late ? hold(run, now, `no ${step.env} deploy of ${run.mergeSha.slice(0, 7)} after ${minutes} min${run.reason ? ` (${run.reason})` : ""}`) : false;
+  return late
+    ? hold(
+        run,
+        now,
+        `no ${step.env} deploy of ${run.mergeSha.slice(0, 7)} after ${minutes} min${run.reason ? ` (${run.reason})` : ""}`,
+      )
+    : false;
 }
 
 async function gateStep(run: Run, step: GateStep, f: Factory, env: Env): Promise<boolean> {
@@ -363,7 +437,9 @@ async function actionStep(run: Run, step: Extract<Step, { kind: "action" }>, f: 
   if (d.state !== "OPEN") return closed(run, d, f, env);
   if (run.mergeRequestedAt) {
     // GitHub turned on auto-merge or put the PR in a merge queue: wait for it.
-    return now - run.mergeRequestedAt > PUSH_WAIT_MS ? hold(run, now, "Remy asked GitHub to merge it, but it hasn't merged") : false;
+    return now - run.mergeRequestedAt > PUSH_WAIT_MS
+      ? hold(run, now, "Remy asked GitHub to merge it, but it hasn't merged")
+      : false;
   }
   if (d.head !== run.head) {
     // New commits after the gate: back to the first agent step.

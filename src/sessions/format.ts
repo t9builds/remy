@@ -26,7 +26,6 @@ export function formatTable(s: Snapshot, paint: Paint = PLAIN): string {
     .join("\n");
 }
 
-
 export function prLabel(pr: Pr, paint: Paint = PLAIN) {
   const state = pr.state === "OPEN" ? (pr.draft ? "draft" : "open") : pr.state.toLowerCase();
   return `#${pr.number} ${state}, ${paint.ci(pr.ci, `CI ${pr.ci}`)}${pr.review ? `, ${pr.review.toLowerCase().replace(/_/g, " ")}` : ""}`;
@@ -34,7 +33,13 @@ export function prLabel(pr: Pr, paint: Paint = PLAIN) {
 
 function ago(ms: number) {
   const m = Math.round(ms / 60_000);
-  return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 48 * 60 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+  return m < 1
+    ? "just now"
+    : m < 60
+      ? `${m}m ago`
+      : m < 48 * 60
+        ? `${Math.round(m / 60)}h ago`
+        : `${Math.round(m / 1440)}d ago`;
 }
 
 /** One session in detail: what `--json` holds that a coordinator usually needs, with long text cut short. */
@@ -46,6 +51,9 @@ export function formatSession(x: SessionView, now = Date.now(), paint: Paint = P
     if (x.pr.failing.length) lines.push(`  failing: ${x.pr.failing.join(", ")}`);
   }
   const e = x.lastEvent;
-  if (e) lines.push(`  last: ${e.event}${e.type ? ` ${e.type}` : ""} ${ago(now - e.ts)}${e.text ? ` — ${aboutOf(e.text, 800)}` : ""}`);
+  if (e)
+    lines.push(
+      `  last: ${e.event}${e.type ? ` ${e.type}` : ""} ${ago(now - e.ts)}${e.text ? ` — ${aboutOf(e.text, 800)}` : ""}`,
+    );
   return lines.join("\n");
 }

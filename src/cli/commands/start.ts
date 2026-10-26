@@ -3,7 +3,17 @@ import { spawn } from "node:child_process";
 import { openSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { compactEnv, compactPct, configStamp, loadConfig, messengerLabel, messengersOf, workspaceFor } from "../../config/config";
+import {
+  compactEnv,
+  compactPct,
+  configStamp,
+  loadConfig,
+  messengerLabel,
+  messengersOf,
+  workspaceFor,
+} from "../../config/config";
+import { askDaemon } from "../../link/client";
+import type { DaemonStatus } from "../../link/protocol";
 import { blocking } from "../../messengers/messenger";
 import type { Workspace } from "../../sdk/config";
 import { writeJson } from "../../shared/json-file";
@@ -11,8 +21,6 @@ import { PATHS, PLUGIN_ROOT } from "../../shared/paths";
 import { VERSION } from "../../shared/version";
 import { doctor } from "../doctor";
 import { errorLine, formatChecks, pc } from "../ui";
-import { askDaemon } from "../../link/client";
-import type { DaemonStatus } from "../../link/protocol";
 
 /** Start when the basics pass and at least one workspace works; a broken workspace only warns. */
 export async function start(extra: string[]) {
@@ -34,7 +42,10 @@ export async function start(extra: string[]) {
     for (const w of hurt) {
       const live = liveApps(w);
       const fix = pc.cyan(`remy setup ${w.name}`);
-      const down = messengersOf(w).filter((k) => !live.includes(k)).map(messengerLabel).join(" and ");
+      const down = messengersOf(w)
+        .filter((k) => !live.includes(k))
+        .map(messengerLabel)
+        .join(" and ");
       console.log(
         pc.yellow(
           live.length
@@ -52,19 +63,32 @@ export async function start(extra: string[]) {
   const cwd = c.repoRoots[0] ?? homedir();
   const args = [
     "claude",
-    "-n", c.coordinatorName,
-    "--permission-mode", "auto",
-    "--mcp-config", PATHS.mcpConfig,
-    "--dangerously-load-development-channels", "server:remy",
-    "--append-system-prompt-file", join(PLUGIN_ROOT, "coordinator.md"),
+    "-n",
+    c.coordinatorName,
+    "--permission-mode",
+    "auto",
+    "--mcp-config",
+    PATHS.mcpConfig,
+    "--dangerously-load-development-channels",
+    "server:remy",
+    "--append-system-prompt-file",
+    join(PLUGIN_ROOT, "coordinator.md"),
     ...extra,
     "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention.",
   ];
   // Compact well before the window fills: every event is a turn that rereads the whole context.
   if (c.coordinatorCompactPct && !compactPct(c.coordinatorCompactPct))
-    console.log(pc.yellow(`! coordinatorCompactPct must be a whole number from 1 to 100; using Claude Code's default.`));
+    console.log(
+      pc.yellow(`! coordinatorCompactPct must be a whole number from 1 to 100; using Claude Code's default.`),
+    );
   const compact = compactEnv(c.coordinatorCompactPct);
-  const r = Bun.spawnSync(args, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...compact, REMY_ROLE: "coordinator" } });
+  const r = Bun.spawnSync(args, {
+    cwd,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+    env: { ...process.env, ...compact, REMY_ROLE: "coordinator" },
+  });
   process.exit(r.exitCode ?? 0);
 }
 
@@ -88,7 +112,8 @@ async function ensureDaemon(cwd: string) {
   const running = await daemonStatus();
   if (running && running.version === VERSION && running.config === configStamp()) return;
   if (running) {
-    const why = running.version !== VERSION ? `it runs ${running.version} and ${VERSION} is installed` : "the config changed";
+    const why =
+      running.version !== VERSION ? `it runs ${running.version} and ${VERSION} is installed` : "the config changed";
     console.log(pc.dim(`Restarting the remy daemon: ${why}.`));
     await askDaemon(PATHS.socket, "restart");
     // A service starts it again by itself, even one whose file doesn't say so: give it a moment before starting one here.
@@ -100,7 +125,13 @@ async function ensureDaemon(cwd: string) {
   const out = openSync(PATHS.log, "a");
   // Not a service, whatever this terminal inherited: a restart has to start it again from here.
   const env = { ...process.env, REMY_DAEMON_SERVICE: "0" };
-  spawn(process.execPath, [join(PLUGIN_ROOT, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
-  if (!(await daemonWithin(15_000, (s) => s.pid !== running?.pid))) throw new Error(`the remy daemon didn't start; see ${PATHS.log}`);
+  spawn(process.execPath, [join(PLUGIN_ROOT, "dist", "cli.js"), "daemon"], {
+    cwd,
+    detached: true,
+    stdio: ["ignore", out, out],
+    env,
+  }).unref();
+  if (!(await daemonWithin(15_000, (s) => s.pid !== running?.pid)))
+    throw new Error(`the remy daemon didn't start; see ${PATHS.log}`);
   console.log(pc.dim(`Started the remy daemon; it keeps running after the coordinator exits (log: ${PATHS.log}).`));
 }

@@ -2,10 +2,10 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Environment } from "../../sdk/factory";
-import type { Build, PrDetail, Report } from "./pipeline";
+import { ciOf } from "../../shared/ci";
 import { ensureDir } from "../../shared/json-file";
 import { PATHS } from "../../shared/paths";
-import { ciOf } from "../../shared/ci";
+import type { Build, PrDetail, Report } from "./pipeline";
 
 /** `out` is stdout, which JSON is read from; `err` is stderr, where gh and gcloud say what went wrong. */
 async function run(cmd: string[], cwd?: string) {
@@ -15,7 +15,14 @@ async function run(cmd: string[], cwd?: string) {
 }
 
 export async function prDetail(url: string): Promise<PrDetail | undefined> {
-  const r = await run(["gh", "pr", "view", url, "--json", "state,isDraft,reviewDecision,statusCheckRollup,headRefOid,additions,deletions,files,changedFiles,mergeCommit"]);
+  const r = await run([
+    "gh",
+    "pr",
+    "view",
+    url,
+    "--json",
+    "state,isDraft,reviewDecision,statusCheckRollup,headRefOid,additions,deletions,files,changedFiles,mergeCommit",
+  ]);
   if (!r.ok) return undefined;
   const j = JSON.parse(r.out);
   const files: string[] = (j.files ?? []).map((f: { path: string }) => f.path);
@@ -52,10 +59,23 @@ function buildOf(builds: { id: string; status: string; createTime?: string }[]):
 async function cloudBuild(sha: string, e: Environment): Promise<Build> {
   if (!e.project) return { status: "error", detail: "the environment has no Cloud Build project" };
   const filter = `substitutions.COMMIT_SHA="${sha}"${e.trigger ? ` AND buildTriggerId="${e.trigger}"` : ""}`;
-  const cmd = ["gcloud", "builds", "list", "--project", e.project, "--filter", filter, "--format", "json(id,status,createTime)", "--limit", "10"];
+  const cmd = [
+    "gcloud",
+    "builds",
+    "list",
+    "--project",
+    e.project,
+    "--filter",
+    filter,
+    "--format",
+    "json(id,status,createTime)",
+    "--limit",
+    "10",
+  ];
   if (e.region) cmd.push("--region", e.region);
   const r = await run(cmd);
-  if (!r.ok) return { status: "error", detail: r.err.split("\n").find((l) => l.startsWith("ERROR")) ?? r.err.split("\n")[0] };
+  if (!r.ok)
+    return { status: "error", detail: r.err.split("\n").find((l) => l.startsWith("ERROR")) ?? r.err.split("\n")[0] };
   return buildOf(JSON.parse(r.out || "[]"));
 }
 
@@ -79,7 +99,11 @@ export async function deploy(sha: string, e: Environment, cwd: string) {
 /** The main checkout a worktree belongs to. */
 export function repoRootOf(cwd: string) {
   try {
-    const r = Bun.spawnSync(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, stdout: "pipe", stderr: "ignore" });
+    const r = Bun.spawnSync(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      cwd,
+      stdout: "pipe",
+      stderr: "ignore",
+    });
     const common = r.exitCode === 0 ? r.stdout.toString().trim() : "";
     return common.endsWith("/.git") ? dirname(common) : cwd;
   } catch {

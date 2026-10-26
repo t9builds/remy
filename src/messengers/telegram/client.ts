@@ -20,7 +20,12 @@ export type Button = { text: string; data: string };
 export class Telegram {
   constructor(private token: string) {}
 
-  async call<T = any>(method: string, params: Record<string, unknown> = {}, timeoutMs = 30_000, isRetry = false): Promise<T> {
+  async call<T = any>(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs = 30_000,
+    isRetry = false,
+  ): Promise<T> {
     let res: Response;
     try {
       res = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
@@ -39,7 +44,12 @@ export class Telegram {
       await Bun.sleep((retryAfter || 5) * 1000);
       return this.call(method, params, timeoutMs, true);
     }
-    throw new TelegramError(method, body.error_code ?? res.status, body.description ?? `http ${res.status}`, retryAfter);
+    throw new TelegramError(
+      method,
+      body.error_code ?? res.status,
+      body.description ?? `http ${res.status}`,
+      retryAfter,
+    );
   }
 
   getMe(): Promise<TgUser & { username: string }> {
@@ -48,7 +58,11 @@ export class Telegram {
 
   /** Long poll: waits up to `timeout` seconds for updates. A negative offset drops all but the last -offset. */
   getUpdates(offset: number | undefined, timeout = 25): Promise<TgUpdate[]> {
-    return this.call("getUpdates", { offset, timeout, allowed_updates: ["message", "callback_query"] }, (timeout + 15) * 1000);
+    return this.call(
+      "getUpdates",
+      { offset, timeout, allowed_updates: ["message", "callback_query"] },
+      (timeout + 15) * 1000,
+    );
   }
 
   /** A webhook URL if another program receives this bot's updates that way. */
@@ -74,7 +88,8 @@ export class Telegram {
       const params: Record<string, unknown> = {
         chat_id: chatId,
         link_preview_options: { is_disabled: true },
-        reply_parameters: i === 0 && opts.replyTo ? { message_id: opts.replyTo, allow_sending_without_reply: true } : undefined,
+        reply_parameters:
+          i === 0 && opts.replyTo ? { message_id: opts.replyTo, allow_sending_without_reply: true } : undefined,
         reply_markup: i === parts.length - 1 && opts.buttons ? keyboard(opts.buttons) : undefined,
       };
       ids.push((await this.withHtml("sendMessage", params, part)).message_id);
@@ -110,10 +125,17 @@ export class Telegram {
   }
 }
 
-const keyboard = (rows: Button[][]) => ({ inline_keyboard: rows.map((r) => r.map((b) => ({ text: b.text, callback_data: b.data }))) });
+const keyboard = (rows: Button[][]) => ({
+  inline_keyboard: rows.map((r) => r.map((b) => ({ text: b.text, callback_data: b.data }))),
+});
 
 export class TelegramError extends Error {
-  constructor(public method: string, public code: number, public description: string, public retryAfter = 0) {
+  constructor(
+    public method: string,
+    public code: number,
+    public description: string,
+    public retryAfter = 0,
+  ) {
     super(`telegram ${method}: ${code ? `${code} ` : ""}${description}`);
   }
 }

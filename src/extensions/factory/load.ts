@@ -9,7 +9,10 @@ let registered = false;
 function registerModule() {
   if (registered) return;
   registered = true;
-  Bun.plugin({ name: "remy-factory", setup: (build) => void build.module("remy/factory", () => ({ exports: { ...define }, loader: "object" })) });
+  Bun.plugin({
+    name: "remy-factory",
+    setup: (build) => void build.module("remy/factory", () => ({ exports: { ...define }, loader: "object" })),
+  });
 }
 
 export type Loaded = { factory?: Factory; error?: string; mtime: number };

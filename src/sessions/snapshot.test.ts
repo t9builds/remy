@@ -1,20 +1,44 @@
 import { expect, test } from "bun:test";
-import { findSession, type Snapshot, type SessionView } from "./snapshot";
 import { ciOf } from "../shared/ci";
-import { formatSession } from "./format";
-import { spawnedEntry } from "./spawned";
 import { diff } from "./changes";
+import { formatSession } from "./format";
+import { findSession, type SessionView, type Snapshot } from "./snapshot";
+import { spawnedEntry } from "./spawned";
 
 const session = (over: Partial<SessionView> = {}): SessionView => ({
-  sessionId: "s1", name: "api-fix", kind: "background", status: "busy", cwd: "/r", startedAt: 1, spawned: true, ...over,
+  sessionId: "s1",
+  name: "api-fix",
+  kind: "background",
+  status: "busy",
+  cwd: "/r",
+  startedAt: 1,
+  spawned: true,
+  ...over,
 });
 const snap = (...sessions: SessionView[]): Snapshot => ({ takenAt: 0, sessions });
-const pr = { number: 7, url: "https://github.com/o/r/pull/7", title: "t", state: "OPEN", draft: false, review: "", ci: "pending" as const, failing: [] };
+const pr = {
+  number: 7,
+  url: "https://github.com/o/r/pull/7",
+  title: "t",
+  state: "OPEN",
+  draft: false,
+  review: "",
+  ci: "pending" as const,
+  failing: [],
+};
 
 test("ciOf rolls up check runs and status contexts", () => {
   expect(ciOf([])).toEqual({ ci: "none", failing: [] });
-  expect(ciOf([{ conclusion: "SUCCESS", status: "COMPLETED" }, { conclusion: "SKIPPED", status: "COMPLETED" }]).ci).toBe("pass");
-  expect(ciOf([{ name: "tests", conclusion: "FAILURE" }, { status: "IN_PROGRESS" }])).toEqual({ ci: "fail", failing: ["tests"] });
+  expect(
+    ciOf([
+      { conclusion: "SUCCESS", status: "COMPLETED" },
+      { conclusion: "SKIPPED", status: "COMPLETED" },
+    ]).ci,
+  ).toBe("pass");
+  expect(ciOf([{ name: "tests", conclusion: "FAILURE" }, { status: "IN_PROGRESS" }])).toEqual({
+    ci: "fail",
+    failing: ["tests"],
+  });
   expect(ciOf([{ state: "PENDING", context: "ci/x" }]).ci).toBe("pending");
 });
 
@@ -33,7 +57,10 @@ test("reports PR opened, CI result and ended sessions", () => {
 });
 
 test("a reused name is not the spawned agent that had it", () => {
-  const spawned = { basil: { id: "cc7d4336", repo: "/r", task: "t", startedAt: 1 }, sage: { repo: "/r", task: "t", startedAt: 1 } };
+  const spawned = {
+    basil: { id: "cc7d4336", repo: "/r", task: "t", startedAt: 1 },
+    sage: { repo: "/r", task: "t", startedAt: 1 },
+  };
   expect(spawnedEntry(spawned, "basil", "cc7d4336-1f91-4e70")).toBe(spawned.basil);
   expect(spawnedEntry(spawned, "renamed", "cc7d4336-1f91-4e70")).toBe(spawned.basil);
   expect(spawnedEntry(spawned, "basil", "59833c56-7822-4c45")).toBeUndefined();
@@ -51,7 +78,10 @@ test("formatSession shows one session with its last message cut short", () => {
   const now = 10 * 60_000;
   const out = formatSession(
     session({
-      name: "basil", repo: "o/r", branch: "fix", about: "fix the login timeout",
+      name: "basil",
+      repo: "o/r",
+      branch: "fix",
+      about: "fix the login timeout",
       pr: { ...pr, ci: "fail", failing: ["tests"] },
       lastEvent: { event: "Stop", ts: now - 3 * 60_000, text: "x".repeat(2000) },
     }),
@@ -65,7 +95,12 @@ test("formatSession shows one session with its last message cut short", () => {
 });
 
 test("findSession takes an exact name, else a unique prefix", () => {
-  const all = [session({ name: "api-ef" }), session({ name: "api-51" }), session({ name: "api" }), session({ name: "basil" })];
+  const all = [
+    session({ name: "api-ef" }),
+    session({ name: "api-51" }),
+    session({ name: "api" }),
+    session({ name: "basil" }),
+  ];
   expect(findSession(all, "api").name).toBe("api");
   expect(findSession(all, "bas").name).toBe("basil");
   expect(() => findSession(all, "api-")).toThrow('"api-" matches api-ef, api-51; give the full name');

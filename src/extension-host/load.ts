@@ -7,22 +7,28 @@
  * - anyone's: packages named in `extensions.packages`, installed in ~/.remy (`cd ~/.remy && bun add <package>`)
  */
 import { join } from "node:path";
-import type { Extension } from "../sdk/extension";
-import { BUILTINS } from "../extensions";
-import { discover, importExtension, type ExtensionHost } from "./host";
-import { REMY_DIR } from "../shared/paths";
-import type { Config } from "../sdk/config";
 import { trustedRepos } from "../config/repos";
+import { BUILTINS } from "../extensions";
+import type { Config } from "../sdk/config";
+import type { Extension } from "../sdk/extension";
+import { REMY_DIR } from "../shared/paths";
+import { discover, type ExtensionHost, importExtension } from "./host";
 
 const USER_EXTENSIONS = join(REMY_DIR, "extensions");
 
 /** The extension folders of the trusted repos, by repo name. */
-const repoExtensionDirs = (config: Config) => trustedRepos(config).map((r) => ({ ...r, dir: r.root && join(r.root, ".remy", "extensions") }));
+const repoExtensionDirs = (config: Config) =>
+  trustedRepos(config).map((r) => ({ ...r, dir: r.root && join(r.root, ".remy", "extensions") }));
 
-export async function loadExtensions(host: ExtensionHost, config: Config, { builtins = BUILTINS, userDir = USER_EXTENSIONS } = {}) {
+export async function loadExtensions(
+  host: ExtensionHost,
+  config: Config,
+  { builtins = BUILTINS, userDir = USER_EXTENSIONS } = {},
+) {
   const disabled = new Set(config.extensions?.disabled ?? []);
   const skip = (name: string) => disabled.has(name);
-  for (const [name, ext] of Object.entries(builtins)) if (!skip(name)) await host.load(`builtin:${name}`, "built in", ext);
+  for (const [name, ext] of Object.entries(builtins))
+    if (!skip(name)) await host.load(`builtin:${name}`, "built in", ext);
 
   const fromFile = async (name: string, path: string) => {
     if (skip(name)) return;
@@ -45,7 +51,11 @@ export async function loadExtensions(host: ExtensionHost, config: Config, { buil
     try {
       path = Bun.resolveSync(pkg, REMY_DIR);
     } catch {
-      host.loaded.push({ name: pkg, from: "extensions.packages", error: `not installed; run \`cd ${REMY_DIR} && bun add ${pkg}\`` });
+      host.loaded.push({
+        name: pkg,
+        from: "extensions.packages",
+        error: `not installed; run \`cd ${REMY_DIR} && bun add ${pkg}\``,
+      });
       continue;
     }
     await fromFile(pkg, path);

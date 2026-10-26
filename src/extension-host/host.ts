@@ -4,10 +4,20 @@
  */
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { Command, CommandContext, EventName, Events, Extension, PostOptions, WaitingEntry, Remy, SessionRef } from "../sdk/extension";
 import { trustedRepos } from "../config/repos";
-import { readJson, writeJson } from "../shared/json-file";
 import type { Config } from "../sdk/config";
+import type {
+  Command,
+  CommandContext,
+  EventName,
+  Events,
+  Extension,
+  PostOptions,
+  Remy,
+  SessionRef,
+  WaitingEntry,
+} from "../sdk/extension";
+import { readJson, writeJson } from "../shared/json-file";
 
 export type HostDeps = {
   /** Post with the daemon's routing (session thread, session workspace). */
@@ -121,7 +131,11 @@ export class ExtensionHost {
   }
 
   private forget(ext: string) {
-    for (const [event, hs] of this.handlers) this.handlers.set(event, hs.filter((h) => h.ext !== ext));
+    for (const [event, hs] of this.handlers)
+      this.handlers.set(
+        event,
+        hs.filter((h) => h.ext !== ext),
+      );
     for (const [name, c] of this.commands) if (c.ext === ext) this.commands.delete(name);
   }
 
@@ -142,7 +156,15 @@ export class ExtensionHost {
         if (this.asks.has(opts.session)) throw new Error(`"${opts.session}" already waits for an answer`);
         const answer = new Promise<string>((resolve) => this.asks.set(opts.session, { ext, resolve }));
         const key = `ask:${opts.session}`;
-        addEntry({ key, rank: 0, label: opts.session, why: `asks: "${question.split("\n")[0]!.slice(0, 100)}"`, action: "reply to its thread", session: opts.session, workspace: opts.workspace });
+        addEntry({
+          key,
+          rank: 0,
+          label: opts.session,
+          why: `asks: "${question.split("\n")[0]!.slice(0, 100)}"`,
+          action: "reply to its thread",
+          session: opts.session,
+          workspace: opts.workspace,
+        });
         try {
           await deps.post(question, { ...opts, expect_reply: true });
         } catch (e) {

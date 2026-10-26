@@ -1,9 +1,9 @@
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import type { Config, MessengerKind, Workspace } from "../sdk/config";
 import { ensureDir, readJson, writeJson } from "../shared/json-file";
 import { PATHS } from "../shared/paths";
-import type { Config, MessengerKind, Workspace } from "../sdk/config";
 
 /** Slack bot token (xoxb-), Slack app-level token (xapp-), Telegram bot token. */
 export type TokenKind = "slack-bot" | "slack-app" | "telegram-bot";
@@ -43,7 +43,10 @@ export function compactPct(value: unknown): number | undefined {
 }
 
 /** What the coordinator's environment gets for compaction. A value already set in the shell wins over the config. */
-export function compactEnv(value: unknown, shell: Record<string, string | undefined> = process.env): Record<string, string> {
+export function compactEnv(
+  value: unknown,
+  shell: Record<string, string | undefined> = process.env,
+): Record<string, string> {
   const pct = compactPct(value);
   return pct && !shell.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE ? { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(pct) } : {};
 }
@@ -56,7 +59,8 @@ export function loadConfig(): Config {
   const raw = readJson<Partial<Config> & { slackUserId?: string }>(PATHS.config, {});
   const config = { ...DEFAULTS, ...raw };
   // 0.1 configs had a single top-level slackUserId.
-  if (!raw.workspaces && raw.slackUserId) config.workspaces = [{ name: "default", slack: { userId: raw.slackUserId, transport: "poll" } }];
+  if (!raw.workspaces && raw.slackUserId)
+    config.workspaces = [{ name: "default", slack: { userId: raw.slackUserId, transport: "poll" } }];
   config.workspaces = config.workspaces.map(migrateWorkspace);
   delete (config as any).slackUserId;
   return config;
@@ -78,7 +82,13 @@ export function saveConfig(config: Config) {
 const isCatchAll = (w: Workspace) => !w.repos?.length && !w.paths?.length;
 
 function globMatch(pattern: string, value: string) {
-  const re = new RegExp(`^${pattern.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i");
+  const re = new RegExp(
+    `^${pattern
+      .split("*")
+      .map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*")}$`,
+    "i",
+  );
   return re.test(value);
 }
 
@@ -97,7 +107,8 @@ export function workspaceFor(where: { cwd?: string; repo?: string }, config: Con
     for (const ws of config.workspaces) {
       for (const p of ws.paths ?? []) {
         const root = expandHome(p);
-        if ((cwd === root || cwd.startsWith(root + sep)) && root.length > (best?.len ?? -1)) best = { ws, len: root.length };
+        if ((cwd === root || cwd.startsWith(root + sep)) && root.length > (best?.len ?? -1))
+          best = { ws, len: root.length };
       }
     }
   }
@@ -131,12 +142,20 @@ export const TOKEN_FORMAT: Record<TokenKind, { pattern: RegExp; example: string 
 /** Store a token. macOS: keychain, handed over on stdin so it never shows in the process list. Elsewhere: a 0600 file in ~/.remy. */
 export function storeToken(workspace: string, kind: TokenKind, token: string) {
   ensureDir();
-  if (!TOKEN_FORMAT[kind].pattern.test(token)) throw new Error(`That doesn't look like a ${kind} token (${TOKEN_FORMAT[kind].example})`);
+  if (!TOKEN_FORMAT[kind].pattern.test(token))
+    throw new Error(`That doesn't look like a ${kind} token (${TOKEN_FORMAT[kind].example})`);
   if (process.platform === "darwin") {
     const cmd = `add-generic-password -U -a remy -s "${keychainService(workspace, kind)}" -w "${token}"\n`;
-    const r = Bun.spawnSync(["security", "-i"], { stdin: new TextEncoder().encode(cmd), stdout: "pipe", stderr: "pipe" });
-    const saved = Bun.spawnSync(["security", "find-generic-password", "-s", keychainService(workspace, kind), "-w"]).stdout.toString().trim();
-    if (r.exitCode !== 0 || saved !== token) throw new Error(`Saving the ${kind} token to the keychain failed: ${r.stderr.toString().trim()}`);
+    const r = Bun.spawnSync(["security", "-i"], {
+      stdin: new TextEncoder().encode(cmd),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const saved = Bun.spawnSync(["security", "find-generic-password", "-s", keychainService(workspace, kind), "-w"])
+      .stdout.toString()
+      .trim();
+    if (r.exitCode !== 0 || saved !== token)
+      throw new Error(`Saving the ${kind} token to the keychain failed: ${r.stderr.toString().trim()}`);
     return;
   }
   writeFileSync(PATHS.tokenFile(workspace, kind), `${token}\n`, { mode: 0o600 });

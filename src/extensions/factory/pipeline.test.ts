@@ -1,6 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { action, agent, defineFactory, gate, levelOf, lowerLevel, validate, wait, type Factory, type Level } from "../../sdk/factory";
-import { advance, gateBlockers, YES, type Build, type Env, type PrDetail, type Report, type Run } from "./pipeline";
+import {
+  action,
+  agent,
+  defineFactory,
+  type Factory,
+  gate,
+  type Level,
+  levelOf,
+  lowerLevel,
+  validate,
+  wait,
+} from "../../sdk/factory";
+import { advance, type Build, type Env, gateBlockers, type PrDetail, type Report, type Run, YES } from "./pipeline";
 
 const URL = "https://github.com/acme-corp/api/pull/7";
 
@@ -25,12 +36,36 @@ const ADR: Factory = defineFactory({
   ],
 });
 
-const detail = (over: Partial<PrDetail> = {}): PrDetail => ({ state: "OPEN", draft: false, review: "", ci: "pass", head: "aaa", lines: 40, files: ["src/a.ts"], allFiles: true, ...over });
+const detail = (over: Partial<PrDetail> = {}): PrDetail => ({
+  state: "OPEN",
+  draft: false,
+  review: "",
+  ci: "pass",
+  head: "aaa",
+  lines: 40,
+  files: ["src/a.ts"],
+  allFiles: true,
+  ...over,
+});
 
 function newRun(): Run {
   return {
-    pr: URL, number: 7, title: "Fix login", repo: "acme-corp/api", repoDir: "/r/api", branch: "fix-login", session: "basil", workspace: "work",
-    head: "aaa", step: 0, round: 1, stage: "running", since: 0, stepSince: 0, reports: [], approved: [],
+    pr: URL,
+    number: 7,
+    title: "Fix login",
+    repo: "acme-corp/api",
+    repoDir: "/r/api",
+    branch: "fix-login",
+    session: "basil",
+    workspace: "work",
+    head: "aaa",
+    step: 0,
+    round: 1,
+    stage: "running",
+    since: 0,
+    stepSince: 0,
+    reports: [],
+    approved: [],
   };
 }
 
@@ -83,7 +118,8 @@ function world() {
 }
 
 const go = (run: Run, env: Env, f: Factory = ADR, level: Level = "deploy-prod") => advance(run, f, level, env);
-const at = (run: Run, f: Factory = ADR) => `${run.stage}:${f.steps[run.step] ? `${f.steps[run.step]!.kind} ${f.steps[run.step]!.name}` : "end"}`;
+const at = (run: Run, f: Factory = ADR) =>
+  `${run.stage}:${f.steps[run.step] ? `${f.steps[run.step]!.kind} ${f.steps[run.step]!.name}` : "end"}`;
 
 describe("the ADR-0004 pipeline", () => {
   test("from review to verified on production", async () => {
@@ -189,7 +225,9 @@ describe("the ADR-0004 pipeline", () => {
     w.report("fail", "touches billing; wants a human look");
     await go(run, env);
     expect(run.stage).toBe("asking");
-    expect(w.asked).toEqual(["release-check for #7 Fix login says: touches billing; wants a human look. Go on anyway? Reply yes, or no to stop here."]);
+    expect(w.asked).toEqual([
+      "release-check for #7 Fix login says: touches billing; wants a human look. Go on anyway? Reply yes, or no to stop here.",
+    ]);
     run.ask!.answer = "no, wait for Monday";
     await go(run, env);
     expect(run.stage).toBe("held");
@@ -260,7 +298,9 @@ describe("autonomy", () => {
     w.report("pass", "all good");
     await go(run, env, ADR, "verify");
     expect(run.stage).toBe("asking");
-    expect(w.asked).toEqual(["Merge for #7 Fix login? Last verdict: all good. Reply yes to go ahead (your autonomy stops at verify)."]);
+    expect(w.asked).toEqual([
+      "Merge for #7 Fix login? Last verdict: all good. Reply yes to go ahead (your autonomy stops at verify).",
+    ]);
     expect(w.merges).toEqual([]);
     run.ask!.answer = "yes";
     await go(run, env, ADR, "verify");
@@ -286,8 +326,10 @@ describe("autonomy", () => {
   });
 
   test("only a plain yes is consent", () => {
-    for (const yes of ["yes", "Yes!", " ok ", "ship it", "👍", "👍🏽", "✅", ":+1:", "lgtm."]) expect(YES.test(yes)).toBe(true);
-    for (const no of ["no", "go away", "ok but don't", "yes, after the release", "not yet", "👎"]) expect(YES.test(no)).toBe(false);
+    for (const yes of ["yes", "Yes!", " ok ", "ship it", "👍", "👍🏽", "✅", ":+1:", "lgtm."])
+      expect(YES.test(yes)).toBe(true);
+    for (const no of ["no", "go away", "ok but don't", "yes, after the release", "not yet", "👎"])
+      expect(YES.test(no)).toBe(false);
   });
 
   test("at verify, a person merging it themselves is the answer too", async () => {
@@ -320,7 +362,13 @@ test("validate reports a broken pipeline", () => {
   expect(
     validate({
       autonomy: "everything" as Level,
-      steps: [agent("a", { skill: "" }), agent("a", { skill: "/x" }), wait("deploy", { env: "staging" }), action("deploy", { env: "prod" }), gate("g", { verdicts: ["nope"] })],
+      steps: [
+        agent("a", { skill: "" }),
+        agent("a", { skill: "/x" }),
+        wait("deploy", { env: "staging" }),
+        action("deploy", { env: "prod" }),
+        gate("g", { verdicts: ["nope"] }),
+      ],
     }),
   ).toEqual([
     'autonomy "everything" isn\'t one of notify, verify, merge, deploy-dev, deploy-prod',

@@ -8,7 +8,12 @@ import { formatWaitingList, type WaitingItem, waitingListOf } from "../sessions/
  * Show `text` in the message `prev` points to, or post and pin a new one when that message is gone. Returns what to
  * remember: still `prev` after an edit that failed for another reason (offline, rate limited), so the next refresh retries.
  */
-export async function showWaitingList(m: Messenger, prev: { id: string; text: string } | undefined, text: string, log: (...a: unknown[]) => void) {
+export async function showWaitingList(
+  m: Messenger,
+  prev: { id: string; text: string } | undefined,
+  text: string,
+  log: (...a: unknown[]) => void,
+) {
   if (prev?.text === text) return prev;
   if (prev) {
     try {
@@ -48,7 +53,12 @@ export function coalesce(run: () => void) {
 }
 
 /** The workspace's list, with only its own sessions, and what extensions put on it. */
-export function composeWaitingList(snap: Snapshot, workspace: string, entries: WaitingEntry[], workspaceOf: (s: SessionView) => string) {
+export function composeWaitingList(
+  snap: Snapshot,
+  workspace: string,
+  entries: WaitingEntry[],
+  workspaceOf: (s: SessionView) => string,
+) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s) === workspace);
   // An extension's entry about a session replaces the session's own line.
   const claimed = new Set(entries.flatMap((e) => (e.session ? [e.session] : [])));
@@ -57,7 +67,17 @@ export function composeWaitingList(snap: Snapshot, workspace: string, entries: W
     const of = e.session ? sessions.find((s) => s.name === e.session) : undefined;
     const where = e.workspace ?? (of ? workspace : undefined);
     if (where && where !== workspace) return [];
-    return [{ session: e.label, sessionId: `extension:${e.key}`, cwd: "", rank: e.rank, why: e.why, action: e.action, pr: e.url }];
+    return [
+      {
+        session: e.label,
+        sessionId: `extension:${e.key}`,
+        cwd: "",
+        rank: e.rank,
+        why: e.why,
+        action: e.action,
+        pr: e.url,
+      },
+    ];
   });
   // Stable: within a rank, sessions first, then extensions' entries in the order they came. A session's own
   // question stays even when an extension speaks for its PR.

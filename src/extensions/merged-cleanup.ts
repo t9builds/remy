@@ -3,8 +3,9 @@
  * worktree, or stops it and keeps a worktree that still has work in it. Waits while the agent is mid-turn, and leaves
  * sessions you started yourself alone.
  */
-import { formatNotice } from "../shared/notices";
+
 import type { Remy, SessionRef } from "../sdk/extension";
+import { formatNotice } from "../shared/notices";
 
 export const shouldClose = (s: SessionRef) => s.spawned && s.pr?.state === "MERGED" && s.status !== "busy";
 
@@ -16,7 +17,9 @@ export default function mergedCleanup(remy: Remy) {
     try {
       const pr = s.pr!;
       const cleanup = await remy.close(s.name, { merged: pr });
-      const text = formatNotice([{ session: s.name, repo: s.repo, what: "merged", detail: `PR #${pr.number} merged; ${cleanup}`, pr: pr.url }]);
+      const text = formatNotice([
+        { session: s.name, repo: s.repo, what: "merged", detail: `PR #${pr.number} merged; ${cleanup}`, pr: pr.url },
+      ]);
       if (text) await remy.post(text, { workspace: s.workspace });
     } finally {
       closing.delete(s.sessionId);

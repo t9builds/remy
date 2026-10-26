@@ -12,7 +12,10 @@ export function coordinatorTools(working: string) {
         properties: {
           text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
           workspace: { type: "string", description: `Workspace from the event tag. Working: ${working || "none"}` },
-          thread: { type: "string", description: "Answer in this thread: thread or id from the event tag, or an id post returned" },
+          thread: {
+            type: "string",
+            description: "Answer in this thread: thread or id from the event tag, or an id post returned",
+          },
           session: {
             type: "string",
             description:

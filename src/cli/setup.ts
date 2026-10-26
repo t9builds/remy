@@ -3,21 +3,39 @@
  * as it's done, so a Ctrl-C keeps everything before it. Tokens are checked against Slack or Telegram before they're
  * stored.
  */
-import * as p from "@clack/prompts";
+
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, } from "node:path";
-import { createMessenger, describeMessengers, quietSink } from "../messengers/workspaces";
-import { expandHome, loadConfig, messengerLabel, messengersOf, readToken, saveConfig, storeToken, TOKEN_FORMAT, type TokenKind } from "../config/config";
-import { doctor } from "./doctor";
+import { join } from "node:path";
+import * as p from "@clack/prompts";
+import {
+  expandHome,
+  loadConfig,
+  messengerLabel,
+  messengersOf,
+  readToken,
+  saveConfig,
+  storeToken,
+  TOKEN_FORMAT,
+  type TokenKind,
+} from "../config/config";
+import { askDaemon } from "../link/client";
 import { Slack, SlackError } from "../messengers/slack/client";
 import { Telegram, TelegramError } from "../messengers/telegram/client";
-import { formatChecks, pc } from "./ui";
+import { createMessenger, describeMessengers, quietSink } from "../messengers/workspaces";
+import type {
+  BothMode,
+  Config,
+  MessengerKind,
+  Routing,
+  SlackSettings,
+  TelegramSettings,
+  Workspace,
+} from "../sdk/config";
 import { ensureDir } from "../shared/json-file";
 import { PATHS, PLUGIN_ROOT } from "../shared/paths";
-import type { BothMode, Config, MessengerKind, Routing, SlackSettings, TelegramSettings, Workspace } from "../sdk/config";
-import { askDaemon } from "../link/client";
-
+import { doctor } from "./doctor";
+import { formatChecks, pc } from "./ui";
 
 /** A prompt's answer, or a clean exit on Ctrl-C. */
 async function answer<T>(prompt: Promise<T>): Promise<Exclude<T, symbol>> {
@@ -29,7 +47,11 @@ async function answer<T>(prompt: Promise<T>): Promise<Exclude<T, symbol>> {
   return v as Exclude<T, symbol>;
 }
 
-const list = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+const list = (s: string) =>
+  s
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
 const describe = (ws: Workspace) => {
   const scope = [...(ws.repos ?? []), ...(ws.paths ?? [])].join(", ") || "everything else";
   return `${describeMessengers(ws)} · ${scope}`;
@@ -41,7 +63,10 @@ export async function setup(only?: string) {
   const c = loadConfig();
   p.intro(pc.bgCyan(pc.black(" remy setup ")));
   // A running daemon reads the Telegram bot that pairing reads too, and wouldn't see the new settings anyway.
-  if (await askDaemon(PATHS.socket, "stop")) p.log.info(`Stopped the remy daemon while you set up; ${pc.cyan("remy start")} starts it again with the new settings.`);
+  if (await askDaemon(PATHS.socket, "stop"))
+    p.log.info(
+      `Stopped the remy daemon while you set up; ${pc.cyan("remy start")} starts it again with the new settings.`,
+    );
 
   if (only) {
     await setupWorkspace(c, only);
@@ -56,7 +81,11 @@ export async function setup(only?: string) {
   const { ok, rows } = await doctor();
   s.stop(ok ? "All checks pass" : "Some checks need attention");
   p.note(formatChecks(rows), "remy doctor");
-  p.outro(ok ? `Next: run ${pc.cyan("remy start")} in a terminal you can leave open.` : `Fix the ${pc.red("✗")} items, then run ${pc.cyan("remy setup")} again.`);
+  p.outro(
+    ok
+      ? `Next: run ${pc.cyan("remy start")} in a terminal you can leave open.`
+      : `Fix the ${pc.red("✗")} items, then run ${pc.cyan("remy setup")} again.`,
+  );
 }
 
 async function general(c: Config) {
@@ -88,7 +117,10 @@ async function general(c: Config) {
 }
 
 async function workspaces(c: Config) {
-  if (!c.workspaces.length) p.log.info("A workspace is where remy talks to you about a set of sessions: in Slack, in Telegram, or both. You can add several.");
+  if (!c.workspaces.length)
+    p.log.info(
+      "A workspace is where remy talks to you about a set of sessions: in Slack, in Telegram, or both. You can add several.",
+    );
   for (;;) {
     const choice = await answer(
       p.select<string>({
@@ -108,7 +140,11 @@ async function workspaces(c: Config) {
           message: `Workspace "${choice}"`,
           options: [
             { value: "edit", label: "Edit" },
-            { value: "remove", label: "Remove", hint: "its sessions go to another workspace; stored tokens stay in the keychain" },
+            {
+              value: "remove",
+              label: "Remove",
+              hint: "its sessions go to another workspace; stored tokens stay in the keychain",
+            },
           ],
         }),
       );
@@ -124,7 +160,12 @@ async function workspaces(c: Config) {
       p.text({
         message: "Name for this workspace",
         placeholder: c.workspaces.length ? "personal" : "work",
-        validate: (v) => (!/^[a-z0-9][\w-]*$/i.test(v ?? "") ? "Letters, digits, - and _" : c.workspaces.some((w) => w.name === v) ? "Already taken" : undefined),
+        validate: (v) =>
+          !/^[a-z0-9][\w-]*$/i.test(v ?? "")
+            ? "Letters, digits, - and _"
+            : c.workspaces.some((w) => w.name === v)
+              ? "Already taken"
+              : undefined,
       }),
     );
     await setupWorkspace(c, name);
@@ -156,7 +197,9 @@ async function setupWorkspace(c: Config, name: string) {
   const s = p.spinner();
   s.start("Sending you a test message");
   try {
-    await createMessenger(ws, quietSink, { triggerEmoji: c.triggerEmoji }).post(`👋 remy is connected here ("${name}"). Start the coordinator with \`remy start\`.`);
+    await createMessenger(ws, quietSink, { triggerEmoji: c.triggerEmoji }).post(
+      `👋 remy is connected here ("${name}"). Start the coordinator with \`remy start\`.`,
+    );
     s.stop(`Saved "${name}" and sent you a test message in ${kinds.map(messengerLabel).join(" and ")}`);
   } catch (e: any) {
     s.error(`Saved "${name}", but the test message failed: ${e?.message ?? e}`);
@@ -170,7 +213,11 @@ async function askBoth(existing?: Workspace): Promise<{ both: BothMode; main?: M
       message: "With both connected",
       options: [
         { value: "mirror", label: "Mirror", hint: "everything in both; what you write in one shows in the other" },
-        { value: "pings", label: "Main app + pings", hint: "everything in one; the other only gets questions and permission prompts" },
+        {
+          value: "pings",
+          label: "Main app + pings",
+          hint: "everything in one; the other only gets questions and permission prompts",
+        },
         { value: "follow", label: "Follow me", hint: "messages go to whichever app you last wrote from" },
       ],
       initialValue: existing?.both ?? "mirror",
@@ -199,20 +246,37 @@ async function askRouting(c: Config, name: string, existing?: Workspace): Promis
     ),
   );
   const repos = await answer(
-    p.text({ message: "GitHub repos", placeholder: "acme-corp/*, someone/side-project", initialValue: existing?.repos?.join(", ") ?? "" }),
+    p.text({
+      message: "GitHub repos",
+      placeholder: "acme-corp/*, someone/side-project",
+      initialValue: existing?.repos?.join(", ") ?? "",
+    }),
   );
-  const paths = await answer(p.text({ message: "Folders", placeholder: "~/work", initialValue: existing?.paths?.join(", ") ?? "" }));
-  return { name, repos: list(repos).length ? list(repos) : undefined, paths: list(paths).length ? list(paths).map(expandHome) : undefined };
+  const paths = await answer(
+    p.text({ message: "Folders", placeholder: "~/work", initialValue: existing?.paths?.join(", ") ?? "" }),
+  );
+  return {
+    name,
+    repos: list(repos).length ? list(repos) : undefined,
+    paths: list(paths).length ? list(paths).map(expandHome) : undefined,
+  };
 }
 
 /** Keep the stored token, or ask for one, check it with `verify`, and store it. Returns whether it changed. */
-async function askToken(name: string, kind: TokenKind, what: string, verify: (t: string) => Promise<string>): Promise<boolean> {
-  if (readToken(name, kind) && (await answer(p.confirm({ message: `Keep the stored ${what}?`, initialValue: true })))) return false;
+async function askToken(
+  name: string,
+  kind: TokenKind,
+  what: string,
+  verify: (t: string) => Promise<string>,
+): Promise<boolean> {
+  if (readToken(name, kind) && (await answer(p.confirm({ message: `Keep the stored ${what}?`, initialValue: true }))))
+    return false;
   for (;;) {
     const t = await answer(
       p.password({
         message: `Paste the ${what}`,
-        validate: (v) => (TOKEN_FORMAT[kind].pattern.test(v?.trim() ?? "") ? undefined : `Expected ${TOKEN_FORMAT[kind].example}`),
+        validate: (v) =>
+          TOKEN_FORMAT[kind].pattern.test(v?.trim() ?? "") ? undefined : `Expected ${TOKEN_FORMAT[kind].example}`,
       }),
     );
     const s = p.spinner();
@@ -261,15 +325,23 @@ async function setupSlack(name: string, existing?: SlackSettings): Promise<Slack
     p.text({
       message: `Default repo per channel for thread tasks ${pc.dim("(optional)")}`,
       placeholder: "bugs=api, web-bugs=web",
-      initialValue: Object.entries(existing?.channelRepos ?? {}).map(([k, v]) => `${k}=${v}`).join(", "),
+      initialValue: Object.entries(existing?.channelRepos ?? {})
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", "),
     }),
   );
-  const pairs = list(channelRepos).map((x) => x.split("=").map((y) => y.trim().replace(/^#/, ""))).filter(([k, v]) => k && v);
+  const pairs = list(channelRepos)
+    .map((x) => x.split("=").map((y) => y.trim().replace(/^#/, "")))
+    .filter(([k, v]) => k && v);
 
   if (!readToken(name, "slack-bot")) p.note(SLACK_APP_STEPS, "Slack app");
   await askToken(name, "slack-bot", "Slack bot token", async (t) => {
     const who = await new Slack(t).whoami().catch((e) => {
-      throw new Error(e instanceof SlackError && e.code === "invalid_auth" ? "Slack doesn't accept this token" : e?.message ?? String(e));
+      throw new Error(
+        e instanceof SlackError && e.code === "invalid_auth"
+          ? "Slack doesn't accept this token"
+          : (e?.message ?? String(e)),
+      );
     });
     const missing = ["chat:write", "im:history", "im:read", "im:write"].filter((s) => !who.scopes.includes(s));
     if (missing.length) throw new Error(`The token lacks ${missing.join(", ")}; add them and reinstall the app`);
@@ -302,23 +374,36 @@ async function setupTelegram(name: string, existing?: TelegramSettings): Promise
     const tg = new Telegram(t);
     username = (
       await tg.getMe().catch((e) => {
-        throw new Error(e instanceof TelegramError && e.code === 401 ? "Telegram doesn't accept this token" : e?.message ?? String(e));
+        throw new Error(
+          e instanceof TelegramError && e.code === 401
+            ? "Telegram doesn't accept this token"
+            : (e?.message ?? String(e)),
+        );
       })
     ).username;
-    if (await tg.webhook()) throw new Error(`@${username} sends its messages to a webhook, so another program uses it. Make a new bot for remy`);
+    if (await tg.webhook())
+      throw new Error(
+        `@${username} sends its messages to a webhook, so another program uses it. Make a new bot for remy`,
+      );
     return `Connected to @${username}`;
   });
   const tg = new Telegram(readToken(name, "telegram-bot")!);
   username ||= (await tg.getMe()).username;
   let userId = existing?.userId ?? 0;
-  if (changed || !userId || !(await answer(p.confirm({ message: `Stay paired with Telegram user ${userId}?`, initialValue: true }))))
+  if (
+    changed ||
+    !userId ||
+    !(await answer(p.confirm({ message: `Stay paired with Telegram user ${userId}?`, initialValue: true })))
+  )
     userId = await pairTelegram(tg, username, name);
   return { userId };
 }
 
 /** Learn the user's Telegram ID from the first message they send the bot. */
 async function pairTelegram(tg: Telegram, username: string, workspace: string): Promise<number> {
-  p.log.info(`Open ${pc.cyan(`https://t.me/${username}`)} and press ${pc.bold("Start")} (or send the bot any message).`);
+  p.log.info(
+    `Open ${pc.cyan(`https://t.me/${username}`)} and press ${pc.bold("Start")} (or send the bot any message).`,
+  );
   const s = p.spinner();
   s.start(`Waiting for your message to @${username}`);
   let offset: number | undefined;
@@ -329,7 +414,8 @@ async function pairTelegram(tg: Telegram, username: string, workspace: string): 
       updates = await tg.getUpdates(offset, 20);
     } catch (e) {
       s.error("Couldn't read the bot");
-      if (e instanceof TelegramError && e.code === 409) throw new Error(`Another program is reading @${username} (is \`remy start\` running?). Stop it and try again.`);
+      if (e instanceof TelegramError && e.code === 409)
+        throw new Error(`Another program is reading @${username} (is \`remy start\` running?). Stop it and try again.`);
       throw e;
     }
     for (const u of updates) {
@@ -368,4 +454,3 @@ exec "$root/bin/remy" "$@"
   const onPath = (process.env.PATH ?? "").split(":").includes(bin);
   return `Installed the ${pc.cyan("remy")} command${onPath ? "" : pc.yellow(` (add ${bin} to your PATH)`)}`;
 }
-

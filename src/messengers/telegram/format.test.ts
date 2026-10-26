@@ -2,10 +2,14 @@ import { expect, test } from "bun:test";
 import { splitText, toTelegramHtml } from "./format";
 
 test("mrkdwn becomes Telegram HTML, with everything else escaped", () => {
-  expect(toTelegramHtml("*api-fix* · <https://github.com/a/b/pull/1|PR #1> · CI ✓")).toBe('<b>api-fix</b> · <a href="https://github.com/a/b/pull/1">PR #1</a> · CI ✓');
+  expect(toTelegramHtml("*api-fix* · <https://github.com/a/b/pull/1|PR #1> · CI ✓")).toBe(
+    '<b>api-fix</b> · <a href="https://github.com/a/b/pull/1">PR #1</a> · CI ✓',
+  );
   expect(toTelegramHtml("_waiting_ on `a<b && c>d`")).toBe("<i>waiting</i> on <code>a&lt;b &amp;&amp; c&gt;d</code>");
   expect(toTelegramHtml("```\nif (a < b) *x*\n```")).toBe("<pre>if (a &lt; b) *x*</pre>");
-  expect(toTelegramHtml("**bold** and [docs](https://x.dev/?a=1&b=2)")).toBe('<b>bold</b> and <a href="https://x.dev/?a=1&amp;b=2">docs</a>');
+  expect(toTelegramHtml("**bold** and [docs](https://x.dev/?a=1&b=2)")).toBe(
+    '<b>bold</b> and <a href="https://x.dev/?a=1&amp;b=2">docs</a>',
+  );
 });
 
 test("snake_case, globs and lone stars stay as they are", () => {

@@ -21,7 +21,8 @@ export async function runHook() {
   // On a prompt: give a session without a name a kitchen name. Claude Code renames it to `sessionTitle`.
   if (input.hook_event_name === "UserPromptSubmit") {
     const name = await nameSession(input, async () => (await listAgents()).map((a) => a.name));
-    if (name) console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", sessionTitle: name } }));
+    if (name)
+      console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", sessionTitle: name } }));
     return;
   }
   const ev: RemyEvent = {

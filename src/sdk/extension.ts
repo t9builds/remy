@@ -74,7 +74,14 @@ export type Events = {
    * The user wrote in a workspace. `kind` is "user_message", or "task_request" for a Slack channel thread the user
    * mentioned the bot in or reacted to (`task` is its id; see messengers/slack/task.ts). `session` is set when it's a reply to an agent.
    */
-  message: { workspace: string; text: string; kind: "user_message" | "task_request"; session?: string; thread?: string; meta: Record<string, string> };
+  message: {
+    workspace: string;
+    text: string;
+    kind: "user_message" | "task_request";
+    session?: string;
+    thread?: string;
+    meta: Record<string, string>;
+  };
   /** Every `tickSeconds`, after Remy looked at the sessions again. */
   tick: { at: number };
 };
@@ -144,7 +151,16 @@ export interface Remy {
    * Start a background agent, as `remy spawn` does. `prompt` replaces `spawnTemplate` with a whole prompt of your own;
    * `role` marks an agent that reports through `remy report` rather than its own PR, and keeps it off the waiting list.
    */
-  spawn(opts: { repo: string; task: string; name?: string; worktree?: boolean; permissionMode?: string; prompt?: string; role?: string; pr?: string }): Promise<SpawnResult>;
+  spawn(opts: {
+    repo: string;
+    task: string;
+    name?: string;
+    worktree?: boolean;
+    permissionMode?: string;
+    prompt?: string;
+    role?: string;
+    pr?: string;
+  }): Promise<SpawnResult>;
   /**
    * Close a session: `claude rm` (session and worktree), or `claude stop` when the worktree has work left. Returns
    * what happened. `merged`: an agent closed because this PR merged; it then counts as merged (`remy status --merged`).

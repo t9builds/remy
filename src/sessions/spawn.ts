@@ -1,12 +1,12 @@
-import { existsSync, } from "node:fs";
-import { basename, join, } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, join } from "node:path";
 import { loadConfig } from "../config/config";
 import { resolveRepo } from "../config/repos";
-import { pickNickname, takenNames, type Nicknames } from "./names";
 import type { SpawnResult } from "../sdk/extension";
-import { PATHS } from "../shared/paths";
 import { readJson, writeJson } from "../shared/json-file";
+import { PATHS } from "../shared/paths";
 import { listAgents } from "./agents";
+import { type Nicknames, pickNickname, takenNames } from "./names";
 import type { Spawned } from "./spawned";
 
 const SESSION_ENV = new Set([
@@ -23,7 +23,11 @@ const SESSION_ENV = new Set([
 ]);
 
 function slug(s: string) {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
 }
 
 /**
@@ -63,9 +67,10 @@ export async function spawnAgent(opts: {
 
   // Drop the variables that tie a process to the session running this command (the coordinator),
   // or the new agent would inherit its session id, inbox and REMY_ROLE.
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(([k]) => !SESSION_ENV.has(k)),
-  ) as Record<string, string>;
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_ENV.has(k))) as Record<
+    string,
+    string
+  >;
   const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env });
   const out = (r.stdout.toString() + r.stderr.toString()).trim();
   if (r.exitCode !== 0) throw new Error(`claude --bg failed (${r.exitCode}): ${out}`);
@@ -85,4 +90,3 @@ export async function spawnAgent(opts: {
   writeJson(PATHS.spawned, spawned);
   return { name, label, id, cwd, worktree, output: out };
 }
-

@@ -17,7 +17,9 @@ export function formatRuns(runs: Run[], factoryOf: (r: Run) => Factory | undefin
     .sort((a, b) => b.since - a.since)
     .map((r) => {
       const step = factoryOf(r)?.steps[r.step];
-      const at = step ? `${step.kind} ${step.name}${r.agent ? ` (${r.agent.name})` : ""}${r.round > 1 ? `, round ${r.round}` : ""}` : "";
+      const at = step
+        ? `${step.kind} ${step.name}${r.agent ? ` (${r.agent.name})` : ""}${r.round > 1 ? `, round ${r.round}` : ""}`
+        : "";
       return `#${r.number} ${r.repo} · ${STAGE[r.stage]}${at ? ` · ${at}` : ""}${r.reason ? ` · ${r.reason}` : ""} · ${r.pr}`;
     })
     .join("\n");

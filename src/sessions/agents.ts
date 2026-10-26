@@ -1,5 +1,12 @@
 /** The sessions Claude Code itself lists (`claude agents --json`). */
-export type AgentRow = { sessionId: string; name: string; kind: string; status: string; cwd: string; startedAt: number };
+export type AgentRow = {
+  sessionId: string;
+  name: string;
+  kind: string;
+  status: string;
+  cwd: string;
+  startedAt: number;
+};
 
 async function run(cmd: string[], cwd?: string): Promise<string | undefined> {
   try {

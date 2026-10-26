@@ -8,7 +8,8 @@ import { dirname, join, resolve } from "node:path";
  * from src/ and below.
  */
 export const PLUGIN_ROOT = (() => {
-  for (let dir = import.meta.dir; dir !== dirname(dir); dir = dirname(dir)) if (existsSync(join(dir, ".claude-plugin", "plugin.json"))) return dir;
+  for (let dir = import.meta.dir; dir !== dirname(dir); dir = dirname(dir))
+    if (existsSync(join(dir, ".claude-plugin", "plugin.json"))) return dir;
   return resolve(import.meta.dir, "..");
 })();
 
