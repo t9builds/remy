@@ -10,8 +10,15 @@ const repoCache = new Map<string, string | undefined>();
 export function githubRepoOf(cwd: string | undefined): string | undefined {
   if (!cwd) return undefined;
   if (!repoCache.has(cwd)) {
-    const r = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd, stdout: "pipe", stderr: "ignore" });
-    repoCache.set(cwd, r.exitCode === 0 ? r.stdout.toString().trim().match(GITHUB_REMOTE)?.[1] : undefined);
+    let origin: string | undefined;
+    try {
+      const r = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd, stdout: "pipe", stderr: "ignore" });
+      origin = r.exitCode === 0 ? r.stdout.toString().trim() : undefined;
+    } catch {
+      // The folder is gone (a removed worktree): no repo, and the rest of the look at the sessions goes on.
+      return undefined;
+    }
+    repoCache.set(cwd, origin?.match(GITHUB_REMOTE)?.[1]);
   }
   return repoCache.get(cwd);
 }

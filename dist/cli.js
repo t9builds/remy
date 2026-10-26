@@ -3280,8 +3280,14 @@ function githubRepoOf(cwd) {
   if (!cwd)
     return;
   if (!repoCache.has(cwd)) {
-    const r = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd, stdout: "pipe", stderr: "ignore" });
-    repoCache.set(cwd, r.exitCode === 0 ? r.stdout.toString().trim().match(GITHUB_REMOTE)?.[1] : undefined);
+    let origin;
+    try {
+      const r = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd, stdout: "pipe", stderr: "ignore" });
+      origin = r.exitCode === 0 ? r.stdout.toString().trim() : undefined;
+    } catch {
+      return;
+    }
+    repoCache.set(cwd, origin?.match(GITHUB_REMOTE)?.[1]);
   }
   return repoCache.get(cwd);
 }
