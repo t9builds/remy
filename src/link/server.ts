@@ -19,7 +19,10 @@ export type ServerHandlers = {
 function answers(path: string, timeoutMs = 1_000) {
   return new Promise<boolean>((resolve) => {
     const s = createConnection(path);
-    const done = (ok: boolean) => (s.destroy(), resolve(ok));
+    const done = (ok: boolean) => {
+      s.destroy();
+      resolve(ok);
+    };
     s.setTimeout(timeoutMs, () => done(false));
     s.on("connect", () => done(true));
     s.on("error", () => done(false));
@@ -114,7 +117,7 @@ export class LinkServer {
     if (socket.destroyed) return;
     if (this.coordinator && this.coordinator !== socket) {
       this.handlers.log("link: a newer coordinator connected; closing the old one");
-      this.coordinator.end(JSON.stringify({ type: "replaced" } satisfies ToClient) + "\n");
+      this.coordinator.end(`${JSON.stringify({ type: "replaced" } satisfies ToClient)}\n`);
     }
     this.coordinator = socket;
     const held = this.held;

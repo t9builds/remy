@@ -11,7 +11,7 @@ export type Paint = {
   dim(s: string): string;
 };
 const same = (s: string) => s;
-export const PLAIN: Paint = { name: same, status: (_, s) => s, ci: (_, s) => s, dim: same };
+const PLAIN: Paint = { name: same, status: (_, s) => s, ci: (_, s) => s, dim: same };
 
 export function formatTable(s: Snapshot, paint: Paint = PLAIN): string {
   if (!s.sessions.length) return "No sessions running.";

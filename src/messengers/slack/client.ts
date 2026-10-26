@@ -139,7 +139,8 @@ export function socketMode(appToken: string, onMessage: (m: SlackMessage) => Pro
       url = (await api.call<{ url: string }>("apps.connections.open")).url;
     } catch (e: any) {
       log("socket open failed", e?.message ?? e);
-      setTimeout(connect, (backoff = Math.min(backoff * 2, 60_000)));
+      backoff = Math.min(backoff * 2, 60_000);
+      setTimeout(connect, backoff);
       return;
     }
     const ws = new WebSocket(url);

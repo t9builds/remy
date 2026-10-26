@@ -23,7 +23,7 @@ export type Report = {
   kind?: "retry";
 };
 
-export type Stage =
+type Stage =
   | "running" // the current step is to start or check
   | "agent" // an agent is on the current step
   | "awaiting-fix" // an agent pushed fixes; a fresh one takes the step once CI is green on the new head
@@ -99,7 +99,7 @@ export type Env = {
 };
 
 /** An agent that just started, or just stopped, gets this long before it counts as stopped without a report. */
-export const GRACE_MS = 3 * 60_000;
+const GRACE_MS = 3 * 60_000;
 /** GitHub may take a moment to show a pushed fix or a merge. */
 const PUSH_WAIT_MS = 30 * 60_000;
 
@@ -121,7 +121,7 @@ export function gateBlockers(d: PrDetail, gate: Pick<GateStep, "maxLines" | "pro
   return why;
 }
 
-export function agentPrompt(run: Run, step: AgentStep, f: Factory) {
+function agentPrompt(run: Run, step: AgentStep, f: Factory) {
   const n = run.number;
   const env = step.env ? f.environments?.[step.env] : undefined;
   const afterMerge = !!run.mergeSha;
@@ -148,7 +148,10 @@ function enter(run: Run, stage: Stage, now: number, reason?: string) {
   Object.assign(run, { stage, since: now, reason });
 }
 
-const hold = (run: Run, now: number, reason: string) => (enter(run, "held", now, reason), false);
+const hold = (run: Run, now: number, reason: string) => {
+  enter(run, "held", now, reason);
+  return false;
+};
 
 /** A yes covers the commit it was asked about; new commits need another. */
 const approval = (run: Run) => `${run.step}@${run.head}`;

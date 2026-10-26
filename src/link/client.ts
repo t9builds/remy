@@ -88,7 +88,10 @@ export class LinkClient {
         this.pending.delete(id);
         reject(new Error(`the remy daemon didn't answer within ${timeoutMs / 1000} s`));
       }, timeoutMs);
-      const settle = (fn: () => void) => (clearTimeout(timer), fn());
+      const settle = (fn: () => void) => {
+        clearTimeout(timer);
+        fn();
+      };
       this.pending.set(id, { resolve: (v) => settle(() => resolve(v)), reject: (e) => settle(() => reject(e)) });
       send(s, { type: "request", id, request, args });
     });

@@ -22,6 +22,7 @@ export function toTelegramHtml(md: string): string {
     .replace(/\*\*([^*\n]+)\*\*/g, "*$1*");
   s = esc(s);
   for (const [re, to] of SPANS) s = s.replace(re, to);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: NUL marks where a kept span goes back in; text never has one.
   return s.replace(/\u0000(\d+)\u0000/g, (_, i: string) => kept[Number(i)]!);
 }
 
@@ -38,7 +39,7 @@ export function splitText(text: string, max = 3500): string[] {
     rest = rest.slice(at).replace(/^\n/, "");
     if (fences(part) % 2) {
       part += "\n```";
-      rest = "```\n" + rest;
+      rest = `\`\`\`\n${rest}`;
     }
     parts.push(part);
   }

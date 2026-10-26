@@ -60,7 +60,7 @@ test("formatSession shows one session with its last message cut short", () => {
   expect(out.split("\n")[0]).toBe("basil [busy, spawned] o/r@fix · PR #7 open, CI fail https://github.com/o/r/pull/7");
   expect(out).toContain("  about: fix the login timeout");
   expect(out).toContain("  failing: tests");
-  expect(out).toContain("  last: Stop 3m ago — " + "x".repeat(800) + "…");
+  expect(out).toContain(`  last: Stop 3m ago — ${"x".repeat(800)}…`);
   expect(out.length).toBeLessThan(1200);
 });
 

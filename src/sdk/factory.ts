@@ -138,7 +138,10 @@ export function validate(f: Factory): string[] {
   const names = new Set<string>();
   f.steps.forEach((s, i) => {
     const at = `step ${i + 1} (${s?.kind} ${s?.name})`;
-    if (!["agent", "wait", "gate", "action"].includes(s?.kind)) return errors.push(`${at}: unknown kind`);
+    if (!["agent", "wait", "gate", "action"].includes(s?.kind)) {
+      errors.push(`${at}: unknown kind`);
+      return;
+    }
     if (s.kind === "agent") {
       if (!s.skill) errors.push(`${at}: needs a skill`);
       if (names.has(s.name)) errors.push(`${at}: another agent step is called "${s.name}"`);

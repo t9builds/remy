@@ -2,13 +2,23 @@
   "name": "remy",
   "type": "module",
   "private": true,
+  "packageManager": "bun@1.4.2",
   "scripts": {
     "build": "bun build src/channel.ts src/cli.ts --target=bun --outdir=dist",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "deps": "depcruise src",
+    "knip": "knip",
+    "test": "bun test",
+    "check:dist": "bun scripts/check-dist.ts",
+    "check": "bun run typecheck && bun run lint && bun run deps && bun run knip && bun test && bun run check:dist"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.3",
     "@types/bun": "latest",
+    "dependency-cruiser": "18.7.0",
+    "knip": "6.43.0",
     "typescript": "^5"
   },
   "dependencies": {

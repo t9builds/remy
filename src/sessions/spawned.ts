@@ -1,7 +1,7 @@
 /** ~/.remy/spawned.json: the agents `remy spawn` started, what for, and which of them Remy closed because their PR merged. */
 
 /** How a merged agent was closed (close.ts). */
-export type Merged = { at: number; pr: string; number: number; cleanup: string };
+type Merged = { at: number; pr: string; number: number; cleanup: string };
 
 export type Spawned = Record<
   string,

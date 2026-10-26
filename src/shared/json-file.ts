@@ -18,6 +18,6 @@ export function readJson<T>(path: string, fallback: T): T {
 export function writeJson(path: string, value: unknown, mode = 0o600) {
   ensureDir();
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", { mode });
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode });
   renameSync(tmp, path);
 }
