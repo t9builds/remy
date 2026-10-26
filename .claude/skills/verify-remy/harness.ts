@@ -4,7 +4,17 @@
  * every run reads the same DM. Usage: `bun .claude/skills/verify-remy/harness.ts <command>`, see `help`.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { Config } from "../../../src/sdk/config";
@@ -64,12 +74,39 @@ const alive = (pid?: number) => {
   }
 };
 const readRun = (): Run | undefined => (existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : undefined);
+/** Who holds the verification lock: the run, and the launch that took it. */
+const readLock = (): { run: string; pid: number } | undefined => {
+  try {
+    const l = JSON.parse(readFileSync(LOCK, "utf8"));
+    return typeof l?.run === "string" ? l : undefined;
+  } catch {
+    return undefined;
+  }
+};
 const mustRun = () => readRun() ?? die("no run: `harness.ts launch` first");
 const saveRun = (r: Run) => writeFileSync(STATE, JSON.stringify(r, null, 2));
-const remyEnv = { ...process.env, REMY_DIR: HOME, REMY_DAEMON_SERVICE: "0" };
+// What identifies the calling Claude Code session: handed on, a new agent would inherit its session id, inbox and
+// REMY_ROLE. The same set as SESSION_ENV in src/sessions/spawn.ts.
+const SESSION_ENV = [
+  "REMY_ROLE",
+  "CLAUDECODE",
+  "CLAUDE_PID",
+  "CLAUDE_EFFORT",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+];
+const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_ENV.includes(k)));
+// A tmux session's processes take their environment from the tmux server, not from the client that asked for it,
+// so the commands run in tmux unset these themselves.
+const unsetSession = `env ${SESSION_ENV.map((k) => `-u ${k}`).join(" ")}`;
+const remyEnv = { ...baseEnv, REMY_DIR: HOME, REMY_DAEMON_SERVICE: "0" };
 const remy = (...args: string[]) =>
   spawnSync("bun", [join(CHECKOUT, "src/cli.ts"), ...args], { env: remyEnv, encoding: "utf8" });
-const tmux = (...args: string[]) => spawnSync("tmux", args, { encoding: "utf8" });
+const tmux = (...args: string[]) => spawnSync("tmux", args, { env: baseEnv, encoding: "utf8" });
 const flag = (name: string, args: string[]) => {
   const i = args.indexOf(`--${name}`);
   return i >= 0 ? args.splice(i, 2)[1] : undefined;
@@ -105,10 +142,12 @@ async function until<T>(seconds: number, ok: () => Promise<T | undefined> | T | 
 
 async function launch(args: string[]) {
   mkdirSync(ROOT, { recursive: true });
-  // Take the lock before any network call, so two launches can't both pass a check.
+  // Take the lock before any network call, so two launches can't both pass a check. It names this launch's pid
+  // too: until the daemon is up, that is the only sign the holder is alive.
+  const mine = JSON.stringify({ run: RUN, pid: process.pid });
   const take = () => {
     try {
-      writeFileSync(LOCK, RUN, { flag: "wx" });
+      writeFileSync(LOCK, mine, { flag: "wx" });
       return true;
     } catch (e: any) {
       if (e.code !== "EEXIST") throw e;
@@ -116,24 +155,42 @@ async function launch(args: string[]) {
     }
   };
   if (!take()) {
-    const held = readFileSync(LOCK, "utf8").trim();
-    const heldRun = join(held, "run.json");
-    const pid = existsSync(heldRun) ? JSON.parse(readFileSync(heldRun, "utf8")).daemonPid : undefined;
-    // A dead holder's lock, or this checkout's own, can be taken over.
-    if (held !== RUN && alive(pid))
-      die(`another verification runs (${held}); one at a time, since every run reads the same DM`);
-    rmSync(LOCK, { force: true });
-    if (!take()) die(`another verification runs (${held}); one at a time, since every run reads the same DM`);
+    const raw = existsSync(LOCK) ? readFileSync(LOCK, "utf8") : "";
+    const held = readLock();
+    const busy = () =>
+      die(`another verification runs (${held?.run}); one at a time, since every run reads the same DM`);
+    const heldRun = held && join(held.run, "run.json");
+    const daemon = heldRun && existsSync(heldRun) ? JSON.parse(readFileSync(heldRun, "utf8")).daemonPid : undefined;
+    if (held && (alive(held.pid) || alive(daemon))) busy();
+    // A dead holder's lock: move it aside under a name only this launch uses, so a rival that saw the same dead
+    // lock can't delete the one we are about to take.
+    const aside = `${LOCK}.${process.pid}`;
+    try {
+      renameSync(LOCK, aside);
+    } catch (e: any) {
+      if (e.code !== "ENOENT") throw e;
+    }
+    if (existsSync(aside) && readFileSync(aside, "utf8") !== raw) {
+      // The rival took it first: what we moved is its live lock, so put it back.
+      try {
+        linkSync(aside, LOCK);
+      } catch {}
+      rmSync(aside, { force: true });
+      busy();
+    }
+    rmSync(aside, { force: true });
+    if (!take()) busy();
   }
   // A launch that dies before its daemon starts gives the lock back.
   process.once("exit", () => {
-    if (!alive(readRun()?.daemonPid) && readFileSync(LOCK, "utf8").trim() === RUN) rmSync(LOCK, { force: true });
+    try {
+      if (!alive(readRun()?.daemonPid) && readLock()?.pid === process.pid) rmSync(LOCK, { force: true });
+    } catch {}
   });
   if (alive(readRun()?.daemonPid)) die("this checkout already has a run: `harness.ts cleanup` first");
   // A leftover run of this checkout may still have a coordinator or agents: stop them before its state goes.
   if (readRun()) {
     await cleanup();
-    writeFileSync(LOCK, RUN);
   }
   const a = await accounts();
   for (const d of [HOME, REPOS, STATE]) rmSync(d, { recursive: true, force: true });
@@ -194,7 +251,7 @@ async function trust(dir: string) {
     "200",
     "-y",
     "50",
-    `cd ${JSON.stringify(dir)} && REMY_DIR=${JSON.stringify(HOME)} claude`,
+    `cd ${JSON.stringify(dir)} && ${unsetSession} REMY_DIR=${JSON.stringify(HOME)} claude`,
   );
   let answered = false;
   const done = await until(30, () => {
@@ -222,7 +279,7 @@ async function coordinator(run: Run) {
   );
   const cmd = [
     `cd ${JSON.stringify(REPOS)} &&`,
-    `REMY_DIR=${JSON.stringify(HOME)} REMY_ROLE=coordinator`,
+    `${unsetSession} REMY_DIR=${JSON.stringify(HOME)} REMY_ROLE=coordinator`,
     "claude -n",
     name,
     `--plugin-dir ${JSON.stringify(CHECKOUT)}`,
@@ -268,7 +325,7 @@ async function doctor() {
   ok(r.status === 0, "remy doctor passes for workspace verify");
   if (r.status !== 0) console.log(r.stdout + r.stderr);
   if (run.tmux) ok(tmux("has-session", "-t", run.tmux).status === 0, `coordinator ${run.tmux} is running`);
-  ok(readFileSync(LOCK, "utf8").trim() === RUN, "this run holds the verification lock");
+  ok(readLock()?.run === RUN, "this run holds the verification lock");
 }
 
 /** Post as the user: to the bot's DM, or with --channel to #remy-verify; --thread replies in a thread. */
@@ -372,15 +429,17 @@ async function cleanup() {
       ? JSON.parse(readFileSync(join(HOME, "spawned.json"), "utf8"))
       : {};
     for (const [name, s] of Object.entries<any>(spawned)) {
-      spawnSync("claude", ["stop", s.id ?? name]);
-      spawnSync("claude", ["rm", s.id ?? name]);
+      spawnSync("claude", ["stop", s.id ?? name], { env: baseEnv });
+      spawnSync("claude", ["rm", s.id ?? name], { env: baseEnv });
     }
     remy("daemon", "stop");
     // It writes its last log line as it exits: wait for that, or it recreates the folder removed below.
     if (!(await until(10, () => !alive(run.daemonPid)))) process.kill(run.daemonPid!, "SIGTERM");
   }
   for (const d of [HOME, REPOS, STATE]) rmSync(d, { recursive: true, force: true });
-  if (existsSync(LOCK) && readFileSync(LOCK, "utf8").trim() === RUN) rmSync(LOCK);
+  // The lock of this run, unless the launch running this cleanup holds it.
+  const lock = readLock();
+  if (lock?.run === RUN && lock.pid !== process.pid) rmSync(LOCK, { force: true });
   console.log(`✓ cleaned up; evidence: ${run ? join(EVIDENCE, run.id) : EVIDENCE}`);
 }
 
