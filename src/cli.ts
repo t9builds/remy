@@ -114,10 +114,9 @@ async function ensureDaemon(cwd: string) {
     const why = running.version !== VERSION ? `it runs ${running.version} and ${VERSION} is installed` : "the config changed";
     console.log(pc.dim(`Restarting the remy daemon: ${why}.`));
     await askDaemon(PATHS.socket, "restart");
-    if (running.supervised) {
-      if (await daemonWithin(20_000, (s) => s.pid !== running.pid)) return;
-      throw new Error(`the remy daemon's service didn't start it again; see ${PATHS.log}`);
-    }
+    // A service starts it again by itself, even one whose file doesn't say so: give it a moment before starting one here.
+    if (await daemonWithin(running.supervised ? 20_000 : 3_000, (s) => s.pid !== running.pid)) return;
+    if (running.supervised) throw new Error(`the remy daemon's service didn't start it again; see ${PATHS.log}`);
     // Let it hand over what it holds and release the socket.
     for (const until = Date.now() + 5_000; Date.now() < until && (await daemonStatus()); ) await Bun.sleep(100);
   }

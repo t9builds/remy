@@ -2446,7 +2446,7 @@ var config;
 var stamp = 0;
 var link;
 var startedAt = Date.now();
-var supervised = process.env.REMY_DAEMON_SERVICE ? process.env.REMY_DAEMON_SERVICE === "1" : !!process.env.INVOCATION_ID || process.ppid === 1;
+var supervised = process.env.REMY_DAEMON_SERVICE === "1";
 var lastActive = "";
 async function push(kind, content, meta = {}) {
   const clean = Object.fromEntries(Object.entries(meta).filter(([, v]) => v));
@@ -4632,11 +4632,10 @@ async function ensureDaemon(cwd) {
     const why = running.version !== VERSION ? `it runs ${running.version} and ${VERSION} is installed` : "the config changed";
     console.log(import_picocolors.default.dim(`Restarting the remy daemon: ${why}.`));
     await askDaemon(PATHS.socket, "restart");
-    if (running.supervised) {
-      if (await daemonWithin(20000, (s) => s.pid !== running.pid))
-        return;
+    if (await daemonWithin(running.supervised ? 20000 : 3000, (s) => s.pid !== running.pid))
+      return;
+    if (running.supervised)
       throw new Error(`the remy daemon's service didn't start it again; see ${PATHS.log}`);
-    }
     for (const until = Date.now() + 5000;Date.now() < until && await daemonStatus(); )
       await Bun.sleep(100);
   }

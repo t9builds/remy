@@ -32,12 +32,8 @@ let config: Config;
 let stamp = 0;
 let link: LinkServer;
 const startedAt = Date.now();
-/**
- * Whether launchd or systemd runs this daemon and starts it again after a restart. `remy start` sets
- * REMY_DAEMON_SERVICE=0 on the daemons it starts itself; a service file may set it to 1. Without it, systemd marks its
- * services with INVOCATION_ID, and launchd is the parent of its agents.
- */
-const supervised = process.env.REMY_DAEMON_SERVICE ? process.env.REMY_DAEMON_SERVICE === "1" : !!process.env.INVOCATION_ID || process.ppid === 1;
+/** Set by the launchd and systemd service files in the README; `remy start` sets 0 on the daemons it starts itself. */
+const supervised = process.env.REMY_DAEMON_SERVICE === "1";
 
 /** The workspace the user last wrote from; the coordinator's permission prompts go there. */
 let lastActive = "";
