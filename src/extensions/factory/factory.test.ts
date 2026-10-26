@@ -65,9 +65,10 @@ test("Remy's own .remy/factory.ts loads", async () => {
     files: [file],
     allFiles: true,
   });
-  expect(gateBlockers(touching(".remy/factory.ts"), g)).toEqual(["touches protected .remy/factory.ts"]);
-  expect(gateBlockers(touching("src/sdk/extension.ts"), g)).toEqual(["touches protected src/sdk/extension.ts"]);
-  expect(gateBlockers(touching("README.md"), g)).toEqual([]);
+  // No path or size needs a person (ADR-0009); red CI still stops it.
+  expect(gateBlockers(touching(".remy/factory.ts"), g)).toEqual([]);
+  expect(gateBlockers({ ...touching("src/sdk/extension.ts"), lines: 5000 }, g)).toEqual([]);
+  expect(gateBlockers({ ...touching("README.md"), ci: "fail" }, g)).toEqual(["CI fails"]);
 });
 
 const pr = {
