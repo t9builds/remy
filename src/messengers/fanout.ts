@@ -7,8 +7,9 @@
  * in each app. A part missing for an app means "not in a thread there": a session's messages still land in that
  * session's thread or reply chain.
  */
-import { messengerLabel, type BothMode, type MessengerKind } from "../config/config";
+import { messengerLabel } from "../config/config";
 import type { Messenger, PermissionRequest, PostOptions, Sink } from "./messenger";
+import type { BothMode, MessengerKind } from "../sdk/config";
 
 type Parts = Partial<Record<MessengerKind, string>>;
 

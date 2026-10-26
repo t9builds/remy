@@ -8,32 +8,15 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createMessenger, describeMessengers, quietSink } from "../messengers/workspaces";
-import {
-  ensureDir,
-  expandHome,
-  loadConfig,
-  messengerLabel,
-  messengersOf,
-  PATHS,
-  PLUGIN_ROOT,
-  readToken,
-  saveConfig,
-  storeToken,
-  TOKEN_FORMAT,
-  type BothMode,
-  type Config,
-  type MessengerKind,
-  type Routing,
-  type SlackSettings,
-  type TelegramSettings,
-  type TokenKind,
-  type Workspace,
-} from "../config/config";
+import { expandHome, loadConfig, messengerLabel, messengersOf, readToken, saveConfig, storeToken, TOKEN_FORMAT, type TokenKind } from "../config/config";
 import { doctor } from "./doctor";
-import { askDaemon } from "../link/link";
 import { Slack, SlackError } from "../messengers/slack/client";
 import { Telegram, TelegramError } from "../messengers/telegram/client";
 import { formatChecks, pc } from "./ui";
+import { ensureDir } from "../shared/json-file";
+import { PATHS, PLUGIN_ROOT } from "../shared/paths";
+import type { BothMode, Config, MessengerKind, Routing, SlackSettings, TelegramSettings, Workspace } from "../sdk/config";
+import { askDaemon } from "../link/client";
 
 
 /** A prompt's answer, or a clean exit on Ctrl-C. */

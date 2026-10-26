@@ -1,10 +1,10 @@
 /**
  * The extension API (ADR-0003). An extension is a module whose default export is `(remy: Remy) => void`; it reacts to
  * Remy's events and acts through `remy`. Remy's own behaviors beyond the relay (closing merged agents, tasks from
- * Slack threads, `/queue`) are extensions written against this same API, in builtin/.
+ * Slack threads, `/queue`, the factory) are extensions written against this same API, in src/extensions/.
  *
  * ```ts
- * import type { Remy } from "<remy plugin>/src/extensions/api";
+ * import type { Remy } from "<remy plugin>/src/sdk/extension";
  * export default (remy: Remy) => {
  *   remy.on("pr.ci", async ({ session, pr }) => {
  *     if (pr.ci === "fail") await remy.post(`CI failed on ${pr.url}`, { session: session.name });
@@ -12,11 +12,25 @@
  * };
  * ```
  */
-import type { Config } from "../config/config";
-import type { Pr, Ci } from "../sessions/snapshot";
-import type { SpawnResult } from "../sessions/spawn";
+import type { Config } from "./config";
 
-export type { Ci, Pr };
+export type Ci = "pass" | "fail" | "pending" | "none";
+
+export type Pr = {
+  number: number;
+  url: string;
+  title: string;
+  state: string; // OPEN | MERGED | CLOSED
+  draft: boolean;
+  review: string; // APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | ""
+  ci: Ci;
+  failing: string[];
+  /** Commit at the head of the PR branch. */
+  head?: string;
+};
+
+/** A started agent: its name, its worktree label, the session id `claude --bg` printed, and its folder. */
+export type SpawnResult = { name: string; label: string; id?: string; cwd: string; worktree: boolean; output: string };
 
 /** A Claude Code session as extensions see it. */
 export type SessionRef = {
@@ -150,6 +164,8 @@ export interface Remy {
   state: State;
   /** Sessions as Remy last saw them. */
   sessions(): SessionRef[];
+  /** The repos in `extensions.repos` that were found: whose own code (`.remy/`) you trust to run in your daemon. */
+  trustedRepos(): { repo: string; root: string }[];
   /** Your ~/.remy/config.json, as the daemon loaded it. */
   readonly config: Readonly<Config>;
   log(...a: unknown[]): void;

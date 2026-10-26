@@ -1,11 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { formatNotice, noticeWorthy } from "./notices";
-import type { Change } from "../sessions/snapshot";
+import { type Change, formatNotice, noticeWorthy } from "./notices";
 
 const change = (what: string, detail: string, extra: Partial<Change> = {}): Change => ({
   session: "saffron",
-  sessionId: "s1",
-  cwd: "/r/api",
   repo: "acme-corp/api",
   what,
   detail,
@@ -42,7 +39,7 @@ describe("formatNotice", () => {
 });
 
 test("notices keep only merges and ended sessions", () => {
-  const c = (what: string, detail = "") => ({ session: "s", sessionId: "s", cwd: "/r", what, detail });
+  const c = (what: string, detail = "") => ({ session: "s", what, detail });
   const all = [
     c("merged"),
     c("ended"),

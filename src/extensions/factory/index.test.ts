@@ -2,11 +2,14 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULTS, type Config } from "../../config/config";
+import { DEFAULTS } from "../../config/config";
 import type { SessionRef } from "../../sdk/extension";
-import { createFactory, formatRuns, isReady, loadFactory } from ".";
+import { createFactory, isReady } from ".";
 import { ExtensionHost } from "../../extension-host/host";
 import type { Run } from "./pipeline";
+import type { Config } from "../../sdk/config";
+import { formatRuns } from "./format";
+import { loadFactory } from "./load";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "remy-factory-")));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));

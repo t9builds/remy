@@ -15332,10 +15332,10 @@ class StdioServerTransport {
     });
   }
 }
-// src/config/config.ts
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from "fs";
+// src/shared/paths.ts
+import { existsSync } from "fs";
 import { homedir } from "os";
-import { dirname, join, resolve, sep } from "path";
+import { dirname, join, resolve } from "path";
 var PLUGIN_ROOT = (() => {
   for (let dir = import.meta.dir;dir !== dirname(dir); dir = dirname(dir))
     if (existsSync(join(dir, ".claude-plugin", "plugin.json")))
@@ -15361,144 +15361,6 @@ var PATHS = {
   telegramState: (workspace) => join(REMY_DIR, `telegram-state.${workspace}.json`),
   tokenFile: (workspace, kind) => join(REMY_DIR, `${kind}-token.${workspace}`)
 };
-var MESSENGERS = ["slack", "telegram"];
-var messengerLabel = (k) => k === "slack" ? "Slack" : "Telegram";
-var messengersOf = (ws) => MESSENGERS.filter((k) => ws[k]);
-function migrateWorkspace(w) {
-  if (w.slack || w.telegram)
-    return w;
-  const { messenger, slackUserId, transport, channelRepos, telegramUserId, ...routing } = w;
-  if (messenger === "telegram")
-    return { ...routing, telegram: { userId: telegramUserId } };
-  return { ...routing, slack: { userId: slackUserId ?? "", transport: transport ?? "poll", channelRepos } };
-}
-var DEFAULTS = {
-  workspaces: [],
-  repoRoots: [join(homedir(), "Repositories")],
-  spawnTemplate: "{task}",
-  spawnPermissionMode: "auto",
-  spawnWorktree: true,
-  digestMinutes: 15,
-  coordinatorName: "remy",
-  coordinatorCompactPct: 50,
-  triggerEmoji: "mouse",
-  tickSeconds: 60,
-  autonomy: "notify",
-  maxFactoryAgents: 2
-};
-function compactPct(value) {
-  const n = Number(value);
-  return Number.isInteger(n) && n >= 1 && n <= 100 ? n : undefined;
-}
-function compactEnv(value, shell = process.env) {
-  const pct = compactPct(value);
-  return pct && !shell.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE ? { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(pct) } : {};
-}
-function ensureDir() {
-  if (!existsSync(REMY_DIR))
-    mkdirSync(REMY_DIR, { recursive: true, mode: 448 });
-}
-function readJson(path, fallback) {
-  try {
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return fallback;
-  }
-}
-function writeJson(path, value, mode = 384) {
-  ensureDir();
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2) + `
-`, { mode });
-  renameSync(tmp, path);
-}
-function expandHome(p) {
-  return resolve(p.trim().replace(/^~(?=$|\/)/, homedir()));
-}
-function loadConfig() {
-  const raw = readJson(PATHS.config, {});
-  const config = { ...DEFAULTS, ...raw };
-  if (!raw.workspaces && raw.slackUserId)
-    config.workspaces = [{ name: "default", slack: { userId: raw.slackUserId, transport: "poll" } }];
-  config.workspaces = config.workspaces.map(migrateWorkspace);
-  delete config.slackUserId;
-  return config;
-}
-function configStamp() {
-  try {
-    return statSync(PATHS.config).mtimeMs;
-  } catch {
-    return 0;
-  }
-}
-function saveConfig(config) {
-  writeJson(PATHS.config, config);
-}
-var isCatchAll = (w) => !w.repos?.length && !w.paths?.length;
-function globMatch(pattern, value) {
-  const re = new RegExp("^" + pattern.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "i");
-  return re.test(value);
-}
-function workspaceFor(where, config) {
-  const { cwd, repo } = where;
-  if (repo) {
-    const byRepo = config.workspaces.find((w) => w.repos?.some((p) => globMatch(p, repo)));
-    if (byRepo)
-      return byRepo;
-  }
-  let best;
-  if (cwd) {
-    for (const ws of config.workspaces) {
-      for (const p of ws.paths ?? []) {
-        const root = expandHome(p);
-        if ((cwd === root || cwd.startsWith(root + sep)) && root.length > (best?.len ?? -1))
-          best = { ws, len: root.length };
-      }
-    }
-  }
-  return best?.ws ?? config.workspaces.find(isCatchAll) ?? config.workspaces[0];
-}
-var keychainService = (workspace, kind) => `remy-${kind}-token:${workspace}`;
-function readToken(workspace, kind) {
-  const envName = `REMY_${kind.toUpperCase().replace("-", "_")}_TOKEN_${workspace.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
-  if (process.env[envName])
-    return process.env[envName];
-  if (process.platform === "darwin") {
-    const r = Bun.spawnSync(["security", "find-generic-password", "-s", keychainService(workspace, kind), "-w"]);
-    if (r.exitCode === 0)
-      return r.stdout.toString().trim() || undefined;
-  }
-  try {
-    return readFileSync(PATHS.tokenFile(workspace, kind), "utf8").trim() || undefined;
-  } catch {
-    return;
-  }
-}
-var TOKEN_FORMAT = {
-  "slack-bot": { pattern: /^xoxb-[\w-]+$/, example: "xoxb-\u2026" },
-  "slack-app": { pattern: /^xapp-[\w-]+$/, example: "xapp-\u2026" },
-  "telegram-bot": { pattern: /^\d+:[\w-]{30,}$/, example: "123456789:AA\u2026" }
-};
-function storeToken(workspace, kind, token) {
-  ensureDir();
-  if (!TOKEN_FORMAT[kind].pattern.test(token))
-    throw new Error(`That doesn't look like a ${kind} token (${TOKEN_FORMAT[kind].example})`);
-  if (process.platform === "darwin") {
-    const cmd = `add-generic-password -U -a remy -s "${keychainService(workspace, kind)}" -w "${token}"
-`;
-    const r = Bun.spawnSync(["security", "-i"], { stdin: new TextEncoder().encode(cmd), stdout: "pipe", stderr: "pipe" });
-    const saved = Bun.spawnSync(["security", "find-generic-password", "-s", keychainService(workspace, kind), "-w"]).stdout.toString().trim();
-    if (r.exitCode !== 0 || saved !== token)
-      throw new Error(`Saving the ${kind} token to the keychain failed: ${r.stderr.toString().trim()}`);
-    return;
-  }
-  writeFileSync(PATHS.tokenFile(workspace, kind), token + `
-`, { mode: 384 });
-}
-
-// src/link/link.ts
-import { chmodSync, existsSync as existsSync2, unlinkSync } from "fs";
-import { createConnection, createServer } from "net";
 // .claude-plugin/plugin.json
 var plugin_default = {
   name: "remy",
@@ -15511,35 +15373,10 @@ var plugin_default = {
   keywords: ["coordinator", "slack", "telegram", "sessions", "agents"]
 };
 
-// src/link/link.ts
+// src/shared/version.ts
 var VERSION = plugin_default.version;
-var RESTART_EXIT = 75;
-var HOLD_MAX = 500;
-function readLines(socket, onMessage) {
-  let partial = "";
-  socket.setEncoding("utf8");
-  socket.on("data", (chunk) => {
-    const lines = (partial + chunk).split(`
-`);
-    partial = lines.pop() ?? "";
-    for (const l of lines) {
-      if (!l)
-        continue;
-      let m;
-      try {
-        m = JSON.parse(l);
-      } catch {
-        continue;
-      }
-      onMessage(m);
-    }
-  });
-}
-var send = (socket, m) => {
-  if (!socket.destroyed)
-    socket.write(JSON.stringify(m) + `
-`);
-};
+
+// src/link/coordinator-tools.ts
 function coordinatorTools(working) {
   return [
     {
@@ -15575,108 +15412,40 @@ function coordinatorTools(working) {
     }
   ];
 }
-function answers(path, timeoutMs = 1000) {
-  return new Promise((resolve) => {
-    const s = createConnection(path);
-    const done = (ok) => (s.destroy(), resolve(ok));
-    s.setTimeout(timeoutMs, () => done(false));
-    s.on("connect", () => done(true));
-    s.on("error", () => done(false));
+
+// src/link/client.ts
+import { createConnection } from "net";
+
+// src/link/protocol.ts
+var RESTART_EXIT = 75;
+var HOLD_MAX = 500;
+function readLines(socket, onMessage) {
+  let partial = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => {
+    const lines = (partial + chunk).split(`
+`);
+    partial = lines.pop() ?? "";
+    for (const l of lines) {
+      if (!l)
+        continue;
+      let m;
+      try {
+        m = JSON.parse(l);
+      } catch {
+        continue;
+      }
+      onMessage(m);
+    }
   });
 }
-
-class LinkServer {
-  path;
-  handlers;
-  server;
-  coordinator;
-  held = [];
-  constructor(path, handlers) {
-    this.path = path;
-    this.handlers = handlers;
-  }
-  get connected() {
-    return !!this.coordinator;
-  }
-  get heldEvents() {
-    return this.held;
-  }
-  hold(events) {
-    this.held.unshift(...events);
-    this.held.splice(0, Math.max(0, this.held.length - HOLD_MAX));
-    this.handlers.held?.(this.held);
-  }
-  async listen() {
-    if (existsSync2(this.path)) {
-      if (await answers(this.path))
-        throw new Error(`a remy daemon is already running (${this.path})`);
-      unlinkSync(this.path);
-    }
-    this.server = createServer((s) => this.accept(s));
-    await new Promise((resolve, reject) => {
-      this.server.once("error", reject);
-      this.server.listen(this.path, () => resolve());
-    });
-    chmodSync(this.path, 384);
-  }
-  close() {
-    this.coordinator?.destroy();
-    this.server?.close();
-    try {
-      unlinkSync(this.path);
-    } catch {}
-  }
-  push(event) {
-    if (this.coordinator)
-      return send(this.coordinator, { type: "event", event });
-    this.held.push({ ...event, meta: { ...event.meta, queued_at: new Date().toISOString() } });
-    if (this.held.length > HOLD_MAX)
-      this.handlers.log("link: dropped held event", this.held.shift().kind);
-    this.handlers.held?.(this.held);
-  }
-  permission(request_id, behavior) {
-    if (this.coordinator)
-      send(this.coordinator, { type: "permission", request_id, behavior });
-    else
-      this.handlers.log("link: permission verdict with no coordinator", request_id);
-  }
-  accept(socket) {
-    socket.on("error", (e) => this.handlers.log("link: socket error", e.message));
-    socket.on("close", () => {
-      if (this.coordinator !== socket)
-        return;
-      this.coordinator = undefined;
-      this.handlers.log("link: coordinator disconnected");
-    });
-    readLines(socket, (m) => {
-      if (m.type === "hello")
-        return void this.hello(socket);
-      if (m.type === "permission_request")
-        return void this.handlers.permissionRequest(m.params).catch((e) => this.handlers.log("link: permission request failed", e?.message ?? e));
-      if (m.type === "request")
-        this.handlers.request(m.request, m.args).then((result) => send(socket, { type: "response", id: m.id, result }), (e) => send(socket, { type: "response", id: m.id, error: String(e?.message ?? e) }));
-    });
-  }
-  async hello(socket) {
-    const greeting = await this.handlers.greeting?.().catch(() => []) ?? [];
-    if (socket.destroyed)
-      return;
-    if (this.coordinator && this.coordinator !== socket) {
-      this.handlers.log("link: a newer coordinator connected; closing the old one");
-      this.coordinator.end(JSON.stringify({ type: "replaced" }) + `
+var send = (socket, m) => {
+  if (!socket.destroyed)
+    socket.write(JSON.stringify(m) + `
 `);
-    }
-    this.coordinator = socket;
-    const held = this.held;
-    this.held = [];
-    this.handlers.log("link: coordinator connected", held.length ? `delivering ${held.length} held` : "");
-    for (const event of [...greeting, ...held])
-      send(socket, { type: "event", event });
-    if (held.length)
-      this.handlers.held?.(this.held);
-  }
-}
+};
 
+// src/link/client.ts
 class LinkClient {
   path;
   handlers;

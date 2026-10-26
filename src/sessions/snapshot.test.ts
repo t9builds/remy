@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { ciOf, diff, findSession, formatSession, spawnedEntry, type Snapshot, type SessionView } from "./snapshot";
+import { findSession, type Snapshot, type SessionView } from "./snapshot";
+import { ciOf } from "../shared/ci";
+import { formatSession } from "./format";
+import { spawnedEntry } from "./spawned";
+import { diff } from "./changes";
 
 const session = (over: Partial<SessionView> = {}): SessionView => ({
   sessionId: "s1", name: "api-fix", kind: "background", status: "busy", cwd: "/r", startedAt: 1, spawned: true, ...over,

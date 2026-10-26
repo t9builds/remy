@@ -1,6 +1,7 @@
-import { PATHS, readJson, writeJson } from "../config/config";
 import { KITCHEN_NAMES } from "./kitchen-names";
-import type { Spawned } from "./snapshot";
+import { PATHS } from "../shared/paths";
+import { readJson, writeJson } from "../shared/json-file";
+import type { Spawned } from "./spawned";
 
 /** ~/.remy/nicknames.json: the name remy gave each session it named, and what the session is about. */
 export type Nicknames = Record<string, { name: string; about?: string; cwd?: string; at: number }>;

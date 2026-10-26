@@ -1,19 +1,13 @@
 import { existsSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { loadConfig, PATHS, readJson, writeJson } from "../config/config";
+import { loadConfig } from "../config/config";
+import { resolveRepo } from "../config/repos";
 import { pickNickname, takenNames, type Nicknames } from "./names";
-import { listAgents, type Spawned } from "./snapshot";
-import { loadTask, taskPrompt } from "../messengers/slack/task";
-
-export function resolveRepo(repo: string, roots: string[]): string {
-  const direct = resolve(repo.replace(/^~(?=\/)/, process.env.HOME ?? "~"));
-  if (existsSync(join(direct, ".git"))) return direct;
-  for (const root of roots) {
-    const p = join(root, repo);
-    if (existsSync(p) && statSync(p).isDirectory() && existsSync(join(p, ".git"))) return p;
-  }
-  throw new Error(`No git repo "${repo}" (checked it as a path and under ${roots.join(", ")})`);
-}
+import type { SpawnResult } from "../sdk/extension";
+import { PATHS } from "../shared/paths";
+import { readJson, writeJson } from "../shared/json-file";
+import { listAgents } from "./agents";
+import type { Spawned } from "./spawned";
 
 const SESSION_ENV = new Set([
   "REMY_ROLE",
@@ -33,7 +27,8 @@ function slug(s: string) {
 }
 
 /**
- * `slackTask`: id of a task from a Slack thread; `task` is then the coordinator's one-line brief and the thread goes into the prompt.
+ * `slack`: the Slack thread a task came from, where the agent then reports; `taskText` is what `{task}` in
+ * `spawnTemplate` becomes when it isn't `task` itself (for a Slack task, the thread; `task` is the coordinator's brief).
  * `prompt`: the agent's whole prompt, sent as is instead of `task` through `spawnTemplate`; `task` then only describes it.
  * `role` and `pr`: an agent the factory starts for a pipeline step, and the PR it is for.
  */
@@ -43,11 +38,12 @@ export async function spawnAgent(opts: {
   name?: string;
   worktree?: boolean;
   permissionMode?: string;
-  slackTask?: string;
+  slack?: Spawned[string]["slack"];
+  taskText?: string;
   prompt?: string;
   role?: string;
   pr?: string;
-}) {
+}): Promise<SpawnResult> {
   const config = loadConfig();
   const cwd = resolveRepo(opts.repo, config.repoRoots);
   const live = (await listAgents()).map((a) => a.name);
@@ -59,8 +55,7 @@ export async function spawnAgent(opts: {
   const base = label;
   for (let i = 2; existsSync(join(cwd, ".claude", "worktrees", label)); i++) label = `${base}-${i}`;
 
-  const slack = opts.slackTask ? loadTask(opts.slackTask) : undefined;
-  const prompt = opts.prompt ?? config.spawnTemplate.replaceAll("{task}", slack ? taskPrompt(slack, opts.task) : opts.task);
+  const prompt = opts.prompt ?? config.spawnTemplate.replaceAll("{task}", opts.taskText ?? opts.task);
   const worktree = opts.worktree ?? config.spawnWorktree;
   const cmd = ["claude", "--bg", "-n", name, "--permission-mode", opts.permissionMode ?? config.spawnPermissionMode];
   if (worktree) cmd.push("-w", label);
@@ -83,7 +78,7 @@ export async function spawnAgent(opts: {
     label,
     task: opts.task,
     startedAt: Date.now(),
-    slack: slack && { workspace: slack.workspace, channel: slack.channel, threadTs: slack.threadTs, task: slack.id },
+    slack: opts.slack,
     role: opts.role,
     pr: opts.pr,
   };
@@ -91,5 +86,3 @@ export async function spawnAgent(opts: {
   return { name, label, id, cwd, worktree, output: out };
 }
 
-/** What `spawnAgent` reports: the agent's name, its worktree label, session id and folder. */
-export type SpawnResult = Awaited<ReturnType<typeof spawnAgent>>;

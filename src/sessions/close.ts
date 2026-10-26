@@ -1,6 +1,5 @@
-import { spawnedEntry, type Pr, type Spawned } from "./snapshot";
-
-export type Merged = { at: number; pr: string; number: number; cleanup: string };
+import type { Pr } from "../sdk/extension";
+import { spawnedEntry, type Spawned } from "./spawned";
 
 type Run = (cmd: string[]) => { ok: boolean; out: string };
 

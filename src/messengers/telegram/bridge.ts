@@ -3,9 +3,12 @@
  * Telegram has no threads in a private chat, so a session's messages form a reply chain: remy posts each message
  * about a session as a reply to its previous one, and a user reply to any of them is tagged with that session.
  */
-import { PATHS, readJson, readToken, writeJson, type TelegramSettings } from "../../config/config";
+import { readToken } from "../../config/config";
 import { AWAIT_ANSWER_MS, parseVerdict, permissionText, type Check, type Messenger, type PermissionRequest, type PostOptions, type Sink } from "../messenger";
 import { Telegram, TelegramError, type TgMessage, type TgUpdate, type TgUser } from "./client";
+import { PATHS } from "../../shared/paths";
+import { readJson, writeJson } from "../../shared/json-file";
+import type { TelegramSettings } from "../../sdk/config";
 
 /** A new message about a session replies to the session's last one if that is younger than this. */
 const CHAIN_MS = 24 * 3600_000;

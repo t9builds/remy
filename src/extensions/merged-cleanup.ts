@@ -16,7 +16,7 @@ export default function mergedCleanup(remy: Remy) {
     try {
       const pr = s.pr!;
       const cleanup = await remy.close(s.name, { merged: pr });
-      const text = formatNotice([{ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what: "merged", detail: `PR #${pr.number} merged; ${cleanup}`, pr: pr.url }]);
+      const text = formatNotice([{ session: s.name, repo: s.repo, what: "merged", detail: `PR #${pr.number} merged; ${cleanup}`, pr: pr.url }]);
       if (text) await remy.post(text, { workspace: s.workspace });
     } finally {
       closing.delete(s.sessionId);

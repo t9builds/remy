@@ -2,7 +2,9 @@
  * Fixed notices the daemon posts itself, without an LLM turn (ADR-0007): which PRs merged and which sessions ended
  * since the last digest. The wording is code, so it's the same every time and costs nothing.
  */
-import type { Change } from "../sessions/snapshot";
+
+/** What a notice says something about: a change between two looks at the sessions (sessions/snapshot.ts). */
+export type Change = { session: string; repo?: string; what: string; detail: string; pr?: string };
 
 /** Changes a notice reports: merges and ended sessions. The pinned list shows the rest. */
 export const noticeWorthy = (c: Change) => c.what === "merged" || c.what === "ended" || (c.what === "pr_state" && /→ #\d+ merged/.test(c.detail));
@@ -10,7 +12,7 @@ export const noticeWorthy = (c: Change) => c.what === "merged" || c.what === "en
 const repoName = (repo?: string) => repo?.split("/").pop();
 const link = (url: string | undefined, label: string) => (url ? `<${url}|${label}>` : label);
 
-/** What `closeIn` (merged.ts) did with the agent, said only when something is left behind. */
+/** What `closeAndRecord` (sessions/close.ts) did with the agent, said only when something is left behind. */
 function cleanupNote(detail: string) {
   const cleanup = detail.replace(/^PR #\d+ merged;\s*/, "");
   if (cleanup.startsWith("stopped; worktree kept")) return " · worktree kept: it has uncommitted or unpushed work";

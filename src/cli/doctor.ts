@@ -1,9 +1,12 @@
 /** `remy doctor`: what remy needs, checked. Returns rows so the CLI and setup can each show them their way. */
 import { checkWorkspace } from "../messengers/workspaces";
-import { configStamp, loadConfig, PATHS, readToken } from "../config/config";
-import { askDaemon, VERSION, type DaemonStatus } from "../link/link";
+import { configStamp, loadConfig, readToken } from "../config/config";
 import { blocking } from "../messengers/messenger";
 import type { CheckRow } from "./ui";
+import { PATHS } from "../shared/paths";
+import { VERSION } from "../shared/version";
+import { askDaemon } from "../link/client";
+import type { DaemonStatus } from "../link/protocol";
 
 function sh(cmd: string[]) {
   const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });

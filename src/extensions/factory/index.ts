@@ -3,80 +3,33 @@
  * its repo defines in `.remy/factory.ts`, for repos listed in `extensions.repos` only.
  *
  * On every tick it starts a run for each ready PR of a session on this machine (each person's Remy acts on its own
- * machine's PRs), moves every run on (factory/pipeline.ts), and keeps the waiting list in step: a run in progress
+ * machine's PRs), moves every run on (pipeline.ts), and keeps the waiting list in step: a run in progress
  * keeps its session off the list, a held one is a judgment call on it. Autonomy is the lower of the repo's and
  * yours (ADR-0006). Step agents count against `maxFactoryAgents`, and a usage limit pauses new ones for a while.
  */
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import * as define from "../../sdk/factory";
-import { lowerLevel, validate, type Factory } from "../../sdk/factory";
-import { deploy, deployed, mergePr, prDetail, readReports, repoRootOf } from "./live";
-import { advance, isActive, YES, type Env, type Run } from "./pipeline";
-import { listAgents } from "../../sessions/snapshot";
 import type { Remy, SessionRef } from "../../sdk/extension";
-import { trustedRepos } from "../../extension-host/load";
+import { type Factory, lowerLevel } from "../../sdk/factory";
+import { formatRuns } from "./format";
+import { deploy, deployed, mergePr, prDetail, readReports, repoRootOf } from "./live";
+import { type Loaded, loadFactory } from "./load";
+import { advance, type Env, isActive, type Run, YES } from "./pipeline";
 
 const USAGE_LIMIT = /usage limit|limit reached|rate.?limit|out of (extra )?usage/i;
 const BACKOFF_MS = 30 * 60_000;
 /** Runs that need nothing more are dropped after this long. */
 const KEEP_MS = 7 * 24 * 3_600_000;
 
-let registered = false;
-/** Lets a repo's factory.ts `import { agent, … } from "remy/factory"`. */
-function registerModule() {
-  if (registered) return;
-  registered = true;
-  Bun.plugin({ name: "remy-factory", setup: (build) => void build.module("remy/factory", () => ({ exports: { ...define }, loader: "object" })) });
-}
-
-export type Loaded = { factory?: Factory; error?: string; mtime: number };
-
-/** `<root>/.remy/factory.ts`, checked; loaded again whenever the file changes. */
-export async function loadFactory(root: string): Promise<Loaded> {
-  const path = join(root, ".remy", "factory.ts");
-  if (!existsSync(path)) return { mtime: 0 };
-  const mtime = statSync(path).mtimeMs;
-  registerModule();
-  try {
-    const f = (await import(`${path}?v=${mtime}`)).default as Factory;
-    const errors = validate(f);
-    return errors.length ? { error: errors.join("; "), mtime } : { factory: f, mtime };
-  } catch (e: any) {
-    return { error: String(e?.message ?? e), mtime };
-  }
-}
-
 /** A PR the factory takes on: open, out of draft, not red, no changes requested, its author not mid-turn. */
 export const isReady = (s: SessionRef) =>
   !s.role && !!s.pr?.head && s.pr.state === "OPEN" && !s.pr.draft && s.pr.ci !== "fail" && s.pr.review !== "CHANGES_REQUESTED" && s.status !== "busy";
-
-const STAGE: Record<Run["stage"], string> = {
-  running: "next",
-  agent: "agent at work",
-  "awaiting-fix": "waiting for CI after fixes",
-  asking: "asking you",
-  held: "waits for you",
-  done: "done",
-};
-
-export function formatRuns(runs: Run[], factoryOf: (r: Run) => Factory | undefined = () => undefined) {
-  if (!runs.length) return "No PRs in the factory.";
-  return [...runs]
-    .sort((a, b) => b.since - a.since)
-    .map((r) => {
-      const step = factoryOf(r)?.steps[r.step];
-      const at = step ? `${step.kind} ${step.name}${r.agent ? ` (${r.agent.name})` : ""}${r.round > 1 ? `, round ${r.round}` : ""}` : "";
-      return `#${r.number} ${r.repo} · ${STAGE[r.stage]}${at ? ` · ${at}` : ""}${r.reason ? ` · ${r.reason}` : ""} · ${r.pr}`;
-    })
-    .join("\n");
-}
 
 export default (remy: Remy) => createFactory()(remy);
 
 /** The factory extension; `world` replaces parts of the real gh/gcloud/claude world, for tests. */
 export const createFactory = (world: Partial<Env> = {}) => (remy: Remy) => {
-  const trusted = new Map(trustedRepos(remy.config).flatMap((r) => (r.root ? [[r.root, r.repo] as const] : [])));
+  const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo] as const));
   const loaded = new Map<string, Loaded>();
   const runs = remy.state.get<Record<string, Run>>("runs", {});
   let backoffUntil = remy.state.get("backoffUntil", 0);
@@ -133,7 +86,8 @@ export const createFactory = (world: Partial<Env> = {}) => (remy: Remy) => {
         throw e;
       }
     },
-    agentStatus: async (a) => (await listAgents()).find((r) => (a.id ? r.sessionId.startsWith(a.id) : r.name === a.name))?.status,
+    // As of the look at the sessions that raised this tick; a just-started agent may not be in it yet (GRACE_MS).
+    agentStatus: async (a) => remy.sessions().find((s) => (a.id ? s.sessionId.startsWith(a.id) : s.name === a.name))?.status,
     close: async (a) => void (await remy.close(a.name).catch((e) => remy.log("close failed", a.name, e?.message ?? e))),
     reports: readReports,
     ask,

@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { askDaemon, LinkClient, LinkServer, type LinkEvent, type ServerHandlers } from "./link";
+import { askDaemon, LinkClient } from "./client";
+import { LinkServer, type ServerHandlers } from "./server";
+import type { LinkEvent } from "./protocol";
 
 const cleanup: (() => void)[] = [];
 afterEach(() => {
