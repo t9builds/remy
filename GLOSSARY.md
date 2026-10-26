@@ -28,7 +28,7 @@ The one list of everything that needs the user now, most urgent first. `/queue` 
 _Avoid_: queue, inbox, notifications
 
 **Judgment call**:
-A decision only a person should make: a low-confidence verdict, a protected path, a failed verification, a product question.
+A decision only a person should make, because a wrong call would be hard to take back: data lost, a security hole, money or access, others broken. Agents make every other call themselves and record it.
 _Avoid_: approval, review
 
 ## Extensions

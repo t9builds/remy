@@ -34,17 +34,17 @@ Done when all three have returned their findings, or said "no findings", and `gi
 
 ## 5. Judge
 
-Follow [references/judgment.md](references/judgment.md). Merge duplicates, trace each finding to the code, and put every one in exactly one bucket: **fix**, **person** or **dismissed**, with a one-line reason.
+Follow [references/judgment.md](references/judgment.md). Merge duplicates, trace each finding to the code, and put every one in exactly one bucket: **fix**, **decided**, **person** or **dismissed**, with a one-line reason. **person** is only for what is critical: everything else, you decide.
 
 Done when every finding has a bucket and a reason you checked against the code, not taken from the reviewer.
 
 ## 6. Fix
 
-If anything is in **fix**, start one general-purpose subagent as the fixer, with [references/fixer.md](references/fixer.md) filled with the fix list, the intent, the rule paths and the check commands. It commits; it doesn't push.
+If anything is in **fix**, or a **decided** call changes code, start one general-purpose subagent as the fixer, with [references/fixer.md](references/fixer.md) filled with that list, the intent, the rule paths and the check commands. It commits; it doesn't push.
 
 When it returns, check its work yourself:
 
-- every fix finding is fixed, or it says why it couldn't be (that finding moves to **person**)
+- every finding it got is fixed, or it says why it couldn't be: that finding moves to **person** if it is critical, else to **decided** with what is left
 - `git diff` since the PR's head touches only what the findings need
 - the checks pass
 
@@ -58,9 +58,9 @@ Post the review on the PR with `gh pr comment <n> --body-file <file>`, using the
 
 As the very last step, exactly one verdict:
 
-- `pass`: the checks pass, and nothing is in **fix** or **person**. You'd ship it as it is.
-- `fixed`: you pushed fixes and nothing is in **person**. A fresh round checks again, so report `fixed` even when you trust the fixes.
-- `fail`: something is in **person**, or a check fails that the fixer couldn't fix. The summary names it in one line, so a person can decide quickly.
+- `pass`: the checks pass, and you pushed nothing. You'd ship it as it is; calls you made are in the record.
+- `fixed`: you pushed fixes, for **fix** or for **decided**, and nothing is in **person**. A fresh round checks again, so report `fixed` even when you trust the fixes.
+- `fail`: something is in **person**, or a check fails that the fixer couldn't fix. The summary names the critical problem in one line, so a person can decide quickly.
 
 Don't merge, approve or close the PR, and don't post to Slack or Telegram. Remy reads only your `remy report`, never your messages.
 

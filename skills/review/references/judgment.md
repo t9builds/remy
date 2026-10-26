@@ -22,9 +22,22 @@ Be slow to dismiss correctness and security findings, even from one reviewer: th
 
 Every finding goes into exactly one, with a one-line reason:
 
-- **fix**: real, within the PR's scope, and the right fix is clear without a decision only a person can make. Every `critical` and `warning` that survives the trace lands here unless it belongs in **person**.
-- **person**: real, but needs someone to decide: a product question, a change to a written decision (an ADR), work outside the PR's scope, or a fix that is risky or ambiguous.
+- **fix**: real, within the PR's scope, and the right fix is clear. Every `critical` and `warning` that survives the trace lands here unless it belongs in **decided** or **person**.
+- **decided**: real, but a judgment call: a policy or design choice, a scope trim, which of two reasonable ways, whether something deserves a guard. Make the call yourself. Take the option that is easiest to undo and closest to the repo's written decisions; if it changes code, it goes to the fixer with the fixes. The record says what you chose and why, so a person can revisit it after the merge.
+- **person**: critical, and only that (below). The change stops until someone decides.
 - **dismissed**: hypothetical, wrong, missing context, preference, or a nit. Nits are dismissed so rounds converge; an author who wants polish asks for it.
+
+## Critical
+
+The factory runs changes to the end on its own; a person is asked only when a wrong call would be hard to take back. A finding is critical when it is real and one of these:
+
+- **Irreversible.** Data lost or corrupted, a migration or deletion that can't be rolled back, something sent to people that can't be unsent.
+- **Unsafe.** A security hole the fixer can't close: auth, permissions, secrets, injection.
+- **Money and access.** Billing, payments, or who may do what, where the right behavior isn't written down anywhere.
+- **Breaks others.** A public API, a published contract or another team's integration, broken without a way back.
+- **Unknowable intent.** The intent contradicts itself or the code, so any fix guesses what the user wants, and a wrong guess is one of the above.
+
+Everything else is **decided**: a later PR can change it, and the record shows the reasoning. When unsure whether something is critical, it isn't.
 
 ## Record
 
@@ -38,7 +51,8 @@ The PR comment, posted after the fixes are pushed:
 | | Finding | Lenses | Outcome |
 |---|---|---|---|
 | fix | {title} (`path:line`) | correctness, proof | fixed in {sha} |
-| person | {title} | design | {what to decide} |
+| decided | {title} | design | {what you chose, and why} |
+| person | {title} | correctness | {what is critical, and what to decide} |
 | dismissed | {title} | correctness | {why} |
 
 Checks: {what ran, and the result}
