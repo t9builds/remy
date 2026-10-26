@@ -15598,6 +15598,14 @@ import { mkdirSync as mkdirSync2 } from "fs";
 import { join as join2 } from "path";
 
 // src/slack.ts
+function formBody(params) {
+  const form = new URLSearchParams;
+  for (const [k, v] of Object.entries(params))
+    if (v !== undefined && v !== null)
+      form.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
+  return form;
+}
+
 class Slack {
   token;
   constructor(token) {
@@ -15606,8 +15614,8 @@ class Slack {
   async call(method, params = {}, isRetry = false) {
     const res = await fetch(`https://slack.com/api/${method}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${this.token}`, "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify(params)
+      headers: { Authorization: `Bearer ${this.token}` },
+      body: formBody(params)
     });
     if (res.status === 429 && !isRetry) {
       const wait = Number(res.headers.get("retry-after") ?? "5");
@@ -15771,10 +15779,52 @@ function clock(ts) {
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+function blockText(blocks = []) {
+  const out = [];
+  for (const b of blocks) {
+    if (b.type === "section" || b.type === "header") {
+      if (b.text?.text)
+        out.push(b.text.text);
+      for (const f of b.fields ?? [])
+        if (f.text)
+          out.push(f.text);
+    } else if (b.type === "context") {
+      const parts = (b.elements ?? []).map((e) => typeof e.text === "string" ? e.text : e.text?.text).filter(Boolean);
+      if (parts.length)
+        out.push(parts.join(" "));
+    }
+  }
+  return out;
+}
+function attachmentText(a) {
+  const parts = [
+    a.pretext,
+    a.title && (a.title_link ? `${a.title} (${a.title_link})` : a.title),
+    a.text,
+    ...(a.fields ?? []).map((f) => [f.title, f.value].filter(Boolean).join(": ")),
+    ...blockText(a.blocks)
+  ].filter((p) => !!p);
+  if (parts.length)
+    return parts;
+  return [a.fallback ?? a.from_url].filter((p) => !!p);
+}
+function messageText(m) {
+  const head = m.text || blockText(m.blocks).join(`
+`);
+  const lines = [head];
+  for (const a of m.attachments ?? [])
+    for (const p of attachmentText(a))
+      if (!head.includes(p))
+        lines.push(...p.split(`
+`).map((l) => `> ${l}`));
+  return lines.filter(Boolean).join(`
+`);
+}
 function formatTranscript(messages, names, opts) {
   return messages.map((m) => {
-    const who = m.user ? names.get(m.user) ?? m.user : m.bot_id ? "bot" : "unknown";
-    const body = cleanText(m.text ?? "", names).split(`
+    const app = m.bot_id ? m.bot_profile?.name ?? m.username : undefined;
+    const who = app ?? (m.user ? names.get(m.user) ?? m.user : m.bot_id ? "bot" : "unknown");
+    const body = cleanText(messageText(m), names).split(`
 `).join(`
     `);
     const lines = [`[${clock(m.ts)}] ${who}: ${body}`];

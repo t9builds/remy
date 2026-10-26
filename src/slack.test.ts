@@ -33,3 +33,25 @@ test("socket mode acks every envelope and delivers only DMs", async () => {
   expect(acks).toEqual(["e1", "e2"]);
   expect(got.map((m) => m.text)).toEqual(["hi"]);
 });
+
+test("Web API calls go as a form, which every method accepts", async () => {
+  const { Slack, formBody } = await import("./slack");
+  expect(formBody({ channel: "C1", ts: "1.2", oldest: undefined, inclusive: false, limit: 50, meta: { a: 1 } }).toString()).toBe(
+    "channel=C1&ts=1.2&inclusive=false&limit=50&meta=%7B%22a%22%3A1%7D",
+  );
+  let sent: Request | undefined;
+  const prev = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init: RequestInit) => {
+    sent = new Request(url, init);
+    return Response.json({ ok: true, messages: [{ ts: "1.2" }, { ts: "1.3" }] });
+  }) as any;
+  try {
+    const replies = await new Slack("xoxb-test").replies("C1", "1.2", "1.2");
+    expect(replies.map((m) => m.ts)).toEqual(["1.3"]);
+  } finally {
+    globalThis.fetch = prev;
+  }
+  expect(sent!.headers.get("content-type")).toStartWith("application/x-www-form-urlencoded");
+  expect(sent!.headers.get("authorization")).toBe("Bearer xoxb-test");
+  expect(await sent!.text()).toBe("channel=C1&ts=1.2&oldest=1.2&inclusive=false&limit=50");
+});

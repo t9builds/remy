@@ -3,7 +3,7 @@
  * ~/.remy/tasks/<id>/task.json; `remy spawn --slack-task <id>` turns it into the agent's prompt.
  */
 import { PATHS, readJson } from "./config";
-import type { SlackMessage } from "./slack";
+import type { SlackAttachment, SlackBlock, SlackMessage } from "./slack";
 
 export type SlackTask = {
   id: string;
@@ -59,6 +59,46 @@ function clock(ts: string) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/** Text of section, header and context blocks; buttons and other controls are left out. */
+function blockText(blocks: SlackBlock[] = []) {
+  const out: string[] = [];
+  for (const b of blocks) {
+    if (b.type === "section" || b.type === "header") {
+      if (b.text?.text) out.push(b.text.text);
+      for (const f of b.fields ?? []) if (f.text) out.push(f.text);
+    } else if (b.type === "context") {
+      const parts = (b.elements ?? []).map((e) => (typeof e.text === "string" ? e.text : e.text?.text)).filter(Boolean);
+      if (parts.length) out.push(parts.join(" "));
+    }
+  }
+  return out;
+}
+
+/** An attachment or unfurl as lines: its own parts, else its fallback, else the link it unfurls. */
+function attachmentText(a: SlackAttachment) {
+  const parts = [
+    a.pretext,
+    a.title && (a.title_link ? `${a.title} (${a.title_link})` : a.title),
+    a.text,
+    ...(a.fields ?? []).map((f) => [f.title, f.value].filter(Boolean).join(": ")),
+    ...blockText(a.blocks),
+  ].filter((p): p is string => !!p);
+  if (parts.length) return parts;
+  return [a.fallback ?? a.from_url].filter((p): p is string => !!p);
+}
+
+/**
+ * What a message says. Apps often leave `text` empty and post blocks or attachments (an issue tracker's card,
+ * a link unfurl), so those are added as quoted lines.
+ */
+export function messageText(m: SlackMessage) {
+  const head = m.text || blockText(m.blocks).join("\n");
+  const lines = [head];
+  for (const a of m.attachments ?? [])
+    for (const p of attachmentText(a)) if (!head.includes(p)) lines.push(...p.split("\n").map((l) => `> ${l}`));
+  return lines.filter(Boolean).join("\n");
+}
+
 /** One line per message (continuation lines indented), with saved attachments and the trigger marked. */
 export function formatTranscript(
   messages: SlackMessage[],
@@ -67,8 +107,9 @@ export function formatTranscript(
 ) {
   return messages
     .map((m) => {
-      const who = m.user ? names.get(m.user) ?? m.user : m.bot_id ? "bot" : "unknown";
-      const body = cleanText(m.text ?? "", names).split("\n").join("\n    ");
+      const app = m.bot_id ? m.bot_profile?.name ?? m.username : undefined;
+      const who = app ?? (m.user ? names.get(m.user) ?? m.user : m.bot_id ? "bot" : "unknown");
+      const body = cleanText(messageText(m), names).split("\n").join("\n    ");
       const lines = [`[${clock(m.ts)}] ${who}: ${body}`];
       for (const f of opts.files?.get(m.ts) ?? []) lines.push(`    (attachment: ${f})`);
       if (m.ts === opts.triggerTs) lines.push(`    ← ${opts.triggerNote}`);
