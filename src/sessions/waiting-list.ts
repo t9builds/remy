@@ -32,13 +32,37 @@ const unwrap = (l: string) =>
     .replace(/[*_]+$/, "")
     .trim();
 
-/** Whether a line asks something: it ends in a question mark that isn't part of a URL or of code. */
-const asks = (l: string) => /\?["'”)]*$/.test(l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, "").trim());
+/** Code and URLs, whose punctuation isn't the line's own. */
+const CODE_OR_URL = /`[^`]*`|https?:\/\/\S*[^\s?]/g;
 
-/** The question a turn ended on: its last line that ends in a question mark. */
+/** Whether a line asks something: it ends in a question mark that isn't part of a URL or of code. */
+const asks = (l: string) => /\?["'”)]*$/.test(l.replace(CODE_OR_URL, "").trim());
+
+/**
+ * A question followed by what happens once the user answers it, on one line: "Which colour? Once you tell me, I'll
+ * write it down." The follow-up must open by addressing the user, so "Is the 5? Not sure, but your tests pass."
+ * doesn't count. Returns just the question, from the sentence it starts.
+ */
+function asksThenYou(l: string): string | undefined {
+  // Blank out code and URLs, keeping positions, so their punctuation doesn't count.
+  const plain = l.replace(CODE_OR_URL, (m) => " ".repeat(m.length));
+  const cue = /^(?:(?:once|when|if|after|as soon as) you\b|let me know\b|tell me\b)/i;
+  const marks = [...plain.matchAll(/\?["'”)]*\s+/g)];
+  const mark = marks.findLast((m) => cue.test(l.slice(m.index + m[0].length)));
+  if (!mark) return undefined;
+  const before = [...plain.slice(0, mark.index).matchAll(/[.!?]["'”)]*\s+/g)].at(-1);
+  return l.slice(before ? before.index + before[0].length : 0, mark.index + mark[0].trimEnd().length);
+}
+
+/**
+ * The question a turn ended on: its last line that ends in a question mark, or a question on its very last line that
+ * goes on to tell the user what happens once they answer.
+ */
 export function questionOf(last: string | undefined): string | undefined {
-  const line = last?.split("\n").map(unwrap).findLast(asks);
-  return line ? short(line) : undefined;
+  const lines = (last ?? "").split("\n").map(unwrap).filter(Boolean);
+  const end = lines.at(-1);
+  const q = (end && !asks(end) && asksThenYou(end)) || lines.findLast(asks);
+  return q ? short(q) : undefined;
 }
 
 /** Why `s` waits on the user, if it does. A session counts once, under its most urgent reason. */

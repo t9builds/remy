@@ -2131,7 +2131,7 @@ class SlackBridge {
     const ts = await this.slack.post(channel ?? await this.ensureDm(), text, thread?.ts);
     const root = thread?.ts ?? ts;
     const prev = this.state.threads[root];
-    if (opts.session || opts.expect_reply || prev) {
+    if (opts.session || opts.expect_reply || prev || thread && !channel) {
       this.state.threads[root] = {
         ...prev,
         channel: channel ?? prev?.channel,
@@ -2237,11 +2237,17 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, {
       await this.handleInbound(m);
     }
     if (this.tick++ % 2 === 0) {
-      const waiting = Object.entries(this.state.threads).filter(([, t]) => t.expectReply && !t.channel).sort(([, a], [, b]) => b.postedAt - a.postedAt).slice(0, 5);
-      for (const [root, t] of waiting) {
-        for (const m of await this.slack.replies(channel, root, t.lastSeen)) {
-          t.lastSeen = m.ts;
-          await this.handleInbound(m, root);
+      for (const [root, t] of dmThreadsToRead(this.state.threads)) {
+        try {
+          for (const m of await this.slack.replies(channel, root, t.lastSeen)) {
+            t.lastSeen = m.ts;
+            await this.handleInbound(m, root);
+          }
+        } catch (e) {
+          if (!(e instanceof SlackError && e.code === "thread_not_found"))
+            throw e;
+          this.log("thread gone", root);
+          delete this.state.threads[root];
         }
       }
     }
@@ -2372,6 +2378,10 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, {
       default_repo: task.defaultRepo ?? ""
     });
   }
+}
+function dmThreadsToRead(threads, limit = 5) {
+  const open = (t) => t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS;
+  return Object.entries(threads).filter(([, t]) => !t.channel).sort(([, a], [, b]) => Number(open(b)) - Number(open(a)) || b.postedAt - a.postedAt).slice(0, limit);
 }
 var DM_SCOPES = ["chat:write", "im:history", "im:read", "im:write"];
 var CHANNEL_SCOPES = [
@@ -3481,11 +3491,24 @@ async function spawnAgent(opts) {
 var MARK = ["\uD83D\uDD34", "\uD83D\uDFE0", "\uD83D\uDFE1", "\uD83D\uDFE2", "\u26AA"];
 var short = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}\u2026` : s).replace(/\s+/g, " ").trim();
 var unwrap = (l) => l.trim().replace(/^(?:(?:[#>]+|[-+*](?=\s)|[*_]+)\s*)+/, "").replace(/[*_]+$/, "").trim();
-var asks = (l) => /\?["'\u201D)]*$/.test(l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, "").trim());
+var CODE_OR_URL = /`[^`]*`|https?:\/\/\S*[^\s?]/g;
+var asks = (l) => /\?["'\u201D)]*$/.test(l.replace(CODE_OR_URL, "").trim());
+function asksThenYou(l) {
+  const plain = l.replace(CODE_OR_URL, (m) => " ".repeat(m.length));
+  const cue = /^(?:(?:once|when|if|after|as soon as) you\b|let me know\b|tell me\b)/i;
+  const marks = [...plain.matchAll(/\?["'\u201D)]*\s+/g)];
+  const mark = marks.findLast((m) => cue.test(l.slice(m.index + m[0].length)));
+  if (!mark)
+    return;
+  const before = [...plain.slice(0, mark.index).matchAll(/[.!?]["'\u201D)]*\s+/g)].at(-1);
+  return l.slice(before ? before.index + before[0].length : 0, mark.index + mark[0].trimEnd().length);
+}
 function questionOf(last) {
-  const line = last?.split(`
-`).map(unwrap).findLast(asks);
-  return line ? short(line) : undefined;
+  const lines = (last ?? "").split(`
+`).map(unwrap).filter(Boolean);
+  const end = lines.at(-1);
+  const q = end && !asks(end) && asksThenYou(end) || lines.findLast(asks);
+  return q ? short(q) : undefined;
 }
 function itemOf(s) {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;

@@ -20,7 +20,7 @@ Preconditions:
 
 - **Posted.** Run `harness.ts pinned`. A message that starts `*Waiting on you` or `✅ *Nothing waits on you.*`.
 - **Edited, not reposted.** Note the ts `pinned` printed. After the agents journey's question, run `harness.ts pinned` again. The same ts, and `replies` marks it `(edited)`.
-- **Question.** In the same output, a `🔴` line for the agent the run started, with its question.
+- **Question.** In the same output, a `🔴` line for the agent the run started, with its question: `asks: "Which colour do you like best?"`, without the "Once you tell me..." clause that follows it in the agent's reply.
 - **Proof.** `harness.ts snap waiting-list`, plus both `pinned` outputs in your report.
 
 ## Gotchas
