@@ -2,6 +2,8 @@
 status: accepted
 ---
 
+> Which calls go to a person is narrowed by [ADR-0009](0009-agents-decide-people-only-for-critical.md).
+
 # Agents verify changes; humans make judgment calls, not code reviews
 
 By default, no person reviews code. Agents that didn't write a change verify it, at every point where it moves on:

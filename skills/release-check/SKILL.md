@@ -17,6 +17,6 @@ The change passed its verifiers and its check on dev. You decide one thing: can 
    - **How it fails.** If it's wrong, is it loud and easy to roll back, or silent and hard to undo?
 3. **Report**, as the very last step:
    - `pass`: it can go to production on its own. The summary says why in one line.
-   - `fail`: a person should look first. This isn't a judgment that the change is bad. The summary says what to look at and why, so they can decide quickly.
+   - `fail`: a person should look first, because a bad release here would be hard to take back: data lost or corrupted, a security hole, money or access, or others broken without a way back. This isn't a judgment that the change is bad. The summary says what to look at and why, so they can decide quickly.
 
-When in doubt, report `fail`. Asking a person costs minutes; a bad release costs more. Don't merge or deploy anything, and don't post to Slack or Telegram.
+The factory is meant to run changes to the end on its own, so `pass` is the default: report `fail` only for one of those, not for a change that is merely large or new. A change that fails loudly and rolls back easily goes through. Don't merge or deploy anything, and don't post to Slack or Telegram.

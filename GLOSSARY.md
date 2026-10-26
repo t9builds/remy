@@ -28,7 +28,7 @@ The one list of everything that needs the user now, most urgent first. `/queue` 
 _Avoid_: queue, inbox, notifications
 
 **Judgment call**:
-A decision only a person should make: a low-confidence verdict, a protected path, a failed verification, a product question.
+A decision only a person should make, because a wrong call would be hard to take back: data lost, a security hole, money or access, others broken. Agents make every other call themselves and record it.
 _Avoid_: approval, review
 
 ## Extensions
@@ -52,8 +52,28 @@ One stage of a pipeline: an agent step, a wait, a gate or an action.
 _Avoid_: stage, job, task
 
 **Verifier**:
-An agent that checks a change it didn't write, fixes what it finds and records a verdict.
-_Avoid_: reviewer
+An agent that checks a change it didn't write: its reviewers find what's wrong, its fixer fixes it, and it records a verdict.
+_Avoid_: checker
+
+**Reviewer**:
+A verifier's subagent that looks for problems in a change through one lens (correctness, design or proof) and changes nothing.
+_Avoid_: verifier, critic
+
+**Finding**:
+A problem a reviewer reports, with where it is and the evidence; the verifier sorts each one into fix, decided, person or dismissed.
+_Avoid_: issue, comment
+
+**Fixer**:
+The agent a verifier hands its confirmed findings to; it fixes them and commits, and the verifier pushes.
+_Avoid_: author
+
+**Verification skill**:
+A skill a repo owns (`.claude/skills/verify-<app>/`) that launches the app in isolation, drives it the way a user does and captures evidence; the proof reviewer and `/remy:verify` follow it.
+_Avoid_: test script, e2e suite
+
+**Feature map**:
+The folder `features/` inside a verification skill: an index and one file per user-facing feature, saying how to reach it, how to drive it and what end state proves it works.
+_Avoid_: test plan, coverage list
 
 **Release check**:
 An agent step that decides whether a verified change goes to production on its own or waits for a person.

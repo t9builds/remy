@@ -6,10 +6,11 @@ import { DEFAULTS } from "../../config/config";
 import { ExtensionHost } from "../../extension-host/host";
 import type { Config } from "../../sdk/config";
 import type { SessionRef } from "../../sdk/extension";
+import { PLUGIN_ROOT } from "../../shared/paths";
 import { createFactory, isReady } from "./factory";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
-import type { Run } from "./pipeline";
+import { gateBlockers, type PrDetail, type Run } from "./pipeline";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "remy-factory-")));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -35,6 +36,39 @@ test("a repo's factory.ts imports its helpers from remy/factory", async () => {
     repo("bad", `import { defineFactory } from "remy/factory";\nexport default defineFactory({ steps: [] });\n`),
   );
   expect(bad.error).toBe("it has no steps");
+});
+
+test("Remy's own .remy/factory.ts loads", async () => {
+  const l = await loadFactory(PLUGIN_ROOT);
+  expect(l.error).toBeUndefined();
+  expect(l.factory?.steps.map((s) => `${s.kind} ${s.name}`)).toEqual([
+    "agent review",
+    "agent verify",
+    "gate merge",
+    "action merge",
+    "action notify",
+  ]);
+  expect(l.factory?.autonomy).toBe("merge");
+  const review = l.factory?.steps.find((s) => s.kind === "agent" && s.name === "review");
+  expect(review?.kind === "agent" && review.repeat).toBe("until-clean");
+  const verify = l.factory?.steps.find((s) => s.kind === "agent" && s.name === "verify");
+  expect(verify?.kind === "agent" && verify.instructions).toContain("remy report");
+  const g = l.factory?.steps.find((s) => s.kind === "gate");
+  if (g?.kind !== "gate") throw new Error("no gate step");
+  const touching = (file: string): PrDetail => ({
+    state: "OPEN",
+    draft: false,
+    review: "",
+    ci: "pass",
+    head: "aaa",
+    lines: 10,
+    files: [file],
+    allFiles: true,
+  });
+  // No path or size needs a person (ADR-0009); red CI still stops it.
+  expect(gateBlockers(touching(".remy/factory.ts"), g)).toEqual([]);
+  expect(gateBlockers({ ...touching("src/sdk/extension.ts"), lines: 5000 }, g)).toEqual([]);
+  expect(gateBlockers({ ...touching("README.md"), ci: "fail" }, g)).toEqual(["CI fails"]);
 });
 
 const pr = {
