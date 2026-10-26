@@ -6,6 +6,7 @@ import { DEFAULTS } from "../../config/config";
 import { ExtensionHost } from "../../extension-host/host";
 import type { Config } from "../../sdk/config";
 import type { SessionRef } from "../../sdk/extension";
+import { PLUGIN_ROOT } from "../../shared/paths";
 import { createFactory, isReady } from "./factory";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
@@ -35,6 +36,18 @@ test("a repo's factory.ts imports its helpers from remy/factory", async () => {
     repo("bad", `import { defineFactory } from "remy/factory";\nexport default defineFactory({ steps: [] });\n`),
   );
   expect(bad.error).toBe("it has no steps");
+});
+
+test("Remy's own .remy/factory.ts loads", async () => {
+  const l = await loadFactory(PLUGIN_ROOT);
+  expect(l.error).toBeUndefined();
+  expect(l.factory?.steps.map((s) => `${s.kind} ${s.name}`)).toEqual([
+    "agent review",
+    "agent verify",
+    "gate merge",
+    "action merge",
+    "action notify",
+  ]);
 });
 
 const pr = {
