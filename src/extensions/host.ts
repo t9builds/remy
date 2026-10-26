@@ -20,6 +20,8 @@ export type HostDeps = {
   log(...a: unknown[]): void;
   /** Where extensions keep their `state`. */
   stateDir: string;
+  /** How long `emit` waits for one handler (default 10 s); a slower one, e.g. one awaiting `ask`, runs on unwaited. */
+  handlerWaitMs?: number;
 };
 
 export type Loaded = { name: string; from: string; error?: string };
@@ -54,16 +56,30 @@ export class ExtensionHost {
     }
   }
 
-  /** Every handler of `event`, each in its own try; resolves when all are done. */
+  /**
+   * Every handler of `event`, each in its own try; resolves when all are done, or once the slow ones have had
+   * `handlerWaitMs`, so a handler that waits on a person doesn't hold up the events after it.
+   */
   async emit<E extends EventName>(event: E, payload: Events[E]) {
     const hs = this.handlers.get(event) ?? [];
+    const waitMs = this.deps.handlerWaitMs ?? 10_000;
     await Promise.all(
-      hs.map(async (h) => {
-        try {
-          await h.fn(payload);
-        } catch (e: any) {
-          this.deps.log(`extension ${h.ext} failed on ${event}:`, e?.message ?? e);
-        }
+      hs.map((h) => {
+        const run = (async () => {
+          try {
+            await h.fn(payload);
+          } catch (e: any) {
+            this.deps.log(`extension ${h.ext} failed on ${event}:`, e?.message ?? e);
+          }
+        })();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const late = new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            this.deps.log(`extension ${h.ext} still handles ${event} after ${waitMs / 1000}s; not waiting for it`);
+            resolve();
+          }, waitMs);
+        });
+        return Promise.race([run, late]).finally(() => clearTimeout(timer));
       }),
     );
   }

@@ -1545,12 +1545,23 @@ class ExtensionHost {
   }
   async emit(event, payload) {
     const hs = this.handlers.get(event) ?? [];
-    await Promise.all(hs.map(async (h) => {
-      try {
-        await h.fn(payload);
-      } catch (e) {
-        this.deps.log(`extension ${h.ext} failed on ${event}:`, e?.message ?? e);
-      }
+    const waitMs = this.deps.handlerWaitMs ?? 1e4;
+    await Promise.all(hs.map((h) => {
+      const run = (async () => {
+        try {
+          await h.fn(payload);
+        } catch (e) {
+          this.deps.log(`extension ${h.ext} failed on ${event}:`, e?.message ?? e);
+        }
+      })();
+      let timer;
+      const late = new Promise((resolve) => {
+        timer = setTimeout(() => {
+          this.deps.log(`extension ${h.ext} still handles ${event} after ${waitMs / 1000}s; not waiting for it`);
+          resolve();
+        }, waitMs);
+      });
+      return Promise.race([run, late]).finally(() => clearTimeout(timer));
     }));
   }
   async command(text, ctx) {
@@ -3138,7 +3149,11 @@ async function emit(events) {
   }
 }
 var viewWorkspace = (s) => workspaceOf(s.cwd, s.repo);
+var observing = false;
 async function observe() {
+  if (observing)
+    return log("observe: the last look is still running; skipping");
+  observing = true;
   try {
     const next = await takeSnapshot();
     const prev = lastSnapshot;
@@ -3149,11 +3164,16 @@ async function observe() {
     await refreshQueue(next);
   } catch (e) {
     log("observe error", e?.message ?? e);
+  } finally {
+    observing = false;
   }
 }
 function newHost() {
   return new ExtensionHost({
-    post: async (text, opts) => (await route({ ...opts })).post(text, { thread: opts.thread, session: opts.session, expect_reply: opts.expect_reply }),
+    post: async (text, opts) => {
+      const where = { ...opts };
+      return (await route(where)).post(text, { thread: where.thread, session: where.session, expect_reply: where.expect_reply });
+    },
     spawn: (opts) => spawnAgent(opts),
     close: async (name, opts) => {
       const s = lastSnapshot?.sessions.find((x) => x.name === name) ?? (await agents(0)).find((r) => r.name === name);

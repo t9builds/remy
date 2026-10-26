@@ -85,6 +85,17 @@ describe("extension host", () => {
     expect(logs.join("\n")).toContain("extension bad failed on tick: boom");
   });
 
+  test("a handler that waits on a person doesn't hold up the events after it", async () => {
+    const { h, logs } = host({ handlerWaitMs: 20 });
+    const got: string[] = [];
+    await h.load("slow", "test", (remy) => remy.on("tick", () => new Promise(() => {})));
+    await h.load("fast", "test", (remy) => remy.on("tick", ({ at }) => void got.push(`tick ${at}`)));
+    await h.emit("tick", { at: 1 });
+    await h.emit("tick", { at: 2 });
+    expect(got).toEqual(["tick 1", "tick 2"]);
+    expect(logs.join("\n")).toContain("extension slow still handles tick");
+  });
+
   test("a setup that throws is recorded and leaves nothing behind", async () => {
     const { h } = host();
     await h.load("broken", "test", (remy) => {

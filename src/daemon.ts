@@ -374,8 +374,11 @@ async function emit(events: Emitted[]) {
 
 const viewWorkspace = (s: SessionView) => workspaceOf(s.cwd, s.repo);
 
-/** Look at the sessions again: raise what changed, then `tick`. */
+let observing = false;
+/** Look at the sessions again: raise what changed, then `tick`. A look still running skips the next one. */
 async function observe() {
+  if (observing) return log("observe: the last look is still running; skipping");
+  observing = true;
   try {
     const next = await takeSnapshot();
     const prev = lastSnapshot;
@@ -385,12 +388,18 @@ async function observe() {
     await refreshQueue(next);
   } catch (e: any) {
     log("observe error", e?.message ?? e);
+  } finally {
+    observing = false;
   }
 }
 
 function newHost() {
   return new ExtensionHost({
-    post: async (text, opts: PostOptions & { expect_reply?: boolean }) => (await route({ ...opts })).post(text, { thread: opts.thread, session: opts.session, expect_reply: opts.expect_reply }),
+    post: async (text, opts: PostOptions & { expect_reply?: boolean }) => {
+      // `route` fills in the thread an agent started from, so post with what it returns.
+      const where = { ...opts };
+      return (await route(where)).post(text, { thread: where.thread, session: where.session, expect_reply: where.expect_reply });
+    },
     spawn: (opts) => spawnAgent(opts),
     close: async (name, opts) => {
       const s = lastSnapshot?.sessions.find((x) => x.name === name) ?? (await agents(0)).find((r) => r.name === name);
