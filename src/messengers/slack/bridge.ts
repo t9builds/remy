@@ -150,9 +150,7 @@ export class SlackBridge implements Messenger {
   /** The agent whose question in the DM is still open, for a DM that isn't a reply in its thread. */
   private awaiting() {
     const open = Object.values(this.state.threads)
-      .filter(
-        (t) => t.session && !t.channel && t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS,
-      )
+      .filter((t) => t.session && !t.channel && isOpen(t))
       .sort((a, b) => b.postedAt - a.postedAt);
     return open[0]?.session;
   }
@@ -386,15 +384,19 @@ export class SlackBridge implements Messenger {
   }
 }
 
+/** Whether a thread's question is still open: it expects a reply, none came, and it isn't stale. */
+function isOpen(t: ThreadInfo) {
+  return t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS;
+}
+
 /**
  * The DM threads whose replies a poll reads: those with a question still open first, then any Remy posted in,
  * newest first. A handful, since each costs a Slack read.
  */
 export function dmThreadsToRead(threads: Record<string, ThreadInfo>, limit = 5) {
-  const open = (t: ThreadInfo) => t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS;
   return Object.entries(threads)
     .filter(([, t]) => !t.channel)
-    .sort(([, a], [, b]) => Number(open(b)) - Number(open(a)) || b.postedAt - a.postedAt)
+    .sort(([, a], [, b]) => Number(isOpen(b)) - Number(isOpen(a)) || b.postedAt - a.postedAt)
     .slice(0, limit);
 }
 

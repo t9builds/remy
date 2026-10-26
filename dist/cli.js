@@ -2177,7 +2177,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, {
     this.startWatching();
   }
   awaiting() {
-    const open = Object.values(this.state.threads).filter((t) => t.session && !t.channel && t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS).sort((a, b) => b.postedAt - a.postedAt);
+    const open = Object.values(this.state.threads).filter((t) => t.session && !t.channel && isOpen(t)).sort((a, b) => b.postedAt - a.postedAt);
     return open[0]?.session;
   }
   async handleInbound(m, threadRoot, channel) {
@@ -2379,9 +2379,11 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, {
     });
   }
 }
+function isOpen(t) {
+  return t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS;
+}
 function dmThreadsToRead(threads, limit = 5) {
-  const open = (t) => t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS;
-  return Object.entries(threads).filter(([, t]) => !t.channel).sort(([, a], [, b]) => Number(open(b)) - Number(open(a)) || b.postedAt - a.postedAt).slice(0, limit);
+  return Object.entries(threads).filter(([, t]) => !t.channel).sort(([, a], [, b]) => Number(isOpen(b)) - Number(isOpen(a)) || b.postedAt - a.postedAt).slice(0, limit);
 }
 var DM_SCOPES = ["chat:write", "im:history", "im:read", "im:write"];
 var CHANNEL_SCOPES = [
@@ -3495,7 +3497,7 @@ var CODE_OR_URL = /`[^`]*`|https?:\/\/\S*[^\s?]/g;
 var asks = (l) => /\?["'\u201D)]*$/.test(l.replace(CODE_OR_URL, "").trim());
 function asksThenYou(l) {
   const plain = l.replace(CODE_OR_URL, (m) => " ".repeat(m.length));
-  const cue = /^(?:(?:once|when|if|after|as soon as) you\b|let me know\b|tell me\b)/i;
+  const cue = /^(?:(?:once|when|if|after|as soon as) you (?:tell|answer|reply|respond|pick|choose|decide|confirm|say|let me know)\b|let me know\b|tell me\b)/i;
   const marks = [...plain.matchAll(/\?["'\u201D)]*\s+/g)];
   const mark = marks.findLast((m) => cue.test(l.slice(m.index + m[0].length)));
   if (!mark)

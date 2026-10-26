@@ -373,6 +373,16 @@ async function say(args: string[]) {
   console.log(`${channel} ${r.ts}`);
 }
 
+/** Every message in a channel since `oldest`, thread replies included: history alone returns top-level messages only. */
+async function dmWithThreads(token: string, channel: string, oldest: string): Promise<any[]> {
+  const top: any[] = (await slack(token, "conversations.history", { channel, oldest, limit: 200 })).messages;
+  const all = new Map<string, any>(top.map((m) => [m.ts, m]));
+  for (const m of top.filter((m) => m.reply_count))
+    for (const r of (await slack(token, "conversations.replies", { channel, ts: m.ts, limit: 200 })).messages)
+      all.set(r.ts, r);
+  return [...all.values()];
+}
+
 /** What the bot posted after --after (default: the run's start), oldest first; --wait-for waits for a match. */
 async function replies(args: string[]) {
   const run = mustRun();
@@ -383,14 +393,12 @@ async function replies(args: string[]) {
   const seconds = Number(flag("timeout", args) ?? 120);
   const read = async () => {
     const t = tokens().user;
-    const top = thread
-      ? (await slack(t, "conversations.replies", { channel, ts: thread, oldest: after, limit: 200 })).messages
-      : (await slack(t, "conversations.history", { channel, oldest: run.since, limit: 200 })).messages;
+    const all = new Map<string, any>();
     // The coordinator often answers in a thread, under an older message too: read every thread of this run.
-    const all = new Map<string, any>(top.filter((m: any) => Number(m.ts) > Number(after)).map((m: any) => [m.ts, m]));
-    for (const m of thread ? [] : top.filter((m: any) => m.reply_count))
-      for (const r of (await slack(t, "conversations.replies", { channel, ts: m.ts, limit: 200 })).messages)
-        if (Number(r.ts) > Number(after)) all.set(r.ts, r);
+    const msgs = thread
+      ? (await slack(t, "conversations.replies", { channel, ts: thread, oldest: after, limit: 200 })).messages
+      : await dmWithThreads(t, channel, run.since);
+    for (const m of msgs) if (Number(m.ts) > Number(after)) all.set(m.ts, m);
     return [...all.values()]
       .filter((m) => m.user === run.bot || (m.bot_id && m.user !== run.user))
       .sort((x, y) => Number(x.ts) - Number(y.ts));
@@ -440,10 +448,12 @@ async function snap(args: string[]) {
   const name = args[0] ?? "snap";
   const dir = join(EVIDENCE, run.id, name);
   mkdirSync(dir, { recursive: true });
-  const h = await slack(tokens().user, "conversations.history", { channel: run.dm, oldest: run.since, limit: 200 });
-  const dm = (h.messages as any[])
+  const dm = (await dmWithThreads(tokens().user, run.dm, run.since))
     .sort((x, y) => Number(x.ts) - Number(y.ts))
-    .map((m) => `[${m.ts}] ${m.user === run.user ? "you" : "remy"}: ${m.text}`);
+    .map(
+      (m) =>
+        `[${m.ts}] ${m.user === run.user ? "you" : "remy"}: ${m.text}${m.thread_ts && m.thread_ts !== m.ts ? ` (in thread ${m.thread_ts})` : ""}`,
+    );
   writeFileSync(join(dir, "dm.txt"), `${dm.join("\n")}\n`);
   if (existsSync(join(HOME, "daemon.log"))) cpSync(join(HOME, "daemon.log"), join(dir, "daemon.log"));
   if (run.tmux)

@@ -248,6 +248,7 @@ Message the bot, in Slack or Telegram:
 - "ask basil whether it's blocked"
 - "stop docs-cli" (Remy only stops, merges or closes things when you ask like this, apart from closing its own agents once their PR merges)
 - reply in an agent's thread to answer its question
+- go on in any DM thread Remy answered you in
 
 ### Tasks from Slack threads
 

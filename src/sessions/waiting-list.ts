@@ -40,13 +40,15 @@ const asks = (l: string) => /\?["'”)]*$/.test(l.replace(CODE_OR_URL, "").trim(
 
 /**
  * A question followed by what happens once the user answers it, on one line: "Which colour? Once you tell me, I'll
- * write it down." The follow-up must open by addressing the user, so "Is the 5? Not sure, but your tests pass."
- * doesn't count. Returns just the question, from the sentence it starts.
+ * write it down." The follow-up must say the user supplies the answer ("once you tell me", "when you
+ * decide", "let me know"), so "Is the 5? Not sure, but your tests pass." and sign-offs like "Did that help? If you
+ * need anything else, I'm here." don't count. Returns just the question, from the sentence it starts.
  */
 function asksThenYou(l: string): string | undefined {
   // Blank out code and URLs, keeping positions, so their punctuation doesn't count.
   const plain = l.replace(CODE_OR_URL, (m) => " ".repeat(m.length));
-  const cue = /^(?:(?:once|when|if|after|as soon as) you\b|let me know\b|tell me\b)/i;
+  const cue =
+    /^(?:(?:once|when|if|after|as soon as) you (?:tell|answer|reply|respond|pick|choose|decide|confirm|say|let me know)\b|let me know\b|tell me\b)/i;
   const marks = [...plain.matchAll(/\?["'”)]*\s+/g)];
   const mark = marks.findLast((m) => cue.test(l.slice(m.index + m[0].length)));
   if (!mark) return undefined;

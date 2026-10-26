@@ -31,6 +31,12 @@ const pr = (over: Partial<Pr> = {}): Pr => ({
 });
 const stop = (text: string, ts = 1) => ({ event: "Stop", ts, text });
 
+test("questionOf ignores sign-offs that follow a question", () => {
+  expect(questionOf("All green. Did that help? If you need anything else, I'm here.")).toBeUndefined();
+  expect(questionOf("Merged. Anything else? When you're ready, I can open the next PR.")).toBeUndefined();
+  expect(questionOf("Fixed the flaky test. Why was it flaky? After you pulled main it passes.")).toBeUndefined();
+});
+
 test("questionOf finds the last line that asks something", () => {
   expect(questionOf("Done.\n\n**Which table should I use?**\nI can also do both.")).toBe("Which table should I use?");
   expect(questionOf("All tests pass.")).toBeUndefined();
