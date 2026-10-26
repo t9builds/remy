@@ -6340,7 +6340,7 @@ try {
     console.log(HELP);
     process.exit(0);
   }
-  const run = COMMANDS[cmd];
+  const run = Object.hasOwn(COMMANDS, cmd) ? COMMANDS[cmd] : undefined;
   if (!run)
     throw new Error(`unknown command "${cmd}"
 
