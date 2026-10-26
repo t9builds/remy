@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { type SlackMessage, socketMode } from "./client";
+import { fromUser, type SlackMessage, socketMode } from "./client";
 
 const acks: string[] = [];
 const server = Bun.serve({
@@ -70,4 +70,17 @@ test("Web API calls go as a form, which every method accepts", async () => {
   expect(sent!.headers.get("content-type")).toStartWith("application/x-www-form-urlencoded");
   expect(sent!.headers.get("authorization")).toBe("Bearer xoxb-test");
   expect(await sent!.text()).toBe("channel=C1&ts=1.2&oldest=1.2&inclusive=false&limit=50");
+});
+
+test("a message is the user's when they post it, or an app they trust posts it as them", () => {
+  const msg = { ts: "1", text: "/queue" };
+  expect(fromUser({ ...msg, user: "UME" }, "UME")).toBe(true);
+  expect(fromUser({ ...msg, user: "UOTHER" }, "UME")).toBe(false);
+  // Slack marks a post made with the user's token by the app that made it.
+  const viaApp = { ...msg, user: "UME", bot_id: "BAPP", app_id: "AVERIFY" };
+  expect(fromUser(viaApp, "UME")).toBe(false);
+  expect(fromUser(viaApp, "UME", ["AOTHER"])).toBe(false);
+  expect(fromUser(viaApp, "UME", ["AVERIFY"])).toBe(true);
+  // The bot's own posts never count, trusted app or not.
+  expect(fromUser({ ...msg, user: "UBOT", bot_id: "BBOT", app_id: "AVERIFY" }, "UME", ["AVERIFY"])).toBe(false);
 });

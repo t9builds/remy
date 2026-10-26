@@ -22,7 +22,7 @@ import {
   permissionText,
   type Sink,
 } from "../messenger";
-import { Slack, type SlackMessage, socketMode } from "./client";
+import { fromUser, Slack, type SlackMessage, socketMode } from "./client";
 import { formatTranscript, requestText, type SlackTask, taskEvent, taskId } from "./task";
 import { ChannelWatcher, type Trigger, type WatchState } from "./watch";
 
@@ -157,7 +157,7 @@ export class SlackBridge implements Messenger {
   }
 
   private async handleInbound(m: SlackMessage, threadRoot?: string, channel?: string) {
-    if (m.user !== this.settings.userId || m.bot_id) return; // gate on sender, never on the channel
+    if (!fromUser(m, this.settings.userId, this.settings.trustedApps)) return; // gate on sender, never on the channel
     if (m.subtype && m.subtype !== "thread_broadcast") return;
     this.lastInboundAt = Date.now();
     const v = parseVerdict(m.text);
@@ -268,6 +268,7 @@ export class SlackBridge implements Messenger {
     this.state.watch ??= { channels: {}, handled: {} };
     this.watcher = new ChannelWatcher(this.slack, {
       me: this.settings.userId,
+      trustedApps: this.settings.trustedApps,
       bot: this.botUserId,
       emoji: this.triggerEmoji,
       state: this.state.watch,

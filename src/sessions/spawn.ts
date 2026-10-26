@@ -37,6 +37,14 @@ function slug(s: string) {
  * `prompt`: the agent's whole prompt, sent as is instead of `task` through `spawnTemplate`; `task` then only describes it.
  * `role` and `pr`: an agent the factory starts for a pipeline step, and the PR it is for.
  */
+/**
+ * A `claude --bg` session is started by Claude Code's own background process, not by this one, so it doesn't inherit
+ * this environment. A Remy running on another REMY_DIR hands it on through the session's settings, or the agent's
+ * hooks would report to the default ~/.remy.
+ */
+export const remyDirArgs = (env: Record<string, string | undefined> = process.env) =>
+  env.REMY_DIR ? ["--settings", JSON.stringify({ env: { REMY_DIR: env.REMY_DIR } })] : [];
+
 export async function spawnAgent(opts: {
   repo: string;
   task: string;
@@ -64,7 +72,7 @@ export async function spawnAgent(opts: {
   const worktree = opts.worktree ?? config.spawnWorktree;
   const cmd = ["claude", "--bg", "-n", name, "--permission-mode", opts.permissionMode ?? config.spawnPermissionMode];
   if (worktree) cmd.push("-w", label);
-  cmd.push(prompt);
+  cmd.push(...remyDirArgs(), prompt);
 
   // Drop the variables that tie a process to the session running this command (the coordinator),
   // or the new agent would inherit its session id, inbox and REMY_ROLE.

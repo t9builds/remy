@@ -191,6 +191,7 @@ export function socketMode(
           thread_ts: ev.thread_ts,
           user: ev.user,
           bot_id: ev.bot_id,
+          app_id: ev.app_id,
           subtype: ev.subtype,
           text: ev.text ?? "",
         }).catch((e) => log("socket handler error", e?.message ?? e));
@@ -209,11 +210,17 @@ export function socketMode(
   };
 }
 
+/** Whether user `me` wrote `m`: posted as them, by hand or through an app they trust (`slack.trustedApps`). */
+export const fromUser = (m: SlackMessage, me: string, trustedApps: string[] = []) =>
+  m.user === me && (!m.bot_id || (!!m.app_id && trustedApps.includes(m.app_id)));
+
 export type SlackMessage = {
   ts: string;
   thread_ts?: string;
   user?: string;
   bot_id?: string;
+  /** The app that posted it, for a bot's post or an app's post as a user. */
+  app_id?: string;
   subtype?: string;
   text: string;
   reply_count?: number;

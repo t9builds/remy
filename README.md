@@ -294,6 +294,7 @@ Each workspace:
 | `slack.userId` | Your Slack member ID there; only this user can talk to your remy |
 | `slack.transport` | `poll` or `socket` |
 | `slack.channelRepos` | Default repo per channel for thread tasks, e.g. `{ "bugs": "api" }` |
+| `slack.trustedApps` | Slack app IDs whose posts as you count as yours; Remy ignores other apps' posts in your name. `verify-remy` drives Slack this way |
 | `telegram.userId` | Your Telegram user ID, set by pairing in `remy setup`; only this user can talk to your remy |
 | `both` | With Slack and Telegram: `mirror` (default), `pings` or `follow` |
 | `main` | The app that gets everything with `pings`, and the one `follow` starts with: `slack` (default) or `telegram` |

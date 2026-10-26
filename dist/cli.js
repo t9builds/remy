@@ -1836,6 +1836,7 @@ function socketMode(appToken, onMessage, log) {
           thread_ts: ev.thread_ts,
           user: ev.user,
           bot_id: ev.bot_id,
+          app_id: ev.app_id,
           subtype: ev.subtype,
           text: ev.text ?? ""
         }).catch((e) => log("socket handler error", e?.message ?? e));
@@ -1852,6 +1853,7 @@ function socketMode(appToken, onMessage, log) {
     stopped = true;
   };
 }
+var fromUser = (m, me, trustedApps = []) => m.user === me && (!m.bot_id || !!m.app_id && trustedApps.includes(m.app_id));
 
 class SlackError extends Error {
   method;
@@ -2056,7 +2058,7 @@ class ChannelWatcher {
     this.opts.state.reactionsBaseline = true;
   }
   async consider(ch, m, root) {
-    if (m.user !== this.opts.me || m.bot_id)
+    if (!fromUser(m, this.opts.me, this.opts.trustedApps))
       return;
     if (this.opts.isTracked(ch.id, root))
       return;
@@ -2179,7 +2181,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, {
     return open[0]?.session;
   }
   async handleInbound(m, threadRoot, channel) {
-    if (m.user !== this.settings.userId || m.bot_id)
+    if (!fromUser(m, this.settings.userId, this.settings.trustedApps))
       return;
     if (m.subtype && m.subtype !== "thread_broadcast")
       return;
@@ -2268,6 +2270,7 @@ Reply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, {
     this.state.watch ??= { channels: {}, handled: {} };
     this.watcher = new ChannelWatcher(this.slack, {
       me: this.settings.userId,
+      trustedApps: this.settings.trustedApps,
       bot: this.botUserId,
       emoji: this.triggerEmoji,
       state: this.state.watch,
@@ -3434,6 +3437,7 @@ var SESSION_ENV = new Set([
 function slug(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 }
+var remyDirArgs = (env = process.env) => env.REMY_DIR ? ["--settings", JSON.stringify({ env: { REMY_DIR: env.REMY_DIR } })] : [];
 async function spawnAgent(opts) {
   const config = loadConfig();
   const cwd = resolveRepo(opts.repo, config.repoRoots);
@@ -3451,7 +3455,7 @@ async function spawnAgent(opts) {
   const cmd = ["claude", "--bg", "-n", name, "--permission-mode", opts.permissionMode ?? config.spawnPermissionMode];
   if (worktree)
     cmd.push("-w", label);
-  cmd.push(prompt);
+  cmd.push(...remyDirArgs(), prompt);
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_ENV.has(k)));
   const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env });
   const out = (r.stdout.toString() + r.stderr.toString()).trim();
