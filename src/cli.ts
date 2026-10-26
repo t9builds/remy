@@ -60,7 +60,8 @@ try {
     console.log(HELP);
     process.exit(0);
   }
-  const run = COMMANDS[cmd];
+  // Own keys only: `remy constructor` must not find Object.prototype.constructor.
+  const run = Object.hasOwn(COMMANDS, cmd) ? COMMANDS[cmd] : undefined;
   if (!run) throw new Error(`unknown command "${cmd}"\n\n${HELP}`);
   await run(args);
 } catch (e: any) {

@@ -12,6 +12,7 @@ export type Spawned = Record<
     label?: string;
     task: string;
     startedAt: number;
+    /** The Slack thread the task came from, kept for the daemon to answer in; sessions/ only stores it. */
     slack?: { workspace: string; channel: string; threadTs: string; task: string };
     /** An agent the factory started for a pipeline step, and the PR it is for. */
     role?: string;
