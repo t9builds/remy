@@ -17,7 +17,7 @@ Create note lets a user save a titled note from the browser or CLI, cancel an un
 
 ## Driving it with control-notes
 
-A step marked `(writes)` changes data, or depends on a step that does, so it is skipped on production unless the factory prompt allows writes there. Its helper calls carry `--writes`.
+A step marked `(writes)` changes data, or depends on a step that does, so it is skipped on production unless the factory prompt allows writes there. The calls that write carry `--writes`.
 
 Preconditions:
 
