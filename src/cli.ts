@@ -4,26 +4,25 @@ import { openSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
-import { createMessenger, quietSink } from "./bridges";
-import { compactEnv, compactPct, configStamp, loadConfig, messengerLabel, messengersOf, PATHS, readJson, REMY_DIR, workspaceFor, writeJson, type Workspace } from "./config";
-import { runDaemon } from "./daemon";
-import { doctor } from "./doctor";
-import { formatRuns, loadFactory } from "./extensions/builtin/factory";
-import { trustedRepos } from "./extensions/load";
-import { lowerLevel } from "./factory/define";
-import { appendReport, headOf, repoRootOf } from "./factory/live";
-import type { Run } from "./factory/pipeline";
-import { runHook } from "./hook";
-import { formatMerged } from "./merged";
-import { askDaemon, VERSION, type DaemonStatus } from "./link";
-import { formatQueue, queueOf } from "./queue";
-import { blocking } from "./messenger";
-import { setup } from "./setup";
-import { findSession, formatSession, formatTable, snapshotDiff, takeSnapshot, type Spawned } from "./snapshot";
-import { resolveRepo, spawnAgent } from "./spawn";
-import { errorLine, formatChecks, formatHelp, pc, statusPaint } from "./ui";
+import { createMessenger, quietSink } from "./messengers/workspaces";
+import { compactEnv, compactPct, configStamp, loadConfig, messengerLabel, messengersOf, PATHS, PLUGIN_ROOT, readJson, REMY_DIR, workspaceFor, writeJson, type Workspace } from "./config/config";
+import { runDaemon } from "./daemon/daemon";
+import { doctor } from "./cli/doctor";
+import { formatRuns, loadFactory } from "./extensions/factory";
+import { trustedRepos } from "./extension-host/load";
+import { lowerLevel } from "./sdk/factory";
+import { appendReport, headOf, repoRootOf } from "./extensions/factory/live";
+import type { Run } from "./extensions/factory/pipeline";
+import { runHook } from "./sessions/events";
+import { formatMerged } from "./sessions/close";
+import { askDaemon, VERSION, type DaemonStatus } from "./link/link";
+import { formatQueue, queueOf } from "./sessions/waiting-list";
+import { blocking } from "./messengers/messenger";
+import { setup } from "./cli/setup";
+import { findSession, formatSession, formatTable, snapshotDiff, takeSnapshot, type Spawned } from "./sessions/snapshot";
+import { resolveRepo, spawnAgent } from "./sessions/spawn";
+import { errorLine, formatChecks, formatHelp, pc, statusPaint } from "./cli/ui";
 
-const ROOT = resolve(import.meta.dir, "..");
 
 const HELP = formatHelp("remy — a coordinator for your Claude Code sessions, in Slack or Telegram", [
   ["setup [workspace]", "Set up repo folders and workspaces (interactive)"],
@@ -78,7 +77,7 @@ async function start(extra: string[]) {
   }
   await ensureDaemon(c.repoRoots[0] ?? homedir());
   writeJson(PATHS.mcpConfig, {
-    mcpServers: { remy: { command: process.execPath, args: [join(ROOT, "dist", "channel.js")] } },
+    mcpServers: { remy: { command: process.execPath, args: [join(PLUGIN_ROOT, "dist", "channel.js")] } },
   });
   const cwd = c.repoRoots[0] ?? homedir();
   const args = [
@@ -87,7 +86,7 @@ async function start(extra: string[]) {
     "--permission-mode", "auto",
     "--mcp-config", PATHS.mcpConfig,
     "--dangerously-load-development-channels", "server:remy",
-    "--append-system-prompt-file", join(ROOT, "coordinator.md"),
+    "--append-system-prompt-file", join(PLUGIN_ROOT, "coordinator.md"),
     ...extra,
     "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention.",
   ];
@@ -130,7 +129,7 @@ async function ensureDaemon(cwd: string) {
   const out = openSync(PATHS.log, "a");
   // Not a service, whatever this terminal inherited: a restart has to start it again from here.
   const env = { ...process.env, REMY_DAEMON_SERVICE: "0" };
-  spawn(process.execPath, [join(ROOT, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
+  spawn(process.execPath, [join(PLUGIN_ROOT, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
   if (!(await daemonWithin(15_000, (s) => s.pid !== running?.pid))) throw new Error(`the remy daemon didn't start; see ${PATHS.log}`);
   console.log(pc.dim(`Started the remy daemon; it keeps running after the coordinator exits (log: ${PATHS.log}).`));
 }

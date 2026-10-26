@@ -11,8 +11,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { PATHS } from "./config";
-import { coordinatorTools, LinkClient, VERSION } from "./link";
+import { PATHS } from "./config/config";
+import { coordinatorTools, LinkClient, VERSION } from "./link/link";
 
 const log = (...a: unknown[]) => {
   try {

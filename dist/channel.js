@@ -15332,10 +15332,16 @@ class StdioServerTransport {
     });
   }
 }
-// src/config.ts
+// src/config/config.ts
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from "fs";
 import { homedir } from "os";
-import { join, resolve, sep } from "path";
+import { dirname, join, resolve, sep } from "path";
+var PLUGIN_ROOT = (() => {
+  for (let dir = import.meta.dir;dir !== dirname(dir); dir = dirname(dir))
+    if (existsSync(join(dir, ".claude-plugin", "plugin.json")))
+      return dir;
+  return resolve(import.meta.dir, "..");
+})();
 var REMY_DIR = process.env.REMY_DIR ?? join(homedir(), ".remy");
 var PATHS = {
   config: join(REMY_DIR, "config.json"),
@@ -15490,7 +15496,7 @@ function storeToken(workspace, kind, token) {
 `, { mode: 384 });
 }
 
-// src/link.ts
+// src/link/link.ts
 import { chmodSync, existsSync as existsSync2, unlinkSync } from "fs";
 import { createConnection, createServer } from "net";
 // .claude-plugin/plugin.json
@@ -15505,7 +15511,7 @@ var plugin_default = {
   keywords: ["coordinator", "slack", "telegram", "sessions", "agents"]
 };
 
-// src/link.ts
+// src/link/link.ts
 var VERSION = plugin_default.version;
 var RESTART_EXIT = 75;
 var HOLD_MAX = 500;
