@@ -2,9 +2,10 @@
  * A task started from a Slack thread (a mention of the bot or the trigger emoji). The channel server writes it to
  * ~/.remy/tasks/<id>/task.json; `remy spawn --slack-task <id>` turns it into the agent's prompt.
  */
-import type { SlackAttachment, SlackBlock, SlackMessage } from "./client";
-import { PATHS } from "../../shared/paths";
+
 import { readJson } from "../../shared/json-file";
+import { PATHS } from "../../shared/paths";
+import type { SlackAttachment, SlackBlock, SlackMessage } from "./client";
 
 export type SlackTask = {
   id: string;
@@ -51,7 +52,10 @@ export function cleanText(text: string, names: Map<string, string>) {
 
 /** Strip mentions of the bot from the requester's message. */
 export function requestText(text: string, botUserId: string) {
-  return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "").replace(/\s+/g, " ").trim();
+  return text
+    .replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function clock(ts: string) {
@@ -108,8 +112,8 @@ export function formatTranscript(
 ) {
   return messages
     .map((m) => {
-      const app = m.bot_id ? m.bot_profile?.name ?? m.username : undefined;
-      const who = app ?? (m.user ? names.get(m.user) ?? m.user : m.bot_id ? "bot" : "unknown");
+      const app = m.bot_id ? (m.bot_profile?.name ?? m.username) : undefined;
+      const who = app ?? (m.user ? (names.get(m.user) ?? m.user) : m.bot_id ? "bot" : "unknown");
       const body = cleanText(messageText(m), names).split("\n").join("\n    ");
       const lines = [`[${clock(m.ts)}] ${who}: ${body}`];
       for (const f of opts.files?.get(m.ts) ?? []) lines.push(`    (attachment: ${f})`);

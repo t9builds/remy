@@ -25,7 +25,8 @@ export function formatChecks(rows: CheckRow[]) {
 /** Colors for `formatTable` (sessions/format.ts). */
 export const statusPaint = {
   name: (s: string) => pc.bold(s),
-  status: (status: string, s: string) => (status === "waiting" ? pc.yellow(s) : status === "busy" ? pc.cyan(s) : pc.dim(s)),
+  status: (status: string, s: string) =>
+    status === "waiting" ? pc.yellow(s) : status === "busy" ? pc.cyan(s) : pc.dim(s),
   ci: (ci: Ci, s: string) => (ci === "fail" ? pc.red(s) : ci === "pass" ? pc.green(s) : s),
   dim: (s: string) => pc.dim(s),
 };

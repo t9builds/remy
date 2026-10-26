@@ -12,7 +12,10 @@ try {
   if (!built.success) throw new AggregateError(built.logs, "build failed");
   const names = (dir: string) => readdirSync(dir).sort();
   const stale = [...new Set([...names(out), ...names("dist")])].filter(
-    (f) => !names("dist").includes(f) || !names(out).includes(f) || !readFileSync(join(out, f)).equals(readFileSync(join("dist", f))),
+    (f) =>
+      !names("dist").includes(f) ||
+      !names(out).includes(f) ||
+      !readFileSync(join(out, f)).equals(readFileSync(join("dist", f))),
   );
   if (stale.length) {
     console.error(`dist/ is out of date (${stale.join(", ")}); run \`bun run build\` and commit dist/.`);

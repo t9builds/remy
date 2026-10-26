@@ -3,13 +3,13 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS } from "../../config/config";
+import { ExtensionHost } from "../../extension-host/host";
+import type { Config } from "../../sdk/config";
 import type { SessionRef } from "../../sdk/extension";
 import { createFactory, isReady } from ".";
-import { ExtensionHost } from "../../extension-host/host";
-import type { Run } from "./pipeline";
-import type { Config } from "../../sdk/config";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
+import type { Run } from "./pipeline";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "remy-factory-")));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -31,12 +31,35 @@ test("a repo's factory.ts imports its helpers from remy/factory", async () => {
   const l = await loadFactory(repo("good", GOOD));
   expect(l.error).toBeUndefined();
   expect(l.factory?.steps.map((s) => `${s.kind} ${s.name}`)).toEqual(["agent review", "gate merge"]);
-  const bad = await loadFactory(repo("bad", `import { defineFactory } from "remy/factory";\nexport default defineFactory({ steps: [] });\n`));
+  const bad = await loadFactory(
+    repo("bad", `import { defineFactory } from "remy/factory";\nexport default defineFactory({ steps: [] });\n`),
+  );
   expect(bad.error).toBe("it has no steps");
 });
 
-const pr = { number: 7, url: "https://github.com/acme-corp/api/pull/7", title: "Fix login", state: "OPEN", draft: false, review: "", ci: "pass" as const, failing: [], head: "aaa" };
-const ref = (over: Partial<SessionRef> = {}): SessionRef => ({ name: "basil", sessionId: "s1", cwd: "/r", spawned: true, status: "idle", workspace: "work", repo: "acme-corp/api", branch: "fix", pr, ...over });
+const pr = {
+  number: 7,
+  url: "https://github.com/acme-corp/api/pull/7",
+  title: "Fix login",
+  state: "OPEN",
+  draft: false,
+  review: "",
+  ci: "pass" as const,
+  failing: [],
+  head: "aaa",
+};
+const ref = (over: Partial<SessionRef> = {}): SessionRef => ({
+  name: "basil",
+  sessionId: "s1",
+  cwd: "/r",
+  spawned: true,
+  status: "idle",
+  workspace: "work",
+  repo: "acme-corp/api",
+  branch: "fix",
+  pr,
+  ...over,
+});
 
 test("which PRs the factory takes on", () => {
   expect(isReady(ref())).toBeTrue();
@@ -71,7 +94,15 @@ test("a ready PR in a listed repo starts a run; an unlisted repo's or a notify-l
   const listed = repo("api", GOOD);
   const other = repo("web", GOOD);
   const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "deploy-prod", extensions: { repos: ["api"] } };
-  const sessions = [ref({ cwd: listed }), ref({ name: "sage", sessionId: "s2", cwd: other, pr: { ...pr, number: 8, url: "https://github.com/acme-corp/web/pull/8" } })];
+  const sessions = [
+    ref({ cwd: listed }),
+    ref({
+      name: "sage",
+      sessionId: "s2",
+      cwd: other,
+      pr: { ...pr, number: 8, url: "https://github.com/acme-corp/web/pull/8" },
+    }),
+  ];
   const { h } = await hostWith(config, sessions);
   await h.emit("tick", { at: 1 });
   const entries = h.waitingEntries();
@@ -83,7 +114,18 @@ test("a ready PR in a listed repo starts a run; an unlisted repo's or a notify-l
 });
 
 test("formatRuns", () => {
-  const run = { pr: pr.url, number: 7, repo: "acme-corp/api", stage: "held", since: 1, step: 0, round: 2, reason: "gate merge: touches protected db/x.sql" } as Run;
-  expect(formatRuns([run])).toBe(`#7 acme-corp/api · waits for you · gate merge: touches protected db/x.sql · ${pr.url}`);
+  const run = {
+    pr: pr.url,
+    number: 7,
+    repo: "acme-corp/api",
+    stage: "held",
+    since: 1,
+    step: 0,
+    round: 2,
+    reason: "gate merge: touches protected db/x.sql",
+  } as Run;
+  expect(formatRuns([run])).toBe(
+    `#7 acme-corp/api · waits for you · gate merge: touches protected db/x.sql · ${pr.url}`,
+  );
   expect(formatRuns([])).toBe("No PRs in the factory.");
 });

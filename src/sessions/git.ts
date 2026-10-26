@@ -36,7 +36,14 @@ export async function gitInfo(cwd: string) {
 
 export async function prInfo(cwd: string, branch: string): Promise<Pr | undefined> {
   const out = await run(
-    ["gh", "pr", "view", branch, "--json", "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid"],
+    [
+      "gh",
+      "pr",
+      "view",
+      branch,
+      "--json",
+      "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid",
+    ],
     cwd,
   );
   if (!out) return undefined;

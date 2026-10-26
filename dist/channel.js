@@ -15332,87 +15332,6 @@ class StdioServerTransport {
     });
   }
 }
-// src/shared/paths.ts
-import { existsSync } from "fs";
-import { homedir } from "os";
-import { dirname, join, resolve } from "path";
-var PLUGIN_ROOT = (() => {
-  for (let dir = import.meta.dir;dir !== dirname(dir); dir = dirname(dir))
-    if (existsSync(join(dir, ".claude-plugin", "plugin.json")))
-      return dir;
-  return resolve(import.meta.dir, "..");
-})();
-var REMY_DIR = process.env.REMY_DIR ?? join(homedir(), ".remy");
-var PATHS = {
-  config: join(REMY_DIR, "config.json"),
-  events: join(REMY_DIR, "events.jsonl"),
-  snapshot: join(REMY_DIR, "snapshot.json"),
-  waitingList: join(REMY_DIR, "queue.json"),
-  spawned: join(REMY_DIR, "spawned.json"),
-  nicknames: join(REMY_DIR, "nicknames.json"),
-  mcpConfig: join(REMY_DIR, "mcp.json"),
-  log: join(REMY_DIR, "daemon.log"),
-  socket: join(REMY_DIR, "daemon.sock"),
-  held: join(REMY_DIR, "held.json"),
-  reports: join(REMY_DIR, "reports.jsonl"),
-  factory: join(REMY_DIR, "state", "builtin_factory.json"),
-  taskDir: (id) => join(REMY_DIR, "tasks", id),
-  slackState: (workspace) => join(REMY_DIR, `slack-state.${workspace}.json`),
-  telegramState: (workspace) => join(REMY_DIR, `telegram-state.${workspace}.json`),
-  tokenFile: (workspace, kind) => join(REMY_DIR, `${kind}-token.${workspace}`)
-};
-// .claude-plugin/plugin.json
-var plugin_default = {
-  name: "remy",
-  displayName: "Remy",
-  version: "0.13.0",
-  description: "A coordinator session that tracks all your Claude Code sessions and their PRs and talks to you through Slack or Telegram.",
-  author: { name: "Tomas Svatek" },
-  repository: "https://github.com/t9builds/remy",
-  license: "MIT",
-  keywords: ["coordinator", "slack", "telegram", "sessions", "agents"]
-};
-
-// src/shared/version.ts
-var VERSION = plugin_default.version;
-
-// src/link/coordinator-tools.ts
-function coordinatorTools(working) {
-  return [
-    {
-      name: "post",
-      description: "Send the user a message in a workspace: their Slack DM with the bot (or a Slack channel thread), or their Telegram chat. Returns the message id.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
-          workspace: { type: "string", description: `Workspace from the event tag. Working: ${working || "none"}` },
-          thread: { type: "string", description: "Answer in this thread: thread or id from the event tag, or an id post returned" },
-          session: {
-            type: "string",
-            description: "Agent session this message is about; the user's replies come back tagged with it. For an agent started from a Slack channel thread, leave thread out: the message goes to that thread."
-          },
-          expect_reply: { type: "boolean", description: "A question: watch for the user's answer" }
-        },
-        required: ["text"]
-      }
-    },
-    {
-      name: "update",
-      description: "Edit a message the bot posted earlier.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "The id post returned" },
-          text: { type: "string" },
-          workspace: { type: "string" }
-        },
-        required: ["id", "text"]
-      }
-    }
-  ];
-}
-
 // src/link/client.ts
 import { createConnection } from "net";
 
@@ -15564,6 +15483,90 @@ function askDaemon(path, request, args, timeoutMs = 5000) {
   });
 }
 
+// src/link/coordinator-tools.ts
+function coordinatorTools(working) {
+  return [
+    {
+      name: "post",
+      description: "Send the user a message in a workspace: their Slack DM with the bot (or a Slack channel thread), or their Telegram chat. Returns the message id.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "Slack mrkdwn text, in every workspace" },
+          workspace: { type: "string", description: `Workspace from the event tag. Working: ${working || "none"}` },
+          thread: {
+            type: "string",
+            description: "Answer in this thread: thread or id from the event tag, or an id post returned"
+          },
+          session: {
+            type: "string",
+            description: "Agent session this message is about; the user's replies come back tagged with it. For an agent started from a Slack channel thread, leave thread out: the message goes to that thread."
+          },
+          expect_reply: { type: "boolean", description: "A question: watch for the user's answer" }
+        },
+        required: ["text"]
+      }
+    },
+    {
+      name: "update",
+      description: "Edit a message the bot posted earlier.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The id post returned" },
+          text: { type: "string" },
+          workspace: { type: "string" }
+        },
+        required: ["id", "text"]
+      }
+    }
+  ];
+}
+
+// src/shared/paths.ts
+import { existsSync } from "fs";
+import { homedir } from "os";
+import { dirname, join, resolve } from "path";
+var PLUGIN_ROOT = (() => {
+  for (let dir = import.meta.dir;dir !== dirname(dir); dir = dirname(dir))
+    if (existsSync(join(dir, ".claude-plugin", "plugin.json")))
+      return dir;
+  return resolve(import.meta.dir, "..");
+})();
+var REMY_DIR = process.env.REMY_DIR ?? join(homedir(), ".remy");
+var PATHS = {
+  config: join(REMY_DIR, "config.json"),
+  events: join(REMY_DIR, "events.jsonl"),
+  snapshot: join(REMY_DIR, "snapshot.json"),
+  waitingList: join(REMY_DIR, "queue.json"),
+  spawned: join(REMY_DIR, "spawned.json"),
+  nicknames: join(REMY_DIR, "nicknames.json"),
+  mcpConfig: join(REMY_DIR, "mcp.json"),
+  log: join(REMY_DIR, "daemon.log"),
+  socket: join(REMY_DIR, "daemon.sock"),
+  held: join(REMY_DIR, "held.json"),
+  reports: join(REMY_DIR, "reports.jsonl"),
+  factory: join(REMY_DIR, "state", "builtin_factory.json"),
+  taskDir: (id) => join(REMY_DIR, "tasks", id),
+  slackState: (workspace) => join(REMY_DIR, `slack-state.${workspace}.json`),
+  telegramState: (workspace) => join(REMY_DIR, `telegram-state.${workspace}.json`),
+  tokenFile: (workspace, kind) => join(REMY_DIR, `${kind}-token.${workspace}`)
+};
+// .claude-plugin/plugin.json
+var plugin_default = {
+  name: "remy",
+  displayName: "Remy",
+  version: "0.13.0",
+  description: "A coordinator session that tracks all your Claude Code sessions and their PRs and talks to you through Slack or Telegram.",
+  author: { name: "Tomas Svatek" },
+  repository: "https://github.com/t9builds/remy",
+  license: "MIT",
+  keywords: ["coordinator", "slack", "telegram", "sessions", "agents"]
+};
+
+// src/shared/version.ts
+var VERSION = plugin_default.version;
+
 // src/channel.ts
 var log = (...a) => {
   try {
@@ -15632,7 +15635,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 var PermissionRequestNotification = object2({
   method: literal("notifications/claude/channel/permission_request"),
-  params: object2({ request_id: string2(), tool_name: string2(), description: string2(), input_preview: string2() })
+  params: object2({
+    request_id: string2(),
+    tool_name: string2(),
+    description: string2(),
+    input_preview: string2()
+  })
 });
 mcp.setNotificationHandler(PermissionRequestNotification, async ({ params }) => {
   if (!link.permissionRequest(params))

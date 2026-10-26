@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import type { BothMode, MessengerKind } from "../sdk/config";
 import { decodeId, encodeId, Fanout } from "./fanout";
 import type { Messenger, PostOptions, Sink } from "./messenger";
-import type { BothMode, MessengerKind } from "../sdk/config";
 
 /** A messenger that records what it was asked to do and can play the user writing to it. */
 function fakeApp(kind: MessengerKind) {
@@ -11,14 +11,22 @@ function fakeApp(kind: MessengerKind) {
   const answered: string[] = [];
   const perms: string[] = [];
   let sink: Sink;
-  const app: Messenger & { posts: typeof posts; updates: typeof updates; answeredSessions: string[]; perms: string[]; bind(s: Sink): void; userWrites(text: string, meta?: Record<string, string>): Promise<void> } = {
+  const app: Messenger & {
+    posts: typeof posts;
+    updates: typeof updates;
+    answeredSessions: string[];
+    perms: string[];
+    bind(s: Sink): void;
+    userWrites(text: string, meta?: Record<string, string>): Promise<void>;
+  } = {
     workspace: "work",
     posts,
     updates,
     answeredSessions: answered,
     perms,
     bind: (s) => void (sink = s),
-    userWrites: (text, meta = {}) => sink.push("user_message", text, { workspace: "work", id: `${kind}-u${++n}`, ...meta }),
+    userWrites: (text, meta = {}) =>
+      sink.push("user_message", text, { workspace: "work", id: `${kind}-u${++n}`, ...meta }),
     post: async (text, opts = {}) => {
       const id = `${kind}-${++n}`;
       posts.push({ text, opts, id });
@@ -34,7 +42,11 @@ function fakeApp(kind: MessengerKind) {
 
 function setup(mode: BothMode, main: MessengerKind = "slack") {
   const pushed: { kind: string; content: string; meta: Record<string, string> }[] = [];
-  const sink: Sink = { push: async (kind, content, meta = {}) => void pushed.push({ kind, content, meta }), permission: async () => {}, log: () => {} };
+  const sink: Sink = {
+    push: async (kind, content, meta = {}) => void pushed.push({ kind, content, meta }),
+    permission: async () => {},
+    log: () => {},
+  };
   const fan = new Fanout("work", mode, main);
   const slack = fakeApp("slack");
   const telegram = fakeApp("telegram");
@@ -70,7 +82,12 @@ test("mirror: what the user writes in one app is echoed in the other, and the qu
   expect(slack.answeredSessions).toEqual(["api-export"]);
   expect(telegram.posts).toEqual([]);
   // The coordinator sees where it came from, with ids it can pass back.
-  expect(pushed[0]!.meta).toMatchObject({ via: "telegram", id: "telegram:telegram-u1", thread: "telegram:77", session: "api-export" });
+  expect(pushed[0]!.meta).toMatchObject({
+    via: "telegram",
+    id: "telegram:telegram-u1",
+    thread: "telegram:77",
+    session: "api-export",
+  });
 });
 
 test("mirror: an answer to a message from Telegram replies there and reaches Slack in the session's thread", async () => {

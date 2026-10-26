@@ -4,13 +4,31 @@ import type { RemyEvent } from "../sessions/events";
 import type { SessionView, Snapshot } from "../sessions/snapshot";
 import { hookEvents, sessionRef, snapshotEvents } from "./observe";
 
-
-const pr = (over: Partial<Pr> = {}): Pr => ({ number: 7, url: "https://github.com/acme-corp/api/pull/7", title: "t", state: "OPEN", draft: true, review: "", ci: "pending", failing: [], ...over });
+const pr = (over: Partial<Pr> = {}): Pr => ({
+  number: 7,
+  url: "https://github.com/acme-corp/api/pull/7",
+  title: "t",
+  state: "OPEN",
+  draft: true,
+  review: "",
+  ci: "pending",
+  failing: [],
+  ...over,
+});
 const view = (over: Partial<SessionView> = {}): SessionView => ({
-  sessionId: "s1", name: "basil", kind: "background", status: "idle", cwd: "/r/api", startedAt: 1, spawned: true, repo: "acme-corp/api", ...over,
+  sessionId: "s1",
+  name: "basil",
+  kind: "background",
+  status: "idle",
+  cwd: "/r/api",
+  startedAt: 1,
+  spawned: true,
+  repo: "acme-corp/api",
+  ...over,
 });
 const snap = (...sessions: SessionView[]): Snapshot => ({ takenAt: 1, sessions });
-const names = (prev: Snapshot | undefined, next: Snapshot) => snapshotEvents(prev, next, () => "work").map((e) => e.name);
+const names = (prev: Snapshot | undefined, next: Snapshot) =>
+  snapshotEvents(prev, next, () => "work").map((e) => e.name);
 
 describe("events from snapshots", () => {
   test("nothing on the first look", () => {
@@ -23,14 +41,23 @@ describe("events from snapshots", () => {
   });
 
   test("a PR opens as a draft, leaves draft, passes CI and merges", () => {
-    const steps = [view(), view({ pr: pr() }), view({ pr: pr({ draft: false }) }), view({ pr: pr({ draft: false, ci: "pass" }) }), view({ pr: pr({ state: "MERGED", draft: false, ci: "pass" }) })];
+    const steps = [
+      view(),
+      view({ pr: pr() }),
+      view({ pr: pr({ draft: false }) }),
+      view({ pr: pr({ draft: false, ci: "pass" }) }),
+      view({ pr: pr({ state: "MERGED", draft: false, ci: "pass" }) }),
+    ];
     const seen = steps.slice(1).map((s, i) => names(snap(steps[i]!), snap(s)));
     expect(seen).toEqual([["pr.opened"], ["pr.ready"], ["pr.ci"], ["pr.merged"]]);
   });
 
   test("a PR first seen ready, or already merged", () => {
     expect(names(snap(view()), snap(view({ pr: pr({ draft: false }) })))).toEqual(["pr.opened", "pr.ready"]);
-    expect(names(snap(view()), snap(view({ pr: pr({ state: "MERGED", draft: false }) })))).toEqual(["pr.opened", "pr.merged"]);
+    expect(names(snap(view()), snap(view({ pr: pr({ state: "MERGED", draft: false }) })))).toEqual([
+      "pr.opened",
+      "pr.merged",
+    ]);
     // CI going back to pending isn't news.
     expect(names(snap(view({ pr: pr({ ci: "fail" }) })), snap(view({ pr: pr({ ci: "pending" }) })))).toEqual([]);
   });
@@ -42,6 +69,8 @@ describe("events from snapshots", () => {
     const asks = hookEvents(ev({ last: "Stream the CSV, or a background job?" }), ref);
     expect(asks.map((e) => e.name)).toEqual(["session.stopped", "session.asks"]);
     expect(asks[1]!.payload).toMatchObject({ question: "Stream the CSV, or a background job?", reason: "question" });
-    expect(hookEvents(ev({ event: "SessionEnd", type: "exit" }), ref)).toEqual([{ name: "session.ended", payload: { session: ref, reason: "exit" } }]);
+    expect(hookEvents(ev({ event: "SessionEnd", type: "exit" }), ref)).toEqual([
+      { name: "session.ended", payload: { session: ref, reason: "exit" } },
+    ]);
   });
 });

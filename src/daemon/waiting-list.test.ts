@@ -51,10 +51,33 @@ test("coalesce shares one run per delay, and a longer delay still runs after a s
 });
 
 const view = (name: string, over: Partial<SessionView> = {}): SessionView => ({
-  sessionId: `id-${name}`, name, kind: "background", status: "idle", cwd: `/r/${name}`, startedAt: 1, spawned: true, ...over,
+  sessionId: `id-${name}`,
+  name,
+  kind: "background",
+  status: "idle",
+  cwd: `/r/${name}`,
+  startedAt: 1,
+  spawned: true,
+  ...over,
 });
-const openPr: Pr = { number: 7, url: "https://github.com/o/r/pull/7", title: "t", state: "OPEN", draft: false, review: "", ci: "pass", failing: [] };
-const entry = (over: Partial<WaitingEntry> = {}): WaitingEntry => ({ key: "k", rank: 2, why: "release check: touches billing", action: "decide", label: "api#7", ...over });
+const openPr: Pr = {
+  number: 7,
+  url: "https://github.com/o/r/pull/7",
+  title: "t",
+  state: "OPEN",
+  draft: false,
+  review: "",
+  ci: "pass",
+  failing: [],
+};
+const entry = (over: Partial<WaitingEntry> = {}): WaitingEntry => ({
+  key: "k",
+  rank: 2,
+  why: "release check: touches billing",
+  action: "decide",
+  label: "api#7",
+  ...over,
+});
 const byCwd = (s: SessionView) => (s.cwd.startsWith("/r/home") ? "home" : "work");
 
 test("composeWaitingList lists only the workspace's own sessions", () => {
@@ -68,16 +91,23 @@ test("composeWaitingList: an extension's entry about a session replaces its line
   const text = composeWaitingList(ready, "work", [entry({ session: "basil" })], byCwd);
   expect(text).toContain("release check: touches billing");
   expect(text).not.toContain("PR ready for you");
-  const asking: Snapshot = { takenAt: 0, sessions: [view("basil", { pr: openPr, lastEvent: { event: "Stop", ts: 1, text: "Which table?" } })] };
+  const asking: Snapshot = {
+    takenAt: 0,
+    sessions: [view("basil", { pr: openPr, lastEvent: { event: "Stop", ts: 1, text: "Which table?" } })],
+  };
   expect(composeWaitingList(asking, "work", [entry({ session: "basil" })], byCwd)).toContain('asks: "Which table?"');
 });
 
 test("composeWaitingList: a hidden entry only keeps the session's own line off the list", () => {
   const snap: Snapshot = { takenAt: 0, sessions: [view("basil", { pr: openPr })] };
-  expect(composeWaitingList(snap, "work", [entry({ session: "basil", hide: true })], byCwd)).toContain("Nothing waits on you");
+  expect(composeWaitingList(snap, "work", [entry({ session: "basil", hide: true })], byCwd)).toContain(
+    "Nothing waits on you",
+  );
 });
 
 test("composeWaitingList: an entry for another workspace stays out", () => {
-  expect(composeWaitingList({ takenAt: 0, sessions: [] }, "work", [entry({ workspace: "home" })], byCwd)).toContain("Nothing waits on you");
+  expect(composeWaitingList({ takenAt: 0, sessions: [] }, "work", [entry({ workspace: "home" })], byCwd)).toContain(
+    "Nothing waits on you",
+  );
   expect(composeWaitingList({ takenAt: 0, sessions: [] }, "work", [entry()], byCwd)).toContain("api#7");
 });

@@ -1,6 +1,6 @@
-import { KITCHEN_NAMES } from "./kitchen-names";
-import { PATHS } from "../shared/paths";
 import { readJson, writeJson } from "../shared/json-file";
+import { PATHS } from "../shared/paths";
+import { KITCHEN_NAMES } from "./kitchen-names";
 import type { Spawned } from "./spawned";
 
 /** ~/.remy/nicknames.json: the name remy gave each session it named, and what the session is about. */

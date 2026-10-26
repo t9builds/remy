@@ -9,13 +9,22 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { readToken } from "../../config/config";
-import { AWAIT_ANSWER_MS, parseVerdict, permissionText, type Check, type Messenger, type PermissionRequest, type PostOptions, type Sink } from "../messenger";
-import { Slack, socketMode, type SlackMessage } from "./client";
-import { formatTranscript, requestText, taskEvent, taskId, type SlackTask } from "./task";
-import { ChannelWatcher, type Trigger, type WatchState } from "./watch";
-import { PATHS } from "../../shared/paths";
-import { readJson, writeJson } from "../../shared/json-file";
 import type { SlackSettings } from "../../sdk/config";
+import { readJson, writeJson } from "../../shared/json-file";
+import { PATHS } from "../../shared/paths";
+import {
+  AWAIT_ANSWER_MS,
+  type Check,
+  type Messenger,
+  type PermissionRequest,
+  type PostOptions,
+  parseVerdict,
+  permissionText,
+  type Sink,
+} from "../messenger";
+import { Slack, type SlackMessage, socketMode } from "./client";
+import { formatTranscript, requestText, type SlackTask, taskEvent, taskId } from "./task";
+import { ChannelWatcher, type Trigger, type WatchState } from "./watch";
 
 /** A thread Remy follows, keyed by its root ts. `channel` is set for channel threads; DM threads leave it out. */
 type ThreadInfo = {
@@ -72,7 +81,13 @@ export class SlackBridge implements Messenger {
   private threadOf(session: string) {
     let best: [string, number] | undefined;
     for (const [root, t] of Object.entries(this.state.threads))
-      if (t.session === session && !t.channel && Date.now() - t.postedAt < 24 * 3600_000 && (!best || t.postedAt > best[1])) best = [root, t.postedAt];
+      if (
+        t.session === session &&
+        !t.channel &&
+        Date.now() - t.postedAt < 24 * 3600_000 &&
+        (!best || t.postedAt > best[1])
+      )
+        best = [root, t.postedAt];
     return best?.[0];
   }
 
@@ -96,7 +111,8 @@ export class SlackBridge implements Messenger {
       };
       // DM threads matter for a day; a task's channel thread for as long as its agent might run.
       const now = Date.now();
-      for (const [k, t] of Object.entries(this.state.threads)) if (t.postedAt < now - (t.channel ? 7 : 1) * 24 * 3600_000) delete this.state.threads[k];
+      for (const [k, t] of Object.entries(this.state.threads))
+        if (t.postedAt < now - (t.channel ? 7 : 1) * 24 * 3600_000) delete this.state.threads[k];
       this.save();
     }
     if (opts.expect_reply) this.lastInboundAt = Date.now(); // poll fast while an answer is due
@@ -114,12 +130,17 @@ export class SlackBridge implements Messenger {
   }
 
   async askPermission(p: PermissionRequest) {
-    await this.post(`${permissionText(p)}\nReply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, { expect_reply: true });
+    await this.post(`${permissionText(p)}\nReply \`yes ${p.request_id}\` or \`no ${p.request_id}\``, {
+      expect_reply: true,
+    });
   }
 
   async start() {
     if (this.settings.transport === "socket" && !this.tokens.app)
-      await this.sink.push("system", `Slack in workspace "${this.workspace}" is set to Socket Mode but has no app-level token (xapp-…); reading it by polling instead.`);
+      await this.sink.push(
+        "system",
+        `Slack in workspace "${this.workspace}" is set to Socket Mode but has no app-level token (xapp-…); reading it by polling instead.`,
+      );
     if (this.tokens.app && this.settings.transport === "socket") this.startSocket(this.tokens.app);
     else this.startPolling();
     void this.startWatching();
@@ -128,7 +149,9 @@ export class SlackBridge implements Messenger {
   /** The agent whose question in the DM is still open, for a DM that isn't a reply in its thread. */
   private awaiting() {
     const open = Object.values(this.state.threads)
-      .filter((t) => t.session && !t.channel && t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS)
+      .filter(
+        (t) => t.session && !t.channel && t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS,
+      )
       .sort((a, b) => b.postedAt - a.postedAt);
     return open[0]?.session;
   }
@@ -142,7 +165,8 @@ export class SlackBridge implements Messenger {
     const root = threadRoot ?? (m.thread_ts && m.thread_ts !== m.ts ? m.thread_ts : undefined);
     // A command an extension registered is answered where it was sent, without the coordinator.
     const answer = m.text?.trim().startsWith("/") ? await this.sink.command?.(this.workspace, m.text) : undefined;
-    if (answer !== undefined) return void (answer && (await this.post(answer, { thread: root ? threadRef(channel, root) : undefined })));
+    if (answer !== undefined)
+      return void (answer && (await this.post(answer, { thread: root ? threadRef(channel, root) : undefined })));
     const info = root ? this.state.threads[root] : undefined;
     if (info?.session) {
       info.answered = true;
@@ -154,13 +178,17 @@ export class SlackBridge implements Messenger {
       id: threadRef(channel, m.ts),
       thread: root ? threadRef(channel, root) : "",
       session: info?.session ?? "",
-      awaiting: root ? "" : this.awaiting() ?? "",
+      awaiting: root ? "" : (this.awaiting() ?? ""),
     });
   }
 
   /** Socket Mode delivers thread replies as events too, so it needs no thread polling. */
   private startSocket(appToken: string) {
-    socketMode(appToken, (m) => this.handleInbound(m), (...a) => this.log(...a));
+    socketMode(
+      appToken,
+      (m) => this.handleInbound(m),
+      (...a) => this.log(...a),
+    );
   }
 
   private startPolling() {
@@ -210,7 +238,9 @@ export class SlackBridge implements Messenger {
   }
 
   private pollDelay() {
-    const recentThread = Object.values(this.state.threads).some((t) => t.expectReply && Date.now() - t.postedAt < 30 * 60_000);
+    const recentThread = Object.values(this.state.threads).some(
+      (t) => t.expectReply && Date.now() - t.postedAt < 30 * 60_000,
+    );
     return Date.now() - this.lastInboundAt < 10 * 60_000 || recentThread ? 4_000 : 15_000;
   }
 
@@ -229,7 +259,9 @@ export class SlackBridge implements Messenger {
       return;
     }
     this.botUserId = me.userId;
-    const missing = ["channels:read", "groups:read", "channels:history", "groups:history"].filter((s) => !me.scopes.includes(s));
+    const missing = ["channels:read", "groups:read", "channels:history", "groups:history"].filter(
+      (s) => !me.scopes.includes(s),
+    );
     if (missing.length === 4) return this.log("no channel scopes; channel tasks off");
     if (missing.length) this.log(`missing ${missing.join(", ")}; some channels may not be readable`);
 
@@ -254,7 +286,10 @@ export class SlackBridge implements Messenger {
       } catch (e: any) {
         this.log("watch error", e?.message ?? e);
         if (++failures === 5)
-          await this.sink.push("system", `Watching Slack channels in workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal.`);
+          await this.sink.push(
+            "system",
+            `Watching Slack channels in workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal.`,
+          );
         if (e?.retryAfter) await Bun.sleep(e.retryAfter * 1000);
       }
       this.save();
@@ -285,22 +320,24 @@ export class SlackBridge implements Messenger {
     const thread = messages.length ? messages : [t.message];
 
     const names = new Map<string, string>();
-    for (const m of thread) for (const uid of [m.user, ...(m.text?.match(/<@([A-Z0-9]+)/g) ?? []).map((x) => x.slice(2))]) {
-      if (uid && !names.has(uid)) names.set(uid, await this.slack.userName(uid));
-    }
+    for (const m of thread)
+      for (const uid of [m.user, ...(m.text?.match(/<@([A-Z0-9]+)/g) ?? []).map((x) => x.slice(2))]) {
+        if (uid && !names.has(uid)) names.set(uid, await this.slack.userName(uid));
+      }
 
     const files = new Map<string, string[]>();
     let saved = 0;
-    for (const m of thread) for (const f of m.files ?? []) {
-      if (!f.url_private_download || (f.size ?? 0) > 20_000_000 || saved >= 10) continue;
-      const path = join(dir, `${++saved}-${(f.name ?? "file").replace(/[^\w.-]+/g, "_")}`);
-      try {
-        await this.slack.download(f.url_private_download, path);
-        files.set(m.ts, [...(files.get(m.ts) ?? []), path]);
-      } catch (e: any) {
-        this.log("file download failed", e?.message ?? e);
+    for (const m of thread)
+      for (const f of m.files ?? []) {
+        if (!f.url_private_download || (f.size ?? 0) > 20_000_000 || saved >= 10) continue;
+        const path = join(dir, `${++saved}-${(f.name ?? "file").replace(/[^\w.-]+/g, "_")}`);
+        try {
+          await this.slack.download(f.url_private_download, path);
+          files.set(m.ts, [...(files.get(m.ts) ?? []), path]);
+        } catch (e: any) {
+          this.log("file download failed", e?.message ?? e);
+        }
       }
-    }
 
     const requester = await this.slack.userName(this.settings.userId);
     const task: SlackTask = {
@@ -317,7 +354,8 @@ export class SlackBridge implements Messenger {
       defaultRepo: this.settings.channelRepos?.[t.channelName],
       transcript: formatTranscript(thread, names, {
         triggerTs: t.message.ts,
-        triggerNote: t.kind === "mention" ? `${requester} asked you here` : `${requester} reacted :${this.triggerEmoji}: here`,
+        triggerNote:
+          t.kind === "mention" ? `${requester} asked you here` : `${requester} reacted :${this.triggerEmoji}: here`,
         files,
       }),
       truncated,
@@ -326,7 +364,13 @@ export class SlackBridge implements Messenger {
     };
     writeJson(join(dir, "task.json"), task);
     await this.slack.react(t.channel, t.message.ts, "eyes").catch(() => {});
-    this.state.threads[t.root] = { channel: t.channel, task: id, expectReply: false, postedAt: Date.now(), lastSeen: thread.at(-1)!.ts };
+    this.state.threads[t.root] = {
+      channel: t.channel,
+      task: id,
+      expectReply: false,
+      postedAt: Date.now(),
+      lastSeen: thread.at(-1)!.ts,
+    };
     this.save();
     await this.sink.push("task_request", taskEvent(task), {
       workspace: this.workspace,
@@ -338,7 +382,16 @@ export class SlackBridge implements Messenger {
 }
 
 const DM_SCOPES = ["chat:write", "im:history", "im:read", "im:write"];
-const CHANNEL_SCOPES = ["channels:read", "groups:read", "channels:history", "groups:history", "reactions:read", "reactions:write", "users:read", "files:read"];
+const CHANNEL_SCOPES = [
+  "channels:read",
+  "groups:read",
+  "channels:history",
+  "groups:history",
+  "reactions:read",
+  "reactions:write",
+  "users:read",
+  "files:read",
+];
 
 /** What `remy doctor` checks for a Slack workspace. */
 export async function slackChecks(workspace: string, settings: SlackSettings): Promise<Check[]> {
@@ -352,11 +405,21 @@ export async function slackChecks(workspace: string, settings: SlackSettings): P
     else {
       const lacks = (want: string[]) => want.filter((s) => !who.scopes.includes(s));
       const dm = lacks(DM_SCOPES);
-      out.push({ label: "Slack scopes for DMs", ok: !dm.length, hint: `add ${dm.join(", ")} as Bot Token Scopes, reinstall the app, then \`remy setup ${workspace}\`` });
+      out.push({
+        label: "Slack scopes for DMs",
+        ok: !dm.length,
+        hint: `add ${dm.join(", ")} as Bot Token Scopes, reinstall the app, then \`remy setup ${workspace}\``,
+      });
       const ch = lacks(CHANNEL_SCOPES);
-      out.push({ label: "Slack scopes for channel tasks", ok: !ch.length, hint: `tasks from channel threads need ${ch.join(", ")}`, optional: true });
+      out.push({
+        label: "Slack scopes for channel tasks",
+        ok: !ch.length,
+        hint: `tasks from channel threads need ${ch.join(", ")}`,
+        optional: true,
+      });
     }
   }
-  if (settings.transport === "socket") out.push({ label: "Slack app-level token (Socket Mode)", ok: !!readToken(workspace, "slack-app"), hint: fix });
+  if (settings.transport === "socket")
+    out.push({ label: "Slack app-level token (Socket Mode)", ok: !!readToken(workspace, "slack-app"), hint: fix });
   return out;
 }

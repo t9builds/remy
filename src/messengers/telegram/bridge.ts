@@ -4,11 +4,20 @@
  * about a session as a reply to its previous one, and a user reply to any of them is tagged with that session.
  */
 import { readToken } from "../../config/config";
-import { AWAIT_ANSWER_MS, parseVerdict, permissionText, type Check, type Messenger, type PermissionRequest, type PostOptions, type Sink } from "../messenger";
-import { Telegram, TelegramError, type TgMessage, type TgUpdate, type TgUser } from "./client";
-import { PATHS } from "../../shared/paths";
-import { readJson, writeJson } from "../../shared/json-file";
 import type { TelegramSettings } from "../../sdk/config";
+import { readJson, writeJson } from "../../shared/json-file";
+import { PATHS } from "../../shared/paths";
+import {
+  AWAIT_ANSWER_MS,
+  type Check,
+  type Messenger,
+  type PermissionRequest,
+  type PostOptions,
+  parseVerdict,
+  permissionText,
+  type Sink,
+} from "../messenger";
+import { Telegram, TelegramError, type TgMessage, type TgUpdate, type TgUser } from "./client";
 
 /** A new message about a session replies to the session's last one if that is younger than this. */
 const CHAIN_MS = 24 * 3600_000;
@@ -46,7 +55,8 @@ export class TelegramBridge implements Messenger {
   private latestFor(session: string) {
     let best: [string, number] | undefined;
     for (const [id, t] of Object.entries(this.state.threads))
-      if (t.mine && t.session === session && Date.now() - t.at < CHAIN_MS && (!best || t.at >= best[1])) best = [id, t.at];
+      if (t.mine && t.session === session && Date.now() - t.at < CHAIN_MS && (!best || t.at >= best[1]))
+        best = [id, t.at];
     return best?.[0];
   }
 
@@ -54,7 +64,8 @@ export class TelegramBridge implements Messenger {
   private awaiting() {
     let best: Mapped | undefined;
     for (const t of Object.values(this.state.threads))
-      if (t.mine && t.expectReply && !t.answered && Date.now() - t.at < AWAIT_ANSWER_MS && (!best || t.at >= best.at)) best = t;
+      if (t.mine && t.expectReply && !t.answered && Date.now() - t.at < AWAIT_ANSWER_MS && (!best || t.at >= best.at))
+        best = t;
     return best?.session;
   }
 
@@ -63,7 +74,8 @@ export class TelegramBridge implements Messenger {
     const session = opts.session ?? (replyTo ? this.state.threads[replyTo]?.session : undefined);
     const ids = await this.api.send(this.settings.userId, text, { replyTo: replyTo ? Number(replyTo) : undefined });
     if (session) {
-      for (const id of ids) this.state.threads[id] = { session, at: Date.now(), mine: true, expectReply: opts.expect_reply };
+      for (const id of ids)
+        this.state.threads[id] = { session, at: Date.now(), mine: true, expectReply: opts.expect_reply };
       this.save();
     }
     return String(ids[0]);
@@ -83,9 +95,18 @@ export class TelegramBridge implements Messenger {
   }
 
   async askPermission(p: PermissionRequest) {
-    await this.api.send(this.settings.userId, `${permissionText(p)}\nOr reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`, {
-      buttons: [[{ text: "Allow", data: `perm:allow:${p.request_id}` }, { text: "Deny", data: `perm:deny:${p.request_id}` }]],
-    });
+    await this.api.send(
+      this.settings.userId,
+      `${permissionText(p)}\nOr reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`.`,
+      {
+        buttons: [
+          [
+            { text: "Allow", data: `perm:allow:${p.request_id}` },
+            { text: "Deny", data: `perm:deny:${p.request_id}` },
+          ],
+        ],
+      },
+    );
   }
 
   async start() {
@@ -132,7 +153,10 @@ export class TelegramBridge implements Messenger {
       return Bun.sleep(CONFLICT_PAUSE_MS);
     }
     if (failures === 3)
-      await this.sink.push("system", `Reading Telegram for workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; \`remy doctor\` checks the bot token.`);
+      await this.sink.push(
+        "system",
+        `Reading Telegram for workspace "${this.workspace}" keeps failing: ${e?.message ?? e}. Tell the user in this terminal; \`remy doctor\` checks the bot token.`,
+      );
     await Bun.sleep(Math.max(e?.retryAfter ?? 0, Math.min(5 * failures, 60)) * 1000);
   }
 
@@ -142,7 +166,8 @@ export class TelegramBridge implements Messenger {
 
   private async onMessage(m: TgMessage) {
     // Anyone can find a bot and write to it: gate on the sender.
-    if (m.chat.type !== "private" || !this.isOwner(m.from)) return this.sink.log(`[${this.workspace}] ignored telegram message from ${m.from?.id}`);
+    if (m.chat.type !== "private" || !this.isOwner(m.from))
+      return this.sink.log(`[${this.workspace}] ignored telegram message from ${m.from?.id}`);
     const text = (m.text ?? m.caption ?? "").trim();
     if (!text) return void (await this.api.send(m.chat.id, "I can only read text for now.", { replyTo: m.message_id }));
     if (text === "/start") return;
@@ -162,7 +187,7 @@ export class TelegramBridge implements Messenger {
       id: String(m.message_id),
       thread: repliedTo ? String(m.message_id) : "",
       session: session ?? "",
-      awaiting: repliedTo ? "" : this.awaiting() ?? "",
+      awaiting: repliedTo ? "" : (this.awaiting() ?? ""),
     });
   }
 
@@ -172,7 +197,10 @@ export class TelegramBridge implements Messenger {
     await this.sink.permission(requestId, behavior);
     const done = behavior === "allow" ? "✅ Allowed" : "🚫 Denied";
     await this.api.answerCallback(q.id, done).catch(() => {});
-    if (q.message) await this.api.edit(q.message.chat.id, q.message.message_id, `${q.message.text ?? ""}\n\n${done}`).catch(() => {});
+    if (q.message)
+      await this.api
+        .edit(q.message.chat.id, q.message.message_id, `${q.message.text ?? ""}\n\n${done}`)
+        .catch(() => {});
   }
 }
 
@@ -187,8 +215,16 @@ export async function telegramChecks(workspace: string, settings: TelegramSettin
   const me = await tg.getMe().catch((e) => ({ error: String(e?.message ?? e) }));
   if ("error" in me) return [...out, { label: "Telegram bot token works", ok: false, hint: me.error }];
   const hook = await tg.webhook().catch(() => "");
-  out.push({ label: `Telegram bot @${me.username} is free for remy`, ok: !hook, hint: "it sends its messages to a webhook, so another program uses it; give remy a bot of its own" });
+  out.push({
+    label: `Telegram bot @${me.username} is free for remy`,
+    ok: !hook,
+    hint: "it sends its messages to a webhook, so another program uses it; give remy a bot of its own",
+  });
   const reach = await tg.canMessage(settings.userId);
-  out.push({ label: `@${me.username} can message you`, ok: reach === true, hint: `${reach}; open https://t.me/${me.username} and press Start` });
+  out.push({
+    label: `@${me.username} can message you`,
+    ok: reach === true,
+    hint: `${reach}; open https://t.me/${me.username} and press Start`,
+  });
   return out;
 }

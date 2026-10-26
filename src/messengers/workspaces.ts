@@ -3,12 +3,12 @@
  * both. Everything else talks to a `Messenger`.
  */
 import { messengerLabel, messengersOf, readToken } from "../config/config";
+import type { MessengerKind, Workspace } from "../sdk/config";
 import { Fanout } from "./fanout";
 import { blocking, type Check, type Messenger, type Sink } from "./messenger";
 import { SlackBridge, slackChecks } from "./slack/bridge";
-import { Telegram } from "./telegram/client";
 import { TelegramBridge, telegramChecks } from "./telegram/bridge";
-import type { MessengerKind, Workspace } from "../sdk/config";
+import { Telegram } from "./telegram/client";
 
 type Opts = { triggerEmoji: string };
 
@@ -33,7 +33,8 @@ function createMember(ws: Workspace, kind: MessengerKind, sink: Sink, opts: Opts
 
 /** The workspace's messenger, over the apps in `kinds` (default: all it has). */
 export function createMessenger(ws: Workspace, sink: Sink, opts: Opts, kinds = messengersOf(ws)): Messenger {
-  if (!kinds.length) throw new Error(`workspace "${ws.name}" has neither Slack nor Telegram; run \`remy setup ${ws.name}\``);
+  if (!kinds.length)
+    throw new Error(`workspace "${ws.name}" has neither Slack nor Telegram; run \`remy setup ${ws.name}\``);
   if (messengersOf(ws).length === 1) return createMember(ws, kinds[0]!, sink, opts);
   const fan = new Fanout(ws.name, ws.both ?? "mirror", ws.main ?? "slack", sink.log);
   for (const k of kinds) fan.add(k, createMember(ws, k, fan.sinkFor(k, sink), opts));
@@ -48,7 +49,10 @@ const checksFor = (ws: Workspace, kind: MessengerKind): Promise<Check[]> =>
 /** Every check of every app in the workspace, each tagged with its app. */
 export async function checkWorkspace(ws: Workspace): Promise<(Check & { messenger: MessengerKind })[]> {
   const kinds = messengersOf(ws);
-  if (!kinds.length) return [{ label: "Slack or Telegram connected", ok: false, hint: `run \`remy setup ${ws.name}\``, messenger: "slack" }];
+  if (!kinds.length)
+    return [
+      { label: "Slack or Telegram connected", ok: false, hint: `run \`remy setup ${ws.name}\``, messenger: "slack" },
+    ];
   const all = await Promise.all(kinds.map(async (k) => (await checksFor(ws, k)).map((c) => ({ ...c, messenger: k }))));
   return all.flat();
 }
@@ -69,7 +73,12 @@ export async function openWorkspaces(workspaces: Workspace[], sink: Sink, opts: 
       const working: MessengerKind[] = [];
       for (const k of messengersOf(ws)) {
         const problems = blocking(checks.filter((c) => c.messenger === k));
-        if (problems.length) off.push({ workspace: ws.name, messenger: k, reason: problems.map((p) => `${p.label}: ${p.hint}`).join("; ") });
+        if (problems.length)
+          off.push({
+            workspace: ws.name,
+            messenger: k,
+            reason: problems.map((p) => `${p.label}: ${p.hint}`).join("; "),
+          });
         else working.push(k);
       }
       if (!working.length) return;

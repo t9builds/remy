@@ -11,10 +11,10 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { LinkClient } from "./link/client";
+import { coordinatorTools } from "./link/coordinator-tools";
 import { PATHS } from "./shared/paths";
 import { VERSION } from "./shared/version";
-import { coordinatorTools } from "./link/coordinator-tools";
-import { LinkClient } from "./link/client";
 
 const log = (...a: unknown[]) => {
   try {
@@ -55,7 +55,8 @@ let replaced = false;
 
 const link = new LinkClient(PATHS.socket, {
   event: (e) => notify(e.kind, e.content, e.meta),
-  permission: (request_id, behavior) => mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id, behavior } }),
+  permission: (request_id, behavior) =>
+    mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id, behavior } }),
   state: (up) => {
     log(up ? "connected to the daemon" : "lost the daemon");
     clearTimeout(downTimer);
@@ -68,7 +69,10 @@ const link = new LinkClient(PATHS.socket, {
   replaced: () => {
     replaced = true;
     log("replaced by a newer coordinator");
-    void notify("system", "Another coordinator connected to the remy daemon, so this session no longer gets messages or can post. Tell the user in this terminal.");
+    void notify(
+      "system",
+      "Another coordinator connected to the remy daemon, so this session no longer gets messages or can post. Tell the user in this terminal.",
+    );
   },
   log,
 });
@@ -103,7 +107,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 // Permission relay: the daemon asks in the workspace the user last wrote from; "yes abcde" / "no abcde" answers.
 const PermissionRequestNotification = z.object({
   method: z.literal("notifications/claude/channel/permission_request"),
-  params: z.object({ request_id: z.string(), tool_name: z.string(), description: z.string(), input_preview: z.string() }),
+  params: z.object({
+    request_id: z.string(),
+    tool_name: z.string(),
+    description: z.string(),
+    input_preview: z.string(),
+  }),
 });
 mcp.setNotificationHandler(PermissionRequestNotification, async ({ params }) => {
   if (!link.permissionRequest(params)) log("permission request with no daemon", params.request_id);

@@ -25,7 +25,12 @@ const MARK = ["🔴", "🟠", "🟡", "🟢", "⚪"];
 const short = (s: string, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}…` : s).replace(/\s+/g, " ").trim();
 
 /** A line without the Markdown around it: heading, quote and list marks, and emphasis at either end. */
-const unwrap = (l: string) => l.trim().replace(/^(?:(?:[#>]+|[-+*](?=\s)|[*_]+)\s*)+/, "").replace(/[*_]+$/, "").trim();
+const unwrap = (l: string) =>
+  l
+    .trim()
+    .replace(/^(?:(?:[#>]+|[-+*](?=\s)|[*_]+)\s*)+/, "")
+    .replace(/[*_]+$/, "")
+    .trim();
 
 /** Whether a line asks something: it ends in a question mark that isn't part of a URL or of code. */
 const asks = (l: string) => /\?["'”)]*$/.test(l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, "").trim());
@@ -40,15 +45,19 @@ export function questionOf(last: string | undefined): string | undefined {
 function itemOf(s: SessionView): Omit<WaitingItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
-  if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt") return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
+  if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
+    return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
   if (s.status === "busy") return undefined;
   if (asked) return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
   if (s.status === "waiting") return { rank: 0, why: "waits for your answer", action: "reply to its thread" };
   // A factory agent reports through `remy report`, not its own PR state.
   if (s.role) return undefined;
-  if (pr?.ci === "fail") return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
-  if (pr?.review === "CHANGES_REQUESTED") return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
-  if (pr && pr.ci !== "pending") return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };
+  if (pr?.ci === "fail")
+    return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
+  if (pr?.review === "CHANGES_REQUESTED")
+    return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
+  if (pr && pr.ci !== "pending")
+    return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };
   if (s.spawned && !s.pr) return { rank: 4, why: "stopped without a PR", action: "check what it did" };
   return undefined;
 }
@@ -57,7 +66,16 @@ export function waitingListOf(snapshot: Snapshot): WaitingItem[] {
   const items: (WaitingItem & { since: number })[] = [];
   for (const s of snapshot.sessions) {
     const it = itemOf(s);
-    if (it) items.push({ ...it, session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, pr: s.pr?.url, since: s.lastEvent?.ts ?? s.startedAt });
+    if (it)
+      items.push({
+        ...it,
+        session: s.name,
+        sessionId: s.sessionId,
+        cwd: s.cwd,
+        repo: s.repo,
+        pr: s.pr?.url,
+        since: s.lastEvent?.ts ?? s.startedAt,
+      });
   }
   // Within a rank, whoever has waited longest first.
   return items.sort((a, b) => a.rank - b.rank || a.since - b.since).map(({ since, ...it }) => it);

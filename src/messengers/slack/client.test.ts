@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { socketMode, type SlackMessage } from "./client";
+import { type SlackMessage, socketMode } from "./client";
 
 const acks: string[] = [];
 const server = Bun.serve({
@@ -10,8 +10,20 @@ const server = Bun.serve({
   websocket: {
     open(ws) {
       ws.send(JSON.stringify({ type: "hello" }));
-      ws.send(JSON.stringify({ type: "events_api", envelope_id: "e1", payload: { event: { type: "message", channel_type: "im", user: "U1", text: "hi", ts: "1.1" } } }));
-      ws.send(JSON.stringify({ type: "events_api", envelope_id: "e2", payload: { event: { type: "message", channel_type: "channel", user: "U1", text: "not a DM", ts: "1.2" } } }));
+      ws.send(
+        JSON.stringify({
+          type: "events_api",
+          envelope_id: "e1",
+          payload: { event: { type: "message", channel_type: "im", user: "U1", text: "hi", ts: "1.1" } },
+        }),
+      );
+      ws.send(
+        JSON.stringify({
+          type: "events_api",
+          envelope_id: "e2",
+          payload: { event: { type: "message", channel_type: "channel", user: "U1", text: "not a DM", ts: "1.2" } },
+        }),
+      );
     },
     message(_ws, data) {
       acks.push(JSON.parse(String(data)).envelope_id);
@@ -27,7 +39,11 @@ afterAll(() => {
 
 test("socket mode acks every envelope and delivers only DMs", async () => {
   const got: SlackMessage[] = [];
-  const stop = socketMode("xapp-test", async (m) => void got.push(m), () => {});
+  const stop = socketMode(
+    "xapp-test",
+    async (m) => void got.push(m),
+    () => {},
+  );
   for (let i = 0; i < 50 && acks.length < 2; i++) await Bun.sleep(20);
   stop();
   expect(acks).toEqual(["e1", "e2"]);
@@ -36,9 +52,9 @@ test("socket mode acks every envelope and delivers only DMs", async () => {
 
 test("Web API calls go as a form, which every method accepts", async () => {
   const { Slack, formBody } = await import("./client");
-  expect(formBody({ channel: "C1", ts: "1.2", oldest: undefined, inclusive: false, limit: 50, meta: { a: 1 } }).toString()).toBe(
-    "channel=C1&ts=1.2&inclusive=false&limit=50&meta=%7B%22a%22%3A1%7D",
-  );
+  expect(
+    formBody({ channel: "C1", ts: "1.2", oldest: undefined, inclusive: false, limit: 50, meta: { a: 1 } }).toString(),
+  ).toBe("channel=C1&ts=1.2&inclusive=false&limit=50&meta=%7B%22a%22%3A1%7D");
   let sent: Request | undefined;
   const prev = globalThis.fetch;
   globalThis.fetch = (async (url: string, init: RequestInit) => {

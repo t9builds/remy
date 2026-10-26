@@ -21,19 +21,31 @@ describe("formatNotice", () => {
     expect(formatNotice([change("merged", "PR #212 merged; stopped; worktree kept (uncommitted changes)")])).toEndWith(
       "merged · worktree kept: it has uncommitted or unpushed work",
     );
-    expect(formatNotice([change("merged", "PR #212 merged; not removed (no such session)")])).toEndWith("merged · couldn't close the session (no such session)");
+    expect(formatNotice([change("merged", "PR #212 merged; not removed (no such session)")])).toEndWith(
+      "merged · couldn't close the session (no such session)",
+    );
   });
 
   test("a merge seen as a PR state change, and an ended session", () => {
     const text = formatNotice([
-      change("pr_state", "#7 open, CI pass → #7 merged, CI pass", { session: "pesto", repo: "acme-corp/docs", pr: "https://x/7" }),
+      change("pr_state", "#7 open, CI pass → #7 merged, CI pass", {
+        session: "pesto",
+        repo: "acme-corp/docs",
+        pr: "https://x/7",
+      }),
       change("ended", "session closed", { session: "basil", repo: undefined, pr: undefined }),
     ]);
     expect(text).toBe("✅ *pesto* · docs · <https://x/7|PR #7> merged\n⏹️ *basil* · ended · session closed");
   });
 
   test("nothing for changes the pinned list already shows", () => {
-    expect(formatNotice([change("ci", "CI fail: tests"), change("pr_opened", "#212 open, CI pending"), change("pr_state", "#212 draft → #212 open")])).toBeUndefined();
+    expect(
+      formatNotice([
+        change("ci", "CI fail: tests"),
+        change("pr_opened", "#212 open, CI pending"),
+        change("pr_state", "#212 draft → #212 open"),
+      ]),
+    ).toBeUndefined();
     expect(noticeWorthy(change("ended", "last PR #212 open, CI pass"))).toBeTrue();
   });
 });

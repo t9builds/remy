@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { cleanText, formatTranscript, requestText, taskPrompt, type SlackTask } from "./task";
+import { cleanText, formatTranscript, requestText, type SlackTask, taskPrompt } from "./task";
 
 const names = new Map([
   ["UALEX", "Alex"],
@@ -8,7 +8,9 @@ const names = new Map([
 ]);
 
 test("cleanText turns Slack markup into plain text", () => {
-  expect(cleanText("<@UALEX> see <https://x.dev/a|the log> in <#C1|bugs> &amp; <!here>", names)).toBe("@Alex see the log (https://x.dev/a) in #bugs & @here");
+  expect(cleanText("<@UALEX> see <https://x.dev/a|the log> in <#C1|bugs> &amp; <!here>", names)).toBe(
+    "@Alex see the log (https://x.dev/a) in #bugs & @here",
+  );
 });
 
 test("requestText drops the bot mention", () => {
@@ -22,7 +24,11 @@ test("transcript names people, lists attachments and marks the trigger", () => {
       { ts: "1700000060.000100", user: "UME", text: "<@UBOT> fix this" },
     ],
     names,
-    { triggerTs: "1700000060.000100", triggerNote: "Tomas asked you here", files: new Map([["1700000000.000100", ["/tmp/t/1-shot.png"]]]) },
+    {
+      triggerTs: "1700000060.000100",
+      triggerNote: "Tomas asked you here",
+      files: new Map([["1700000000.000100", ["/tmp/t/1-shot.png"]]]),
+    },
   );
   expect(out).toContain("Alex: login times out\n    since this morning\n    (attachment: /tmp/t/1-shot.png)");
   expect(out).toContain("Tomas: @bot fix this\n    ← Tomas asked you here");
@@ -73,25 +79,45 @@ test("transcript shows what apps post in cards and unfurls, under the app's name
         attachments: [
           {
             fallback: "ACME-12 has been accepted from triage",
-            blocks: [{ type: "section", text: { text: "<https://tracker.dev/issue/ACME-12|ACME-12 Turn off reminder pings> has been accepted from triage" } }],
+            blocks: [
+              {
+                type: "section",
+                text: {
+                  text: "<https://tracker.dev/issue/ACME-12|ACME-12 Turn off reminder pings> has been accepted from triage",
+                },
+              },
+            ],
           },
         ],
       },
-      { ts: "1700000120.000100", bot_id: "BHOOK", username: "Alerts", text: "", attachments: [{ fallback: "Build failed on main" }] },
+      {
+        ts: "1700000120.000100",
+        bot_id: "BHOOK",
+        username: "Alerts",
+        text: "",
+        attachments: [{ fallback: "Build failed on main" }],
+      },
       {
         ts: "1700000180.000100",
         user: "UAPP",
         bot_id: "BAPP",
         text: "",
-        blocks: [{ type: "header", text: { text: "Deploy" } }, { type: "context", elements: [{ text: "api" }, { text: "v2" }] }],
-        attachments: [{ title: "Run 7", title_link: "https://ci.dev/7", text: "passed", fields: [{ title: "Env", value: "dev" }] }],
+        blocks: [
+          { type: "header", text: { text: "Deploy" } },
+          { type: "context", elements: [{ text: "api" }, { text: "v2" }] },
+        ],
+        attachments: [
+          { title: "Run 7", title_link: "https://ci.dev/7", text: "passed", fields: [{ title: "Env", value: "dev" }] },
+        ],
       },
     ],
     names,
     { triggerTs: "x", triggerNote: "" },
   );
   expect(out).toContain("Tracker: Alex created ACME-12 (https://tracker.dev/issue/ACME-12) Turn off reminder pings\n[");
-  expect(out).toContain("Tracker: > ACME-12 Turn off reminder pings (https://tracker.dev/issue/ACME-12) has been accepted from triage");
+  expect(out).toContain(
+    "Tracker: > ACME-12 Turn off reminder pings (https://tracker.dev/issue/ACME-12) has been accepted from triage",
+  );
   expect(out).toContain("Alerts: > Build failed on main");
   expect(out).toContain("UAPP: Deploy\n    api v2\n    > Run 7 (https://ci.dev/7)\n    > passed\n    > Env: dev");
 });

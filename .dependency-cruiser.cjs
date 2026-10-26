@@ -14,14 +14,16 @@ module.exports = {
     {
       name: "sdk-stands-alone",
       severity: "error",
-      comment: "src/sdk/ is what extensions and factory.ts files import. It defines its own types and imports nothing else of Remy's.",
+      comment:
+        "src/sdk/ is what extensions and factory.ts files import. It defines its own types and imports nothing else of Remy's.",
       from: { path: "^src/sdk/" },
       to: { path: "^src/", pathNot: "^src/sdk/" },
     },
     {
       name: "shared-is-a-leaf",
       severity: "error",
-      comment: "src/shared/ is pure code that the core and the built-in extensions both use; it imports only shared/ and sdk/.",
+      comment:
+        "src/shared/ is pure code that the core and the built-in extensions both use; it imports only shared/ and sdk/.",
       from: { path: "^src/shared/" },
       to: { path: "^src/", pathNot: "^src/(shared|sdk)/" },
     },
@@ -36,7 +38,8 @@ module.exports = {
     {
       name: "extension-tests-use-the-host",
       severity: "error",
-      comment: "An extension's tests may run it in a real ExtensionHost with the default config, and nothing else of the core.",
+      comment:
+        "An extension's tests may run it in a real ExtensionHost with the default config, and nothing else of the core.",
       from: { path: "^src/extensions/.+\\.test\\.ts$" },
       to: { path: "^src/", pathNot: ["^src/(extensions|sdk|shared|extension-host)/", "^src/config/config\\.ts$"] },
     },
@@ -51,14 +54,16 @@ module.exports = {
     {
       name: "messengers-are-adapters",
       severity: "error",
-      comment: "Slack and Telegram stay behind the Messenger contract: messengers/ knows config, not sessions, the daemon or extensions.",
+      comment:
+        "Slack and Telegram stay behind the Messenger contract: messengers/ knows config, not sessions, the daemon or extensions.",
       from: { path: "^src/messengers/" },
       to: { path: "^src/", pathNot: "^src/(messengers|config|shared|sdk)/" },
     },
     {
       name: "sessions-are-the-domain",
       severity: "error",
-      comment: "sessions/ is what Remy knows about Claude Code sessions; it doesn't know which app the user talks through.",
+      comment:
+        "sessions/ is what Remy knows about Claude Code sessions; it doesn't know which app the user talks through.",
       from: { path: "^src/sessions/" },
       to: { path: "^src/", pathNot: "^src/(sessions|config|shared|sdk)/" },
     },
@@ -121,6 +126,9 @@ module.exports = {
     exclude: { path: "^(dist|node_modules)/" },
     tsPreCompilationDeps: true,
     tsConfig: { fileName: "tsconfig.json" },
-    enhancedResolveOptions: { exportsFields: ["exports"], conditionNames: ["import", "require", "node", "default", "types"] },
+    enhancedResolveOptions: {
+      exportsFields: ["exports"],
+      conditionNames: ["import", "require", "node", "default", "types"],
+    },
   },
 };

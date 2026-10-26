@@ -5,7 +5,10 @@ const escAttr = (s: string) => esc(s).replace(/"/g, "&quot;");
 const EDGE_BEFORE = "(^|[\\s(\\[])";
 const EDGE_AFTER = "(?=$|[\\s).,!?:;\\]])";
 const span = (mark: string, tag: string) =>
-  [new RegExp(`${EDGE_BEFORE}\\${mark}(?=\\S)([^${mark}\\n]*?\\S)\\${mark}${EDGE_AFTER}`, "gm"), `$1<${tag}>$2</${tag}>`] as const;
+  [
+    new RegExp(`${EDGE_BEFORE}\\${mark}(?=\\S)([^${mark}\\n]*?\\S)\\${mark}${EDGE_AFTER}`, "gm"),
+    `$1<${tag}>$2</${tag}>`,
+  ] as const;
 const SPANS = [span("*", "b"), span("_", "i"), span("~", "s")];
 
 /** Slack mrkdwn (plus the Markdown a model slips into: **bold**, [label](url)) to Telegram HTML. */

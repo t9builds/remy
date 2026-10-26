@@ -46,7 +46,10 @@ export async function factory(args: string[]) {
     const run = runs[want] ?? Object.values(runs).find((r) => `#${r.number}` === want || String(r.number) === want);
     if (!run) throw new Error(`usage: ${pc.cyan("remy factory retry <pr-url>")}; \`remy factory\` lists the PRs`);
     appendReport({ pr: run.pr, step: "", kind: "retry" });
-    say(disabledNote("nothing runs the step again until you turn it back on") ?? `#${run.number} runs its held step again within a minute or so.`);
+    say(
+      disabledNote("nothing runs the step again until you turn it back on") ??
+        `#${run.number} runs its held step again within a minute or so.`,
+    );
     return;
   }
   if (values.json) return console.log(JSON.stringify(runs, null, 2));
@@ -57,9 +60,20 @@ export async function report(args: string[]) {
   const { values, positionals } = parse(args, { pr: { type: "string" }, summary: { type: "string" } });
   const [step, verdict] = positionals;
   const usage = `usage: ${pc.cyan("remy report <step> pass|fail|fixed --pr <pr-url> --summary <one line>")}`;
-  if (!step || !["pass", "fail", "fixed"].includes(verdict ?? "") || !values.summary || !/^https:\/\/github\.com\/.+\/pull\/\d+$/.test(values.pr ?? ""))
+  if (
+    !step ||
+    !["pass", "fail", "fixed"].includes(verdict ?? "") ||
+    !values.summary ||
+    !/^https:\/\/github\.com\/.+\/pull\/\d+$/.test(values.pr ?? "")
+  )
     throw new Error(usage);
-  appendReport({ pr: values.pr!, step, verdict: verdict as "pass" | "fail" | "fixed", summary: values.summary, head: await headOf(values.pr!) });
+  appendReport({
+    pr: values.pr!,
+    step,
+    verdict: verdict as "pass" | "fail" | "fixed",
+    summary: values.summary,
+    head: await headOf(values.pr!),
+  });
   const note = disabledNote("nothing reads it until you turn it back on");
   say(note ? "Recorded." : "Recorded. Remy picks it up within a minute or so.", note);
 }

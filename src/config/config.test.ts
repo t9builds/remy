@@ -2,18 +2,27 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { compactEnv, compactPct, DEFAULTS, workspaceFor } from "./config";
 import type { Config } from "../sdk/config";
+import { compactEnv, compactPct, DEFAULTS, workspaceFor } from "./config";
 
 const config = (workspaces: Config["workspaces"]): Config => ({ ...DEFAULTS, workspaces });
-const work = { name: "work", slack: { userId: "U1", transport: "poll" as const }, repos: ["acme-corp/*"], paths: ["~/Repositories/work-notes"] };
+const work = {
+  name: "work",
+  slack: { userId: "U1", transport: "poll" as const },
+  repos: ["acme-corp/*"],
+  paths: ["~/Repositories/work-notes"],
+};
 const personal = { name: "personal", telegram: { userId: 2 } };
 const at = (p: string) => `${homedir()}/${p}`;
 
 test("routes by GitHub repo, so worktrees in sibling folders follow their repo", () => {
   const c = config([work, personal]);
-  expect(workspaceFor({ cwd: at("Repositories/api-server-fix-login"), repo: "acme-corp/api-server" }, c)?.name).toBe("work");
-  expect(workspaceFor({ cwd: at("Repositories/side-project"), repo: "someone/side-project" }, c)?.name).toBe("personal");
+  expect(workspaceFor({ cwd: at("Repositories/api-server-fix-login"), repo: "acme-corp/api-server" }, c)?.name).toBe(
+    "work",
+  );
+  expect(workspaceFor({ cwd: at("Repositories/side-project"), repo: "someone/side-project" }, c)?.name).toBe(
+    "personal",
+  );
   expect(workspaceFor({ cwd: at("Repositories/x"), repo: "ACME-CORP/x" }, c)?.name).toBe("work"); // case-insensitive
 });
 
@@ -42,9 +51,16 @@ test("configs from before 0.6 move their flat messenger fields under slack / tel
       ],
     }),
   );
-  const r = Bun.spawnSync(["bun", "-e", 'console.log(JSON.stringify(require("./src/config/config").loadConfig().workspaces))'], { env: { ...process.env, REMY_DIR: dir } });
+  const r = Bun.spawnSync(
+    ["bun", "-e", 'console.log(JSON.stringify(require("./src/config/config").loadConfig().workspaces))'],
+    { env: { ...process.env, REMY_DIR: dir } },
+  );
   expect(JSON.parse(r.stdout.toString())).toEqual([
-    { name: "work", repos: ["acme-corp/*"], slack: { userId: "U1", transport: "socket", channelRepos: { bugs: "api" } } },
+    {
+      name: "work",
+      repos: ["acme-corp/*"],
+      slack: { userId: "U1", transport: "socket", channelRepos: { bugs: "api" } },
+    },
     { name: "personal", telegram: { userId: 7 } },
   ]);
   rmSync(dir, { recursive: true, force: true });

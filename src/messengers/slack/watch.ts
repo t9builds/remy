@@ -18,7 +18,13 @@ export type WatchState = {
   reactionsBaseline?: boolean;
 };
 
-export type Trigger = { channel: string; channelName: string; message: SlackMessage; root: string; kind: "mention" | "reaction" };
+export type Trigger = {
+  channel: string;
+  channelName: string;
+  message: SlackMessage;
+  root: string;
+  kind: "mention" | "reaction";
+};
 
 type WatchSlack = Pick<Slack, "memberChannels" | "recent" | "replies" | "reactedBy">;
 
@@ -78,7 +84,10 @@ export class ChannelWatcher {
       }
     }
     const newest = msgs.at(-1)?.ts;
-    this.opts.state.channels[ch.id] = { since: newest && newest > cs.since ? newest : cs.since === "0" ? (Date.now() / 1000).toFixed(6) : cs.since, threads };
+    this.opts.state.channels[ch.id] = {
+      since: newest && newest > cs.since ? newest : cs.since === "0" ? (Date.now() / 1000).toFixed(6) : cs.since,
+      threads,
+    };
   }
 
   private async scanReactions() {

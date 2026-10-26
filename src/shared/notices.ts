@@ -7,7 +7,8 @@
 export type Change = { session: string; repo?: string; what: string; detail: string; pr?: string };
 
 /** Changes a notice reports: merges and ended sessions. The pinned list shows the rest. */
-export const noticeWorthy = (c: Change) => c.what === "merged" || c.what === "ended" || (c.what === "pr_state" && /→ #\d+ merged/.test(c.detail));
+export const noticeWorthy = (c: Change) =>
+  c.what === "merged" || c.what === "ended" || (c.what === "pr_state" && /→ #\d+ merged/.test(c.detail));
 
 const repoName = (repo?: string) => repo?.split("/").pop();
 const link = (url: string | undefined, label: string) => (url ? `<${url}|${label}>` : label);
@@ -16,7 +17,8 @@ const link = (url: string | undefined, label: string) => (url ? `<${url}|${label
 function cleanupNote(detail: string) {
   const cleanup = detail.replace(/^PR #\d+ merged;\s*/, "");
   if (cleanup.startsWith("stopped; worktree kept")) return " · worktree kept: it has uncommitted or unpushed work";
-  if (cleanup.startsWith("not removed")) return ` · couldn't close the session ${cleanup.replace(/^not removed\s*/, "")}`;
+  if (cleanup.startsWith("not removed"))
+    return ` · couldn't close the session ${cleanup.replace(/^not removed\s*/, "")}`;
   return "";
 }
 

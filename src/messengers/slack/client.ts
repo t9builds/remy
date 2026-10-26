@@ -25,7 +25,8 @@ export class Slack {
       return this.call(method, params, true);
     }
     const body = (await res.json()) as any;
-    if (!body.ok) throw new SlackError(method, body.error ?? `http ${res.status}`, Number(res.headers.get("retry-after") ?? 0));
+    if (!body.ok)
+      throw new SlackError(method, body.error ?? `http ${res.status}`, Number(res.headers.get("retry-after") ?? 0));
     return body as T;
   }
 
@@ -36,7 +37,13 @@ export class Slack {
   }
 
   async post(channel: string, text: string, threadTs?: string): Promise<string> {
-    const r = await this.call("chat.postMessage", { channel, text, thread_ts: threadTs, unfurl_links: false, unfurl_media: false });
+    const r = await this.call("chat.postMessage", {
+      channel,
+      text,
+      thread_ts: threadTs,
+      unfurl_links: false,
+      unfurl_media: false,
+    });
     return r.ts;
   }
 
@@ -73,7 +80,12 @@ export class Slack {
     const out: { id: string; name: string }[] = [];
     let cursor: string | undefined;
     do {
-      const r = await this.call("users.conversations", { types: "public_channel,private_channel", exclude_archived: true, limit: 200, cursor });
+      const r = await this.call("users.conversations", {
+        types: "public_channel,private_channel",
+        exclude_archived: true,
+        limit: 200,
+        cursor,
+      });
       out.push(...r.channels.map((c: any) => ({ id: c.id, name: c.name })));
       cursor = r.response_metadata?.next_cursor || undefined;
     } while (cursor);
@@ -83,7 +95,9 @@ export class Slack {
   /** Messages `user` reacted to recently, newest first. */
   async reactedBy(user: string, limit = 20): Promise<{ channel: string; message: SlackMessage }[]> {
     const r = await this.call("reactions.list", { user, limit, full: true });
-    return (r.items as any[]).filter((i) => i.type === "message" && i.message).map((i) => ({ channel: i.channel, message: i.message }));
+    return (r.items as any[])
+      .filter((i) => i.type === "message" && i.message)
+      .map((i) => ({ channel: i.channel, message: i.message }));
   }
 
   async react(channel: string, ts: string, name: string) {
@@ -116,10 +130,19 @@ export class Slack {
 
   /** The bot's own user ID and the scopes its token has. */
   async whoami(): Promise<{ userId: string; scopes: string[] }> {
-    const res = await fetch("https://slack.com/api/auth.test", { method: "POST", headers: { Authorization: `Bearer ${this.token}` } });
+    const res = await fetch("https://slack.com/api/auth.test", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
     const body = (await res.json()) as any;
     if (!body.ok) throw new SlackError("auth.test", body.error);
-    return { userId: body.user_id, scopes: (res.headers.get("x-oauth-scopes") ?? "").split(",").map((s) => s.trim()).filter(Boolean) };
+    return {
+      userId: body.user_id,
+      scopes: (res.headers.get("x-oauth-scopes") ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    };
   }
 }
 
@@ -127,7 +150,11 @@ export class Slack {
  * Socket Mode: Slack pushes events over a WebSocket opened with an app-level token (xapp-…, scope
  * connections:write). Every envelope is acked. Reconnects on close or on Slack's "disconnect" notice.
  */
-export function socketMode(appToken: string, onMessage: (m: SlackMessage) => Promise<void>, log: (...a: unknown[]) => void) {
+export function socketMode(
+  appToken: string,
+  onMessage: (m: SlackMessage) => Promise<void>,
+  log: (...a: unknown[]) => void,
+) {
   const api = new Slack(appToken);
   let backoff = 1_000;
   let stopped = false;
@@ -159,9 +186,14 @@ export function socketMode(appToken: string, onMessage: (m: SlackMessage) => Pro
       if (env.type === "disconnect") return ws.close();
       const ev = env.payload?.event;
       if (env.type === "events_api" && ev?.type === "message" && ev.channel_type === "im") {
-        await onMessage({ ts: ev.ts, thread_ts: ev.thread_ts, user: ev.user, bot_id: ev.bot_id, subtype: ev.subtype, text: ev.text ?? "" }).catch((e) =>
-          log("socket handler error", e?.message ?? e),
-        );
+        await onMessage({
+          ts: ev.ts,
+          thread_ts: ev.thread_ts,
+          user: ev.user,
+          bot_id: ev.bot_id,
+          subtype: ev.subtype,
+          text: ev.text ?? "",
+        }).catch((e) => log("socket handler error", e?.message ?? e));
       }
     };
     ws.onclose = () => {
@@ -196,7 +228,12 @@ export type SlackMessage = {
 };
 
 /** The parts of Block Kit blocks that carry text. */
-export type SlackBlock = { type: string; text?: { text?: string }; fields?: { text?: string }[]; elements?: { text?: string | { text?: string } }[] };
+export type SlackBlock = {
+  type: string;
+  text?: { text?: string };
+  fields?: { text?: string }[];
+  elements?: { text?: string | { text?: string } }[];
+};
 
 /** A legacy attachment or a link unfurl, as apps such as issue trackers post them. */
 export type SlackAttachment = {
@@ -211,7 +248,11 @@ export type SlackAttachment = {
 };
 
 export class SlackError extends Error {
-  constructor(public method: string, public code: string, public retryAfter = 0) {
+  constructor(
+    public method: string,
+    public code: string,
+    public retryAfter = 0,
+  ) {
     super(`slack ${method}: ${code}`);
   }
 }

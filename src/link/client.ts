@@ -64,8 +64,12 @@ export class LinkClient {
       if (!this.closed) setTimeout(() => this.connect(), this.retryMs);
     });
     readLines(s, (m: ToClient) => {
-      if (m.type === "event") return void Promise.resolve(this.handlers.event(m.event)).catch((e) => this.handlers.log("link: event failed", e?.message ?? e));
-      if (m.type === "permission") return void Promise.resolve(this.handlers.permission(m.request_id, m.behavior)).catch(() => {});
+      if (m.type === "event")
+        return void Promise.resolve(this.handlers.event(m.event)).catch((e) =>
+          this.handlers.log("link: event failed", e?.message ?? e),
+        );
+      if (m.type === "permission")
+        return void Promise.resolve(this.handlers.permission(m.request_id, m.behavior)).catch(() => {});
       if (m.type === "replaced") {
         this.closed = true;
         return this.handlers.replaced?.();

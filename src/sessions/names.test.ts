@@ -5,7 +5,9 @@ import { aboutOf, pickNickname, takenNames } from "./names";
 test("kitchen names are unique, plain words and none contains another", () => {
   expect(new Set(KITCHEN_NAMES).size).toBe(KITCHEN_NAMES.length);
   for (const n of KITCHEN_NAMES) expect(n).toMatch(/^[a-z]+$/);
-  const nested = KITCHEN_NAMES.flatMap((a) => KITCHEN_NAMES.filter((b) => a !== b && b.includes(a)).map((b) => `${a} in ${b}`));
+  const nested = KITCHEN_NAMES.flatMap((a) =>
+    KITCHEN_NAMES.filter((b) => a !== b && b.includes(a)).map((b) => `${a} in ${b}`),
+  );
   expect(nested).toEqual([]);
   expect(KITCHEN_NAMES).not.toContain("remy");
 });

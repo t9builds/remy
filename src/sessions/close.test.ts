@@ -2,9 +2,20 @@ import { expect, test } from "bun:test";
 import { closeAndRecord, closedAsMerged, formatMerged } from "./close";
 import type { Spawned } from "./spawned";
 
-const pr = { number: 7, url: "https://github.com/o/r/pull/7", title: "t", state: "MERGED", draft: false, review: "", ci: "pass" as const, failing: [] };
+const pr = {
+  number: 7,
+  url: "https://github.com/o/r/pull/7",
+  title: "t",
+  state: "MERGED",
+  draft: false,
+  review: "",
+  ci: "pass" as const,
+  failing: [],
+};
 const basil = { name: "basil", sessionId: "cc7d4336-1f91" };
-const spawnedBasil = (): Spawned => ({ basil: { id: "cc7d4336", repo: "/r", label: "r-fix", task: "t", startedAt: 1 } });
+const spawnedBasil = (): Spawned => ({
+  basil: { id: "cc7d4336", repo: "/r", label: "r-fix", task: "t", startedAt: 1 },
+});
 
 test("closing removes the session and marks the spawn record merged", () => {
   const spawned = spawnedBasil();
@@ -21,7 +32,9 @@ test("closing removes the session and marks the spawn record merged", () => {
 test("when rm refuses, the session is stopped and its worktree kept", () => {
   const spawned: Spawned = { sage: { repo: "/r", task: "t", startedAt: 1 } };
   const calls: string[] = [];
-  const run = (cmd: string[]) => (calls.push(cmd.join(" ")), cmd[1] === "rm" ? { ok: false, out: "unpushed commits" } : { ok: true, out: "" });
+  const run = (cmd: string[]) => (
+    calls.push(cmd.join(" ")), cmd[1] === "rm" ? { ok: false, out: "unpushed commits" } : { ok: true, out: "" }
+  );
   const cleanup = closeAndRecord(spawned, { name: "sage", sessionId: "59833c56-7822" }, pr, run);
   expect(calls).toEqual(["claude rm 59833c56-7822", "claude stop 59833c56-7822"]);
   expect(cleanup).toBe("stopped; worktree kept (unpushed commits)");

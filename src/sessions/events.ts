@@ -1,4 +1,4 @@
-import { appendFileSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { ensureDir } from "../shared/json-file";
 import { PATHS } from "../shared/paths";
 
