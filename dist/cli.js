@@ -179,13 +179,19 @@ var require_picocolors = __commonJS(function(exports, module) {
 import { spawn } from "child_process";
 import { openSync as openSync2 } from "fs";
 import { homedir as homedir3 } from "os";
-import { join as join9, resolve as resolve4 } from "path";
+import { join as join9 } from "path";
 import { parseArgs } from "util";
 
-// src/config.ts
+// src/config/config.ts
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from "fs";
 import { homedir } from "os";
-import { join, resolve, sep } from "path";
+import { dirname, join, resolve, sep } from "path";
+var PLUGIN_ROOT = (() => {
+  for (let dir = import.meta.dir;dir !== dirname(dir); dir = dirname(dir))
+    if (existsSync(join(dir, ".claude-plugin", "plugin.json")))
+      return dir;
+  return resolve(import.meta.dir, "..");
+})();
 var REMY_DIR = process.env.REMY_DIR ?? join(homedir(), ".remy");
 var PATHS = {
   config: join(REMY_DIR, "config.json"),
@@ -340,7 +346,7 @@ function storeToken(workspace, kind, token) {
 `, { mode: 384 });
 }
 
-// src/fanout.ts
+// src/messengers/fanout.ts
 var encodeId = (parts) => Object.entries(parts).map(([k, v]) => `${k}:${v}`).join("|");
 function decodeId(id) {
   const parts = {};
@@ -456,7 +462,7 @@ class Fanout {
   }
 }
 
-// src/messenger.ts
+// src/messengers/messenger.ts
 var blocking = (checks) => checks.filter((c) => !c.ok && !c.optional);
 var AWAIT_ANSWER_MS = 30 * 60000;
 var VERDICT = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i;
@@ -470,11 +476,11 @@ function permissionText(p) {
 \`\`\`${preview}\`\`\``;
 }
 
-// src/slack-bridge.ts
+// src/messengers/slack/bridge.ts
 import { mkdirSync as mkdirSync2 } from "fs";
 import { join as join2 } from "path";
 
-// src/slack.ts
+// src/messengers/slack/client.ts
 function formBody(params) {
   const form = new URLSearchParams;
   for (const [k, v] of Object.entries(params))
@@ -637,7 +643,7 @@ class SlackError extends Error {
   }
 }
 
-// src/task.ts
+// src/messengers/slack/task.ts
 var taskId = (channel, ts) => `${channel}-${ts.replace(".", "-")}`;
 function loadTask(id) {
   const t = readJson(`${PATHS.taskDir(id)}/task.json`, null);
@@ -748,7 +754,7 @@ function taskPrompt(t, brief) {
 `);
 }
 
-// src/watch.ts
+// src/messengers/slack/watch.ts
 class ChannelWatcher {
   slack;
   opts;
@@ -846,7 +852,7 @@ class ChannelWatcher {
   }
 }
 
-// src/slack-bridge.ts
+// src/messengers/slack/bridge.ts
 var threadRef = (channel, ts) => channel ? `${channel}/${ts}` : ts;
 var parseRef = (ref) => {
   const i = ref.indexOf("/");
@@ -1155,7 +1161,7 @@ async function slackChecks(workspace, settings) {
   return out;
 }
 
-// src/telegram-format.ts
+// src/messengers/telegram/format.ts
 var esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 var escAttr = (s) => esc(s).replace(/"/g, "&quot;");
 var EDGE_BEFORE = "(^|[\\s(\\[])";
@@ -1192,7 +1198,7 @@ function splitText(text, max = 3500) {
   return parts;
 }
 
-// src/telegram.ts
+// src/messengers/telegram/client.ts
 class Telegram {
   token;
   constructor(token) {
@@ -1289,7 +1295,7 @@ class TelegramError extends Error {
   }
 }
 
-// src/telegram-bridge.ts
+// src/messengers/telegram/bridge.ts
 var CHAIN_MS = 24 * 3600000;
 var KEEP_MS = 30 * 24 * 3600000;
 var CONFLICT_PAUSE_MS = 30000;
@@ -1463,7 +1469,7 @@ async function telegramChecks(workspace, settings) {
   return out;
 }
 
-// src/bridges.ts
+// src/messengers/workspaces.ts
 function describeMessengers(ws) {
   const kinds = messengersOf(ws);
   return kinds.map(messengerLabel).join(" + ") + (kinds.length > 1 ? ` (${ws.both ?? "mirror"})` : "");
@@ -1527,11 +1533,11 @@ async function openWorkspaces(workspaces, sink, opts) {
 }
 var quietSink = { push: async () => {}, permission: async () => {}, log: () => {} };
 
-// src/daemon.ts
+// src/daemon/daemon.ts
 import { appendFileSync as appendFileSync3, openSync, readSync, closeSync, statSync as statSync6, unlinkSync as unlinkSync2 } from "fs";
 import { join as join7 } from "path";
 
-// src/extensions/host.ts
+// src/extension-host/host.ts
 import { existsSync as existsSync2, mkdirSync as mkdirSync3, readdirSync, statSync as statSync2 } from "fs";
 import { join as join3 } from "path";
 var COMMAND = /^\/([a-z][\w-]*)(?:@\w+)?(?:\s+([\s\S]*))?$/i;
@@ -1709,14 +1715,14 @@ async function importExtension(path) {
   return ext;
 }
 
-// src/extensions/load.ts
+// src/extension-host/load.ts
 import { basename as basename2, join as join6 } from "path";
 
-// src/spawn.ts
+// src/sessions/spawn.ts
 import { existsSync as existsSync3, statSync as statSync4 } from "fs";
 import { basename, join as join4, resolve as resolve2 } from "path";
 
-// src/kitchen-names.ts
+// src/sessions/kitchen-names.ts
 var KITCHEN_NAMES = [
   "basil",
   "saffron",
@@ -1904,7 +1910,7 @@ var KITCHEN_NAMES = [
   "panettone"
 ];
 
-// src/nickname.ts
+// src/sessions/names.ts
 var RESERVE_MS = 3 * 24 * 3600000;
 var KEEP_MS2 = 30 * 24 * 3600000;
 function takenNames(live, nicknames, spawned, now = Date.now()) {
@@ -1951,7 +1957,7 @@ async function nameSession(input, live) {
   return name;
 }
 
-// src/hook.ts
+// src/sessions/events.ts
 import { appendFileSync, statSync as statSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
 var MAX_BYTES = 5 * 1024 * 1024;
 var KEEP_LINES = 2000;
@@ -2022,7 +2028,7 @@ function readEvents() {
   }
 }
 
-// src/snapshot.ts
+// src/sessions/snapshot.ts
 function spawnedEntry(spawned, name, sessionId) {
   const byId = Object.values(spawned).find((s) => s.id && sessionId.startsWith(s.id));
   if (byId)
@@ -2213,7 +2219,7 @@ function formatSession(x, now = Date.now(), paint = PLAIN) {
 `);
 }
 
-// src/spawn.ts
+// src/sessions/spawn.ts
 function resolveRepo(repo, roots) {
   const direct = resolve2(repo.replace(/^~(?=\/)/, process.env.HOME ?? "~"));
   if (existsSync3(join4(direct, ".git")))
@@ -2280,13 +2286,13 @@ async function spawnAgent(opts) {
   return { name, label, id, cwd, worktree, output: out };
 }
 
-// src/extensions/builtin/factory.ts
+// src/extensions/factory/index.ts
 import { existsSync as existsSync4, statSync as statSync5 } from "fs";
 import { join as join5 } from "path";
 
-// src/factory/define.ts
-var exports_define = {};
-__export(exports_define, {
+// src/sdk/factory.ts
+var exports_factory = {};
+__export(exports_factory, {
   LEVELS: () => LEVELS,
   action: () => action,
   agent: () => agent,
@@ -2353,9 +2359,9 @@ function validate(f) {
   return errors;
 }
 
-// src/factory/live.ts
+// src/extensions/factory/live.ts
 import { appendFileSync as appendFileSync2, readFileSync as readFileSync3 } from "fs";
-import { dirname } from "path";
+import { dirname as dirname2 } from "path";
 async function run2(cmd, cwd) {
   const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
@@ -2425,7 +2431,7 @@ function repoRootOf(cwd) {
   try {
     const r = Bun.spawnSync(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, stdout: "pipe", stderr: "ignore" });
     const common = r.exitCode === 0 ? r.stdout.toString().trim() : "";
-    return common.endsWith("/.git") ? dirname(common) : cwd;
+    return common.endsWith("/.git") ? dirname2(common) : cwd;
   } catch {
     return cwd;
   }
@@ -2454,7 +2460,7 @@ async function headOf(url) {
   return r.ok ? r.out : undefined;
 }
 
-// src/factory/pipeline.ts
+// src/extensions/factory/pipeline.ts
 var GRACE_MS = 3 * 60000;
 var PUSH_WAIT_MS = 30 * 60000;
 var isActive = (r) => r.stage !== "held" && r.stage !== "done";
@@ -2755,7 +2761,7 @@ function closed(run, d, f, env) {
   return false;
 }
 
-// src/extensions/builtin/factory.ts
+// src/extensions/factory/index.ts
 var USAGE_LIMIT = /usage limit|limit reached|rate.?limit|out of (extra )?usage/i;
 var BACKOFF_MS = 30 * 60000;
 var KEEP_MS3 = 7 * 24 * 3600000;
@@ -2764,7 +2770,7 @@ function registerModule() {
   if (registered)
     return;
   registered = true;
-  Bun.plugin({ name: "remy-factory", setup: (build) => void build.module("remy/factory", () => ({ exports: { ...exports_define }, loader: "object" })) });
+  Bun.plugin({ name: "remy-factory", setup: (build) => void build.module("remy/factory", () => ({ exports: { ...exports_factory }, loader: "object" })) });
 }
 async function loadFactory(root) {
   const path = join5(root, ".remy", "factory.ts");
@@ -2951,7 +2957,7 @@ var createFactory = (world = {}) => (remy) => {
   }
 };
 
-// src/notices.ts
+// src/shared/notices.ts
 var noticeWorthy = (c) => c.what === "merged" || c.what === "ended" || c.what === "pr_state" && /\u2192 #\d+ merged/.test(c.detail);
 var repoName = (repo) => repo?.split("/").pop();
 var link = (url, label) => url ? `<${url}|${label}>` : label;
@@ -2977,7 +2983,7 @@ function formatNotice(changes) {
 `) : undefined;
 }
 
-// src/extensions/builtin/merged-cleanup.ts
+// src/extensions/merged-cleanup.ts
 var shouldClose = (s) => s.spawned && s.pr?.state === "MERGED" && s.status !== "busy";
 function mergedCleanup(remy) {
   const closing = new Set;
@@ -2999,12 +3005,12 @@ function mergedCleanup(remy) {
   remy.on("tick", async () => void await Promise.all(remy.sessions().map(closeIfMerged)));
 }
 
-// src/extensions/builtin/queue-command.ts
+// src/extensions/queue-command.ts
 function queueCommand(remy) {
   remy.registerCommand("queue", { description: "What waits on you, most urgent first", run: (_, ctx) => remy.queue.text(ctx.workspace) });
 }
 
-// src/extensions/builtin/slack-tasks.ts
+// src/extensions/slack-tasks.ts
 function slackTasks(remy) {
   remy.on("message", (m) => {
     if (m.kind === "task_request")
@@ -3012,7 +3018,7 @@ function slackTasks(remy) {
   });
 }
 
-// src/extensions/builtin/index.ts
+// src/extensions/index.ts
 var BUILTINS = {
   "merged-cleanup": mergedCleanup,
   "slack-tasks": slackTasks,
@@ -3020,7 +3026,7 @@ var BUILTINS = {
   factory: factory_default
 };
 
-// src/extensions/load.ts
+// src/extension-host/load.ts
 var USER_EXTENSIONS = join6(REMY_DIR, "extensions");
 function trustedRepos(config) {
   return (config.extensions?.repos ?? []).map((repo) => {
@@ -3072,7 +3078,7 @@ async function loadExtensions(host, config, { builtins = BUILTINS, userDir = USE
   }
 }
 
-// src/queue.ts
+// src/sessions/waiting-list.ts
 var MARK = ["\uD83D\uDD34", "\uD83D\uDFE0", "\uD83D\uDFE1", "\uD83D\uDFE2", "\u26AA"];
 var short = (s, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}\u2026` : s).replace(/\s+/g, " ").trim();
 var unwrap = (l) => l.trim().replace(/^(?:(?:[#>]+|[-+*](?=\s)|[*_]+)\s*)+/, "").replace(/[*_]+$/, "").trim();
@@ -3166,7 +3172,7 @@ function coalesce(run) {
   };
 }
 
-// src/extensions/observe.ts
+// src/daemon/observe.ts
 var sessionRef = (s, workspace) => ({
   name: s.name,
   sessionId: s.sessionId,
@@ -3226,7 +3232,7 @@ function hookEvents(e, session) {
   return [];
 }
 
-// src/link.ts
+// src/link/link.ts
 import { chmodSync, existsSync as existsSync5, unlinkSync } from "fs";
 import { createConnection, createServer } from "net";
 // .claude-plugin/plugin.json
@@ -3241,7 +3247,7 @@ var plugin_default = {
   keywords: ["coordinator", "slack", "telegram", "sessions", "agents"]
 };
 
-// src/link.ts
+// src/link/link.ts
 var VERSION = plugin_default.version;
 var RESTART_EXIT = 75;
 var HOLD_MAX = 500;
@@ -3522,7 +3528,7 @@ function askDaemon(path, request, args, timeoutMs = 5000) {
   });
 }
 
-// src/merged.ts
+// src/sessions/close.ts
 var runSync = (cmd) => {
   const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
   return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
@@ -3548,7 +3554,7 @@ function formatMerged(spawned) {
 `);
 }
 
-// src/daemon.ts
+// src/daemon/daemon.ts
 var log = (...a) => {
   try {
     appendFileSync3(PATHS.log, `${new Date().toISOString()} ${a.map(String).join(" ")}
@@ -3963,7 +3969,7 @@ async function runDaemon() {
   setInterval(digest, config.digestMinutes * 60000);
 }
 
-// src/doctor.ts
+// src/cli/doctor.ts
 function sh(cmd) {
   const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
   return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
@@ -5360,12 +5366,12 @@ ${i}
   }
 }).prompt();
 
-// src/setup.ts
+// src/cli/setup.ts
 import { chmodSync as chmodSync2, mkdirSync as mkdirSync4, writeFileSync as writeFileSync3 } from "fs";
 import { homedir as homedir2 } from "os";
-import { join as join8, resolve as resolve3 } from "path";
+import { join as join8 } from "path";
 
-// src/ui.ts
+// src/cli/ui.ts
 var import_picocolors = __toESM(require_picocolors(), 1);
 function formatChecks(rows) {
   return rows.map((r) => {
@@ -5388,8 +5394,7 @@ function formatHelp(title, rows) {
 `);
 }
 
-// src/setup.ts
-var ROOT = resolve3(import.meta.dir, "..");
+// src/cli/setup.ts
 async function answer(prompt) {
   const v = await prompt;
   if (isCancel(v)) {
@@ -5684,7 +5689,7 @@ function installShim() {
   writeFileSync3(shim, `#!/bin/sh
 # Installed by \`remy setup\`. Uses the installed remy plugin, falling back to the copy setup ran from.
 root=$(bun -e 'try{const p=require(process.env.HOME+"/.claude/plugins/installed_plugins.json").plugins["remy@remy"];console.log(p?.[p.length-1]?.installPath??"")}catch{}')
-[ -x "$root/bin/remy" ] || root=${JSON.stringify(ROOT)}
+[ -x "$root/bin/remy" ] || root=${JSON.stringify(PLUGIN_ROOT)}
 exec "$root/bin/remy" "$@"
 `);
   chmodSync2(shim, 493);
@@ -5693,7 +5698,6 @@ exec "$root/bin/remy" "$@"
 }
 
 // src/cli.ts
-var ROOT2 = resolve4(import.meta.dir, "..");
 var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, in Slack or Telegram", [
   ["setup [workspace]", "Set up repo folders and workspaces (interactive)"],
   ["start", "Start the coordinator (and the daemon, if it isn't running); keep the terminal open"],
@@ -5738,7 +5742,7 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
   }
   await ensureDaemon(c.repoRoots[0] ?? homedir3());
   writeJson(PATHS.mcpConfig, {
-    mcpServers: { remy: { command: process.execPath, args: [join9(ROOT2, "dist", "channel.js")] } }
+    mcpServers: { remy: { command: process.execPath, args: [join9(PLUGIN_ROOT, "dist", "channel.js")] } }
   });
   const cwd = c.repoRoots[0] ?? homedir3();
   const args = [
@@ -5752,7 +5756,7 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
     "--dangerously-load-development-channels",
     "server:remy",
     "--append-system-prompt-file",
-    join9(ROOT2, "coordinator.md"),
+    join9(PLUGIN_ROOT, "coordinator.md"),
     ...extra,
     "Coordinator started. Run `remy status`, then post a short hello to each working workspace with how many of its sessions are running and which need attention."
   ];
@@ -5788,7 +5792,7 @@ async function ensureDaemon(cwd) {
   }
   const out = openSync2(PATHS.log, "a");
   const env = { ...process.env, REMY_DAEMON_SERVICE: "0" };
-  spawn(process.execPath, [join9(ROOT2, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
+  spawn(process.execPath, [join9(PLUGIN_ROOT, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
   if (!await daemonWithin(15000, (s) => s.pid !== running?.pid))
     throw new Error(`the remy daemon didn't start; see ${PATHS.log}`);
   console.log(import_picocolors.default.dim(`Started the remy daemon; it keeps running after the coordinator exits (log: ${PATHS.log}).`));
