@@ -355,7 +355,12 @@ async function setupSlack(name: string, existing?: SlackSettings): Promise<Slack
       );
     await askToken(name, "slack-app", "app-level token", async () => "App-level token saved");
   }
-  return { userId: userId.trim(), transport, channelRepos: pairs.length ? Object.fromEntries(pairs) : undefined };
+  return {
+    userId: userId.trim(),
+    transport,
+    channelRepos: pairs.length ? Object.fromEntries(pairs) : undefined,
+    trustedApps: existing?.trustedApps,
+  };
 }
 
 async function setupTelegram(name: string, existing?: TelegramSettings): Promise<TelegramSettings> {

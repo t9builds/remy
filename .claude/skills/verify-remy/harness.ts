@@ -7,6 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import type { Config } from "../../../src/sdk/config";
 
 const CHECKOUT = resolve(import.meta.dir, "../../..");
 const ROOT = join(tmpdir(), "remy-verify");
@@ -20,10 +21,10 @@ const CHANNEL = "remy-verify";
 
 type Run = { id: string; daemonPid?: number; tmux?: string; dm: string; bot: string; user: string; since: string };
 
-const die = (msg: string): never => {
+function die(msg: string): never {
   console.error(`✗ ${msg}`);
   process.exit(1);
-};
+}
 const keychain = (service: string) => {
   const r = spawnSync("security", ["find-generic-password", "-s", service, "-w"], { encoding: "utf8" });
   return r.status === 0 ? r.stdout.trim() : undefined;
@@ -103,20 +104,40 @@ async function until<T>(seconds: number, ok: () => Promise<T | undefined> | T | 
 }
 
 async function launch(args: string[]) {
-  const held = existsSync(LOCK) ? readFileSync(LOCK, "utf8").trim() : "";
-  if (
-    held &&
-    held !== RUN &&
-    existsSync(join(held, "run.json")) &&
-    alive(JSON.parse(readFileSync(join(held, "run.json"), "utf8")).daemonPid)
-  )
-    die(`another verification runs (${held}); one at a time, since every run reads the same DM`);
+  mkdirSync(ROOT, { recursive: true });
+  // Take the lock before any network call, so two launches can't both pass a check.
+  const take = () => {
+    try {
+      writeFileSync(LOCK, RUN, { flag: "wx" });
+      return true;
+    } catch (e: any) {
+      if (e.code !== "EEXIST") throw e;
+      return false;
+    }
+  };
+  if (!take()) {
+    const held = readFileSync(LOCK, "utf8").trim();
+    const heldRun = join(held, "run.json");
+    const pid = existsSync(heldRun) ? JSON.parse(readFileSync(heldRun, "utf8")).daemonPid : undefined;
+    // A dead holder's lock, or this checkout's own, can be taken over.
+    if (held !== RUN && alive(pid))
+      die(`another verification runs (${held}); one at a time, since every run reads the same DM`);
+    rmSync(LOCK, { force: true });
+    if (!take()) die(`another verification runs (${held}); one at a time, since every run reads the same DM`);
+  }
+  // A launch that dies before its daemon starts gives the lock back.
+  process.once("exit", () => {
+    if (!alive(readRun()?.daemonPid) && readFileSync(LOCK, "utf8").trim() === RUN) rmSync(LOCK, { force: true });
+  });
   if (alive(readRun()?.daemonPid)) die("this checkout already has a run: `harness.ts cleanup` first");
+  // A leftover run of this checkout may still have a coordinator or agents: stop them before its state goes.
+  if (readRun()) {
+    await cleanup();
+    writeFileSync(LOCK, RUN);
+  }
   const a = await accounts();
   for (const d of [HOME, REPOS, STATE]) rmSync(d, { recursive: true, force: true });
   for (const d of [HOME, EVIDENCE, join(REPOS, "fixture")]) mkdirSync(d, { recursive: true });
-  mkdirSync(ROOT, { recursive: true });
-  writeFileSync(LOCK, RUN);
   // A fixture repo for agents the coordinator starts, so nothing touches real repos.
   spawnSync("git", ["init", "-q", "-b", "main"], { cwd: join(REPOS, "fixture") });
   writeFileSync(join(REPOS, "fixture", "README.md"), "# fixture\n\nA repo verify-remy's agents work in.\n");
@@ -135,7 +156,7 @@ async function launch(args: string[]) {
         tickSeconds: 15,
         spawnWorktree: false,
         autonomy: "notify",
-      },
+      } satisfies Partial<Config>,
       null,
       2,
     ),
@@ -164,10 +185,22 @@ async function launch(args: string[]) {
  */
 async function trust(dir: string) {
   const name = `remy-verify-trust-${Bun.hash(dir).toString(36).slice(0, 6)}`;
-  tmux("new-session", "-d", "-s", name, "-x", "200", "-y", "50", `cd ${JSON.stringify(dir)} && claude`);
+  tmux(
+    "new-session",
+    "-d",
+    "-s",
+    name,
+    "-x",
+    "200",
+    "-y",
+    "50",
+    `cd ${JSON.stringify(dir)} && REMY_DIR=${JSON.stringify(HOME)} claude`,
+  );
+  let answered = false;
   const done = await until(30, () => {
     const pane = tmux("capture-pane", "-p", "-t", name).stdout ?? "";
-    if (/Yes, I trust this folder/.test(pane)) {
+    if (!answered && /Yes, I trust this folder/.test(pane)) {
+      answered = true;
       tmux("send-keys", "-t", name, "Down");
       tmux("send-keys", "-t", name, "Enter");
       return undefined;

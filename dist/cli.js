@@ -6221,7 +6221,12 @@ ${import_picocolors.default.bold("Basic Information")} \u2192 App-Level Tokens \
 ${import_picocolors.default.bold("Event Subscriptions")} \u2192 enable \u2192 bot event message.im`, "Socket Mode");
     await askToken(name, "slack-app", "app-level token", async () => "App-level token saved");
   }
-  return { userId: userId.trim(), transport, channelRepos: pairs.length ? Object.fromEntries(pairs) : undefined };
+  return {
+    userId: userId.trim(),
+    transport,
+    channelRepos: pairs.length ? Object.fromEntries(pairs) : undefined,
+    trustedApps: existing?.trustedApps
+  };
 }
 async function setupTelegram(name, existing) {
   log2.step("Telegram");

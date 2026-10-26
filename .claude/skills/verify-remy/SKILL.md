@@ -55,7 +55,7 @@ Assert on what the user would see: the bot's text, a reaction, the pinned list, 
 ## Gotchas
 
 - **One run at a time.** Every run reads the same DM, so two daemons would both answer. `launch` refuses while another run's daemon lives; a factory agent that finds one waits a few minutes and tries again, then reports `fail` with the holder's path.
-- **Your real sessions show up.** Remy lists sessions with `claude agents`, which sees every session on the machine, and they all route to `verify`, the only workspace. The pinned list and `status` include them: assert on lines for the agents this run started, never on the whole list.
+- **Your real sessions show up.** Remy lists sessions with `claude agents`, which sees every session on the machine, and they all route to `verify`, the only workspace. The pinned list and `status` include them: assert on lines for the agents this run started, never on the whole list. The coordinator receives them too and can act on them (it has `remy send`, spawn and close in auto permission mode): drive only the agents this run started, and never ask it to answer, message or close any other session.
 - **The coordinator is a real Claude session**, a few turns per journey. The daemon-only features (commands, the pinned list) need no coordinator: `launch` without `--coordinator` when that's all the change touches.
 - **Slack is polled.** The daemon reads the DM every few seconds while you chat and channel threads every 45 seconds: wait with `--wait-for`, never a fixed sleep.
 - Old messages stay in the DM between runs. Always pass `--after` with a ts from this run, and wait for the coordinator's hello before your first message, or `--wait-for` may match the hello.

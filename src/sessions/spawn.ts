@@ -32,12 +32,6 @@ function slug(s: string) {
 }
 
 /**
- * `slack`: the Slack thread a task came from, where the agent then reports; `taskText` is what `{task}` in
- * `spawnTemplate` becomes when it isn't `task` itself (for a Slack task, the thread; `task` is the coordinator's brief).
- * `prompt`: the agent's whole prompt, sent as is instead of `task` through `spawnTemplate`; `task` then only describes it.
- * `role` and `pr`: an agent the factory starts for a pipeline step, and the PR it is for.
- */
-/**
  * A `claude --bg` session is started by Claude Code's own background process, not by this one, so it doesn't inherit
  * this environment. A Remy running on another REMY_DIR hands it on through the session's settings, or the agent's
  * hooks would report to the default ~/.remy.
@@ -45,6 +39,12 @@ function slug(s: string) {
 export const remyDirArgs = (env: Record<string, string | undefined> = process.env) =>
   env.REMY_DIR ? ["--settings", JSON.stringify({ env: { REMY_DIR: env.REMY_DIR } })] : [];
 
+/**
+ * `slack`: the Slack thread a task came from, where the agent then reports; `taskText` is what `{task}` in
+ * `spawnTemplate` becomes when it isn't `task` itself (for a Slack task, the thread; `task` is the coordinator's brief).
+ * `prompt`: the agent's whole prompt, sent as is instead of `task` through `spawnTemplate`; `task` then only describes it.
+ * `role` and `pr`: an agent the factory starts for a pipeline step, and the PR it is for.
+ */
 export async function spawnAgent(opts: {
   repo: string;
   task: string;
