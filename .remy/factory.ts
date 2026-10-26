@@ -10,7 +10,7 @@ export default defineFactory({
     agent("verify", {
       skill: "/remy:verify",
       instructions:
-        "Run anything from the checkout with REMY_DIR set to a fresh temporary folder, never against ~/.remy or the running daemon, and don't post to real Slack or Telegram.",
+        "Run the checkout's code with REMY_DIR=<fresh temporary folder> on each command (e.g. REMY_DIR=<folder> bun src/cli.ts ...), never exported and never against ~/.remy or the running daemon, and don't post to real Slack or Telegram. Run `remy report` without it, or the daemon never sees your verdict.",
     }),
     // The extension API and this pipeline are contracts: a person decides on changes to them.
     gate("merge", { maxLines: 600, protect: ["src/sdk/**", ".remy/**"] }),

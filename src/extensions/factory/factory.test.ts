@@ -10,7 +10,7 @@ import { PLUGIN_ROOT } from "../../shared/paths";
 import { createFactory, isReady } from "./factory";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
-import type { Run } from "./pipeline";
+import { gateBlockers, type PrDetail, type Run } from "./pipeline";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "remy-factory-")));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -48,6 +48,26 @@ test("Remy's own .remy/factory.ts loads", async () => {
     "action merge",
     "action notify",
   ]);
+  expect(l.factory?.autonomy).toBe("merge");
+  const review = l.factory?.steps.find((s) => s.kind === "agent" && s.name === "review");
+  expect(review?.kind === "agent" && review.repeat).toBe("until-clean");
+  const verify = l.factory?.steps.find((s) => s.kind === "agent" && s.name === "verify");
+  expect(verify?.kind === "agent" && verify.instructions).toContain("remy report");
+  const g = l.factory?.steps.find((s) => s.kind === "gate");
+  if (g?.kind !== "gate") throw new Error("no gate step");
+  const touching = (file: string): PrDetail => ({
+    state: "OPEN",
+    draft: false,
+    review: "",
+    ci: "pass",
+    head: "aaa",
+    lines: 10,
+    files: [file],
+    allFiles: true,
+  });
+  expect(gateBlockers(touching(".remy/factory.ts"), g)).toEqual(["touches protected .remy/factory.ts"]);
+  expect(gateBlockers(touching("src/sdk/extension.ts"), g)).toEqual(["touches protected src/sdk/extension.ts"]);
+  expect(gateBlockers(touching("README.md"), g)).toEqual([]);
 });
 
 const pr = {
