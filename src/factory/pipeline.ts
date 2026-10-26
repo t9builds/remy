@@ -54,8 +54,8 @@ export type Run = {
   agent?: { name: string; id?: string; startedAt: number };
   reports: Report[];
   ask?: { purpose: "approve" | "continue" | "fix"; question: string; answer?: string };
-  /** Steps above the autonomy level the user said yes to. */
-  approved: number[];
+  /** Steps above the autonomy level the user said yes to, each for the head it was asked about (`step@head`). */
+  approved: string[];
   reason?: string;
   /** A failed check after the change went live: the most urgent judgment call there is. */
   urgent?: boolean;
@@ -104,7 +104,8 @@ export const GRACE_MS = 3 * 60_000;
 const PUSH_WAIT_MS = 30 * 60_000;
 
 export const isActive = (r: Run) => r.stage !== "held" && r.stage !== "done";
-export const YES = /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approve[d]?|👍|✅)\b/i;
+/** A reply that is only a yes: "ok but don't" or "go away" is not consent. Slack sends emoji as `:+1:`. */
+export const YES = /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approved?|lgtm|👍[\u{1F3FB}-\u{1F3FF}]?|✅|:\+1:|:thumbsup:|:white_check_mark:)[\s.!]*$/iu;
 
 /** Why Remy won't let a change through a gate, if anything stops it. */
 export function gateBlockers(d: PrDetail, gate: Pick<GateStep, "maxLines" | "protect" | "ci">): string[] {
@@ -149,6 +150,9 @@ function enter(run: Run, stage: Stage, now: number, reason?: string) {
 
 const hold = (run: Run, now: number, reason: string) => (enter(run, "held", now, reason), false);
 
+/** A yes covers the commit it was asked about; new commits need another. */
+const approval = (run: Run) => `${run.step}@${run.head}`;
+
 function next(run: Run, now: number, to = run.step + 1) {
   Object.assign(run, { step: to, round: 1, stage: "running", since: now, stepSince: now, reason: undefined, agent: undefined, ask: undefined });
   return true;
@@ -190,7 +194,7 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
     const yes = YES.test(a.answer);
     if (a.purpose === "approve") {
       if (!yes) return hold(run, now, `you said no to ${describe(f.steps[run.step]!)}: ${a.answer}`);
-      run.approved.push(run.step);
+      run.approved.push(approval(run));
       run.ask = undefined;
       enter(run, "running", now);
       return true;
@@ -207,7 +211,7 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
     enter(run, "done", now, "through the pipeline");
     return false;
   }
-  if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(run.step)) {
+  if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(approval(run))) {
     const said = run.reports.findLast((r) => r.verdict === "pass" || r.verdict === "fixed")?.summary;
     return ask(run, env, "approve", `${describe(step)} for #${run.number} ${run.title}?${said ? ` Last verdict: ${said}.` : ""} Reply yes to go ahead (your autonomy stops at ${autonomy}).`);
   }

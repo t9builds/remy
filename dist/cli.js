@@ -2458,7 +2458,7 @@ async function headOf(url) {
 var GRACE_MS = 3 * 60000;
 var PUSH_WAIT_MS = 30 * 60000;
 var isActive = (r) => r.stage !== "held" && r.stage !== "done";
-var YES = /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approve[d]?|\uD83D\uDC4D|\u2705)\b/i;
+var YES = /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approved?|lgtm|\uD83D\uDC4D[\u{1F3FB}-\u{1F3FF}]?|\u2705|:\+1:|:thumbsup:|:white_check_mark:)[\s.!]*$/iu;
 function gateBlockers(d, gate) {
   const why = [];
   if (d.draft)
@@ -2503,6 +2503,7 @@ function enter(run, stage, now, reason) {
   Object.assign(run, { stage, since: now, reason });
 }
 var hold = (run, now, reason) => (enter(run, "held", now, reason), false);
+var approval = (run) => `${run.step}@${run.head}`;
 function next(run, now, to = run.step + 1) {
   Object.assign(run, { step: to, round: 1, stage: "running", since: now, stepSince: now, reason: undefined, agent: undefined, ask: undefined });
   return true;
@@ -2540,7 +2541,7 @@ async function stepOnce(run, f, autonomy, env) {
     if (a.purpose === "approve") {
       if (!yes)
         return hold(run, now, `you said no to ${describe(f.steps[run.step])}: ${a.answer}`);
-      run.approved.push(run.step);
+      run.approved.push(approval(run));
       run.ask = undefined;
       enter(run, "running", now);
       return true;
@@ -2556,7 +2557,7 @@ async function stepOnce(run, f, autonomy, env) {
     enter(run, "done", now, "through the pipeline");
     return false;
   }
-  if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(run.step)) {
+  if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(approval(run))) {
     const said = run.reports.findLast((r) => r.verdict === "pass" || r.verdict === "fixed")?.summary;
     return ask(run, env, "approve", `${describe(step)} for #${run.number} ${run.title}?${said ? ` Last verdict: ${said}.` : ""} Reply yes to go ahead (your autonomy stops at ${autonomy}).`);
   }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { action, agent, defineFactory, gate, levelOf, lowerLevel, validate, wait, type Factory, type Level } from "./define";
-import { advance, gateBlockers, type Build, type Env, type PrDetail, type Report, type Run } from "./pipeline";
+import { advance, gateBlockers, YES, type Build, type Env, type PrDetail, type Report, type Run } from "./pipeline";
 
 const URL = "https://github.com/acme-corp/api/pull/7";
 
@@ -266,6 +266,28 @@ describe("autonomy", () => {
     await go(run, env, ADR, "verify");
     expect(w.merges).toEqual(["aaa squash"]);
     expect(at(run)).toBe("running:wait deploy");
+  });
+
+  test("a yes covers the commits it was asked about, not ones pushed since", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env, ADR, "verify");
+    w.report("pass", "all good");
+    await go(run, env, ADR, "verify");
+    w.pr = detail({ head: "bbb" });
+    run.ask!.answer = "yes";
+    await go(run, env, ADR, "verify");
+    expect(at(run)).toBe("agent:agent review");
+    w.report("pass", "still good");
+    await go(run, env, ADR, "verify");
+    expect(w.merges).toEqual([]);
+    expect(run.stage).toBe("asking");
+    expect(w.asked).toHaveLength(2);
+  });
+
+  test("only a plain yes is consent", () => {
+    for (const yes of ["yes", "Yes!", " ok ", "ship it", "👍", "👍🏽", "✅", ":+1:", "lgtm."]) expect(YES.test(yes)).toBe(true);
+    for (const no of ["no", "go away", "ok but don't", "yes, after the release", "not yet", "👎"]) expect(YES.test(no)).toBe(false);
   });
 
   test("at verify, a person merging it themselves is the answer too", async () => {
