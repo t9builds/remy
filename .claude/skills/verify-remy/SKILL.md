@@ -59,5 +59,4 @@ Assert on what the user would see: the bot's text, a reaction, the pinned list, 
 - **The coordinator is a real Claude session**, a few turns per journey. The daemon-only features (commands, the pinned list) need no coordinator: `launch` without `--coordinator` when that's all the change touches.
 - **Slack is polled.** The daemon reads the DM every few seconds while you chat and channel threads every 45 seconds: wait with `--wait-for`, never a fixed sleep.
 - Old messages stay in the DM between runs. Always pass `--after` with a ts from this run, and wait for the coordinator's hello before your first message, or `--wait-for` may match the hello.
-- Answer an agent in the thread Remy started for its question. Remy follows only threads it started: a reply in a thread under your own message never arrives.
 - `bun src/cli.ts …` without the run's `REMY_DIR` talks to the user's real Remy. Use `eval "$(harness.ts env)"` first, in the same shell command.

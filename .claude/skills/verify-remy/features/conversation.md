@@ -20,6 +20,7 @@ Preconditions:
 
 - **Hello.** Nothing to do. Run `harness.ts replies --wait-for "^(?!\*Waiting on you|:white_check_mark: \*Nothing waits)" --timeout 180` (any post but the waiting list). A post from the bot after the run's start that greets and counts sessions.
 - **Answer.** After the hello, ask what runs. Run `harness.ts say "what's running right now?"`, then `harness.ts replies --after <ts> --wait-for "session|agent|running|idle|busy" --timeout 180`. An answer after your message, often in a thread under it, that names sessions or says none run.
+- **Follow-up in the thread.** Reply under your own message: `harness.ts say --thread <your ts> "and how many are busy?"`, then `harness.ts replies --after <ts> --wait-for "busy"`. The answer, in the same thread.
 - **Status matches.** Compare with `bun src/cli.ts status` under the run's `REMY_DIR`. The sessions the answer names are in it.
 - **Proof.** `harness.ts snap conversation`. `dm.txt` shows your message and the answer under it.
 

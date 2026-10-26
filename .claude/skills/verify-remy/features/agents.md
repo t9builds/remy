@@ -30,5 +30,4 @@ Preconditions:
 
 - Each step is a coordinator turn plus the agent's own: allow minutes, not seconds.
 - `spawnWorktree` is off in the run's config, so the agent works in `fixture` itself.
-- Remy takes a turn as a question only when a line of the agent's last message ends with `?`. "What's your colour? Then I'll write it down." isn't one, and the agent shows as `stopped without a PR` instead: phrase the task so the question ends the message.
-- Answer in the thread Remy started for the question, not under your own message.
+- Remy takes a turn as a question when a line of the agent's last message ends with `?`, or its last line asks and goes on to tell the user what happens next ("Which colour? Once you tell me, I'll write it down."). A question buried mid-message shows as `stopped without a PR` instead.

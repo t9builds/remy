@@ -27,7 +27,7 @@ import { formatTranscript, requestText, type SlackTask, taskEvent, taskId } from
 import { ChannelWatcher, type Trigger, type WatchState } from "./watch";
 
 /** A thread Remy follows, keyed by its root ts. `channel` is set for channel threads; DM threads leave it out. */
-type ThreadInfo = {
+export type ThreadInfo = {
   session?: string;
   expectReply: boolean;
   /** The user has replied since the last question in this thread. */
@@ -99,7 +99,8 @@ export class SlackBridge implements Messenger {
     const ts = await this.slack.post(channel ?? (await this.ensureDm()), text, thread?.ts);
     const root = thread?.ts ?? ts;
     const prev = this.state.threads[root];
-    if (opts.session || opts.expect_reply || prev) {
+    // A reply in a DM thread, such as an answer under the user's message, is a conversation the user may go on in.
+    if (opts.session || opts.expect_reply || prev || (thread && !channel)) {
       this.state.threads[root] = {
         ...prev,
         channel: channel ?? prev?.channel,
@@ -221,13 +222,9 @@ export class SlackBridge implements Messenger {
       this.state.lastTs = m.ts;
       await this.handleInbound(m);
     }
-    // Thread replies don't show up in history; check the threads that wait for an answer.
+    // Thread replies don't show up in history; check the DM threads Remy posted in.
     if (this.tick++ % 2 === 0) {
-      const waiting = Object.entries(this.state.threads)
-        .filter(([, t]) => t.expectReply && !t.channel)
-        .sort(([, a], [, b]) => b.postedAt - a.postedAt)
-        .slice(0, 5);
-      for (const [root, t] of waiting) {
+      for (const [root, t] of dmThreadsToRead(this.state.threads)) {
         for (const m of await this.slack.replies(channel, root, t.lastSeen)) {
           t.lastSeen = m.ts;
           await this.handleInbound(m, root);
@@ -380,6 +377,17 @@ export class SlackBridge implements Messenger {
       default_repo: task.defaultRepo ?? "",
     });
   }
+}
+
+/**
+ * The DM threads whose replies a poll reads: those Remy asked a question in first, then any it posted in, newest
+ * first. A handful, since each costs a Slack read.
+ */
+export function dmThreadsToRead(threads: Record<string, ThreadInfo>, limit = 5) {
+  return Object.entries(threads)
+    .filter(([, t]) => !t.channel)
+    .sort(([, a], [, b]) => Number(b.expectReply) - Number(a.expectReply) || b.postedAt - a.postedAt)
+    .slice(0, limit);
 }
 
 const DM_SCOPES = ["chat:write", "im:history", "im:read", "im:write"];

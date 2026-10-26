@@ -87,6 +87,20 @@ test("formats one line per item and counts the busy ones", () => {
   expect(formatWaitingList([], [busy])).toBe("✅ *Nothing waits on you.*\n_1 more working on their own_");
 });
 
+test("questionOf finds a question that goes on to tell the user what happens next", () => {
+  expect(
+    questionOf("What's your favourite colour? Once you tell me, I'll write it to `colour.txt` in the repo root."),
+  ).toBe("What's your favourite colour?");
+  expect(questionOf("Done.\nShould I also update the docs? If you say yes, I'll open a second PR.")).toBe(
+    "Should I also update the docs?",
+  );
+  // Only on the turn's last line, and only when the rest speaks to the user.
+  expect(questionOf("Is the 5? Not sure, but tests pass.")).toBeUndefined();
+  expect(questionOf("Which one? Let me know and I'll go on.")).toBe("Which one?");
+  expect(questionOf("Which one? Once you pick, I'll go on.\nAll tests pass.")).toBeUndefined();
+  expect(questionOf("Opened https://x.dev/a?b=1 for you. Done.")).toBeUndefined();
+});
+
 test("questionOf skips question marks in URLs and code, and keeps the wording", () => {
   expect(questionOf("Opened PR: https://github.com/o/r/pull/7?w=1\nCI is green.")).toBeUndefined();
   expect(questionOf("Renamed `get_user?` to `fetch_user`. Done.")).toBeUndefined();

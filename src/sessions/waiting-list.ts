@@ -35,10 +35,27 @@ const unwrap = (l: string) =>
 /** Whether a line asks something: it ends in a question mark that isn't part of a URL or of code. */
 const asks = (l: string) => /\?["'”)]*$/.test(l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, "").trim());
 
-/** The question a turn ended on: its last line that ends in a question mark. */
+/**
+ * A question followed by what happens once the user answers it, on one line: "Which colour? Once you tell me, I'll
+ * write it down." Only text addressed to the user counts as the follow-up, so "Is the 5? Not sure." doesn't.
+ */
+function asksThenYou(l: string): string | undefined {
+  // Blank out code and URLs, keeping positions, so their question marks don't count.
+  const plain = l.replace(/`[^`]*`|https?:\/\/\S*[^\s?]/g, (m) => " ".repeat(m.length));
+  const marks = [...plain.matchAll(/\?["'”)]*\s+/g)];
+  const mark = marks.findLast((m) => /\b(you|your|let me know|tell me)\b/i.test(l.slice(m.index + m[0].length)));
+  return mark ? l.slice(0, mark.index + mark[0].trimEnd().length) : undefined;
+}
+
+/**
+ * The question a turn ended on: its last line that ends in a question mark, or a question on its very last line that
+ * goes on to tell the user what happens once they answer.
+ */
 export function questionOf(last: string | undefined): string | undefined {
-  const line = last?.split("\n").map(unwrap).findLast(asks);
-  return line ? short(line) : undefined;
+  const lines = (last ?? "").split("\n").map(unwrap).filter(Boolean);
+  const end = lines.at(-1);
+  const q = (end && !asks(end) && asksThenYou(end)) || lines.findLast(asks);
+  return q ? short(q) : undefined;
 }
 
 /** Why `s` waits on the user, if it does. A session counts once, under its most urgent reason. */
