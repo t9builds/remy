@@ -1620,6 +1620,7 @@ class LinkServer {
   hold(events) {
     this.held.unshift(...events);
     this.held.splice(0, Math.max(0, this.held.length - HOLD_MAX));
+    this.handlers.held?.(this.held);
   }
   async listen() {
     if (existsSync2(this.path)) {
@@ -1647,6 +1648,7 @@ class LinkServer {
     this.held.push({ ...event, meta: { ...event.meta, queued_at: new Date().toISOString() } });
     if (this.held.length > HOLD_MAX)
       this.handlers.log("link: dropped held event", this.held.shift().kind);
+    this.handlers.held?.(this.held);
   }
   permission(request_id, behavior) {
     if (this.coordinator)
@@ -1686,6 +1688,8 @@ class LinkServer {
     this.handlers.log("link: coordinator connected", held.length ? `delivering ${held.length} held` : "");
     for (const event of [...greeting, ...held])
       send(socket, { type: "event", event });
+    if (held.length)
+      this.handlers.held?.(this.held);
   }
 }
 
@@ -2442,6 +2446,7 @@ var config;
 var stamp = 0;
 var link;
 var startedAt = Date.now();
+var supervised = process.env.REMY_DAEMON_SERVICE ? process.env.REMY_DAEMON_SERVICE === "1" : !!process.env.INVOCATION_ID || process.ppid === 1;
 var lastActive = "";
 async function push(kind, content, meta = {}) {
   const clean = Object.fromEntries(Object.entries(meta).filter(([, v]) => v));
@@ -2491,7 +2496,7 @@ function status() {
     version: VERSION,
     startedAt,
     config: stamp,
-    supervised: process.env.REMY_DAEMON_SERVICE === "1",
+    supervised,
     coordinator: link.connected,
     held: link.heldEvents.length,
     workspaces: [...bridges.keys()]
@@ -2703,17 +2708,22 @@ function shutdown(code) {
     return;
   stopping = true;
   link?.close();
-  if (link?.heldEvents.length)
-    writeJson(PATHS.held, link.heldEvents);
+  if (link)
+    keepHeld(link.heldEvents);
   log("stopped", link?.heldEvents.length ? `keeping ${link.heldEvents.length} held` : "");
   process.exit(code);
 }
-function takeHeld() {
+function heldBefore() {
   const held = readJson(PATHS.held, []);
-  try {
-    unlinkSync2(PATHS.held);
-  } catch {}
   return Array.isArray(held) ? held : [];
+}
+function keepHeld(events) {
+  try {
+    if (events.length)
+      writeJson(PATHS.held, events);
+    else
+      unlinkSync2(PATHS.held);
+  } catch {}
 }
 async function runDaemon() {
   ensureDir();
@@ -2727,10 +2737,11 @@ async function runDaemon() {
       await bridgeFor(lastActive).askPermission(params);
     },
     greeting,
+    held: keepHeld,
     log
   });
   await link.listen();
-  link.hold(takeHeld());
+  link.hold(heldBefore());
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
   console.log(`remy daemon ${VERSION} listening on ${PATHS.socket}; log in ${PATHS.log}`);
@@ -4630,7 +4641,8 @@ async function ensureDaemon(cwd) {
       await Bun.sleep(100);
   }
   const out = openSync2(PATHS.log, "a");
-  spawn(process.execPath, [join5(ROOT2, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out] }).unref();
+  const env = { ...process.env, REMY_DAEMON_SERVICE: "0" };
+  spawn(process.execPath, [join5(ROOT2, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
   if (!await daemonWithin(15000, (s) => s.pid !== running?.pid))
     throw new Error(`the remy daemon didn't start; see ${PATHS.log}`);
   console.log(import_picocolors.default.dim(`Started the remy daemon; it keeps running after the coordinator exits (log: ${PATHS.log}).`));

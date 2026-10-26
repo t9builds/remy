@@ -131,6 +131,18 @@ describe("link", () => {
     expect(events[0]!.meta.queued_at).toBe("2026-01-01T00:00:00.000Z");
   });
 
+  test("reports every change to what it holds, so it can be kept on disk", async () => {
+    const path = socketPath();
+    const kept: string[][] = [];
+    const s = await server(path, { held: (events) => void kept.push(events.map((e) => e.content)) });
+    s.hold([ev("old")]);
+    s.push(ev("new"));
+    expect(kept).toEqual([["old"], ["old", "new"]]);
+    const { events } = client(path);
+    await until(() => events.length === 2);
+    expect(kept.at(-1)).toEqual([]);
+  });
+
   test("askDaemon is undefined with no daemon", async () => {
     expect(await askDaemon(socketPath(), "status", undefined, 500)).toBeUndefined();
   });

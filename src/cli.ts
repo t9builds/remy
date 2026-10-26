@@ -122,7 +122,9 @@ async function ensureDaemon(cwd: string) {
     for (const until = Date.now() + 5_000; Date.now() < until && (await daemonStatus()); ) await Bun.sleep(100);
   }
   const out = openSync(PATHS.log, "a");
-  spawn(process.execPath, [join(ROOT, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out] }).unref();
+  // Not a service, whatever this terminal inherited: a restart has to start it again from here.
+  const env = { ...process.env, REMY_DAEMON_SERVICE: "0" };
+  spawn(process.execPath, [join(ROOT, "dist", "cli.js"), "daemon"], { cwd, detached: true, stdio: ["ignore", out, out], env }).unref();
   if (!(await daemonWithin(15_000, (s) => s.pid !== running?.pid))) throw new Error(`the remy daemon didn't start; see ${PATHS.log}`);
   console.log(pc.dim(`Started the remy daemon; it keeps running after the coordinator exits (log: ${PATHS.log}).`));
 }

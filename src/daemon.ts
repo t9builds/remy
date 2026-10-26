@@ -32,6 +32,12 @@ let config: Config;
 let stamp = 0;
 let link: LinkServer;
 const startedAt = Date.now();
+/**
+ * Whether launchd or systemd runs this daemon and starts it again after a restart. `remy start` sets
+ * REMY_DAEMON_SERVICE=0 on the daemons it starts itself; a service file may set it to 1. Without it, systemd marks its
+ * services with INVOCATION_ID, and launchd is the parent of its agents.
+ */
+const supervised = process.env.REMY_DAEMON_SERVICE ? process.env.REMY_DAEMON_SERVICE === "1" : !!process.env.INVOCATION_ID || process.ppid === 1;
 
 /** The workspace the user last wrote from; the coordinator's permission prompts go there. */
 let lastActive = "";
@@ -88,8 +94,7 @@ function status(): DaemonStatus {
     version: VERSION,
     startedAt,
     config: stamp,
-    // Set by the launchd and systemd service files in the README.
-    supervised: process.env.REMY_DAEMON_SERVICE === "1",
+    supervised,
     coordinator: link.connected,
     held: link.heldEvents.length,
     workspaces: [...bridges.keys()],
@@ -320,18 +325,23 @@ function shutdown(code: number) {
   if (stopping) return;
   stopping = true;
   link?.close();
-  if (link?.heldEvents.length) writeJson(PATHS.held, link.heldEvents);
+  if (link) keepHeld(link.heldEvents);
   log("stopped", link?.heldEvents.length ? `keeping ${link.heldEvents.length} held` : "");
   process.exit(code);
 }
 
-/** Events the previous daemon held when it stopped. */
-function takeHeld(): LinkEvent[] {
+/** Events the previous daemon held when it stopped or crashed. */
+function heldBefore(): LinkEvent[] {
   const held = readJson<LinkEvent[]>(PATHS.held, []);
-  try {
-    unlinkSync(PATHS.held);
-  } catch {}
   return Array.isArray(held) ? held : [];
+}
+
+/** Kept on disk as it changes, so a crash or a kill doesn't lose what waits for the coordinator. */
+function keepHeld(events: readonly LinkEvent[]) {
+  try {
+    if (events.length) writeJson(PATHS.held, events);
+    else unlinkSync(PATHS.held);
+  } catch {}
 }
 
 /** Run the daemon in the foreground until it's stopped. */
@@ -347,11 +357,12 @@ export async function runDaemon() {
       await bridgeFor(lastActive).askPermission(params);
     },
     greeting,
+    held: keepHeld,
     log,
   });
   // Claim the socket first, so a second daemon fails before it touches Slack or Telegram.
   await link.listen();
-  link.hold(takeHeld());
+  link.hold(heldBefore());
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
   console.log(`remy daemon ${VERSION} listening on ${PATHS.socket}; log in ${PATHS.log}`);

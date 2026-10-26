@@ -15580,6 +15580,7 @@ class LinkServer {
   hold(events) {
     this.held.unshift(...events);
     this.held.splice(0, Math.max(0, this.held.length - HOLD_MAX));
+    this.handlers.held?.(this.held);
   }
   async listen() {
     if (existsSync2(this.path)) {
@@ -15607,6 +15608,7 @@ class LinkServer {
     this.held.push({ ...event, meta: { ...event.meta, queued_at: new Date().toISOString() } });
     if (this.held.length > HOLD_MAX)
       this.handlers.log("link: dropped held event", this.held.shift().kind);
+    this.handlers.held?.(this.held);
   }
   permission(request_id, behavior) {
     if (this.coordinator)
@@ -15646,6 +15648,8 @@ class LinkServer {
     this.handlers.log("link: coordinator connected", held.length ? `delivering ${held.length} held` : "");
     for (const event of [...greeting, ...held])
       send(socket, { type: "event", event });
+    if (held.length)
+      this.handlers.held?.(this.held);
   }
 }
 

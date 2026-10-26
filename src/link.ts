@@ -117,6 +117,8 @@ export type ServerHandlers = {
   permissionRequest(p: PermissionRequest): Promise<void>;
   /** Events every newly connected coordinator gets first, before the held ones (e.g. which workspaces are off). */
   greeting?(): Promise<LinkEvent[]>;
+  /** What's held changed; keep it somewhere that outlives a crash. */
+  held?(events: readonly LinkEvent[]): void;
   log(...a: unknown[]): void;
 };
 
@@ -155,6 +157,7 @@ export class LinkServer {
   hold(events: LinkEvent[]) {
     this.held.unshift(...events);
     this.held.splice(0, Math.max(0, this.held.length - HOLD_MAX));
+    this.handlers.held?.(this.held);
   }
 
   /** Listen on the socket. Fails when another daemon already answers there; a stale socket file is replaced. */
@@ -184,6 +187,7 @@ export class LinkServer {
     if (this.coordinator) return send(this.coordinator, { type: "event", event });
     this.held.push({ ...event, meta: { ...event.meta, queued_at: new Date().toISOString() } });
     if (this.held.length > HOLD_MAX) this.handlers.log("link: dropped held event", this.held.shift()!.kind);
+    this.handlers.held?.(this.held);
   }
 
   /** A verdict on the coordinator's permission prompt. Without a coordinator, the session that asked is gone. */
@@ -224,6 +228,7 @@ export class LinkServer {
     this.held = [];
     this.handlers.log("link: coordinator connected", held.length ? `delivering ${held.length} held` : "");
     for (const event of [...greeting, ...held]) send(socket, { type: "event", event });
+    if (held.length) this.handlers.held?.(this.held);
   }
 }
 
