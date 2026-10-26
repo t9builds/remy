@@ -208,7 +208,7 @@ var PATHS = {
   config: join(REMY_DIR, "config.json"),
   events: join(REMY_DIR, "events.jsonl"),
   snapshot: join(REMY_DIR, "snapshot.json"),
-  queue: join(REMY_DIR, "queue.json"),
+  waitingList: join(REMY_DIR, "queue.json"),
   spawned: join(REMY_DIR, "spawned.json"),
   nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),
@@ -1646,11 +1646,11 @@ class ExtensionHost {
       return false;
     this.asks.delete(session);
     this.entries.delete(`${a.ext}\x00ask:${session}`);
-    this.deps.queueChanged();
+    this.deps.waitingListChanged();
     a.resolve(text);
     return true;
   }
-  queueEntries() {
+  waitingEntries() {
     return [...this.entries.values()].map(({ ext, ...e }) => e);
   }
   forget(ext) {
@@ -1665,7 +1665,7 @@ class ExtensionHost {
     const statePath = join5(deps.stateDir, `${ext.replace(/[^\w.-]+/g, "_")}.json`);
     const addEntry = (e) => {
       this.entries.set(`${ext}\x00${e.key}`, { ...e, ext });
-      deps.queueChanged();
+      deps.waitingListChanged();
     };
     return {
       name: ext,
@@ -1685,20 +1685,20 @@ class ExtensionHost {
         } catch (e) {
           this.asks.delete(opts.session);
           this.entries.delete(`${ext}\x00${key}`);
-          deps.queueChanged();
+          deps.waitingListChanged();
           throw e;
         }
         return answer;
       },
       spawn: (opts) => deps.spawn(opts),
       close: (session, opts) => deps.close(session, opts),
-      queue: {
+      waitingList: {
         add: addEntry,
         remove: (key) => {
           if (this.entries.delete(`${ext}\x00${key}`))
-            deps.queueChanged();
+            deps.waitingListChanged();
         },
-        text: (workspace) => deps.queueText(workspace)
+        text: (workspace) => deps.waitingListText(workspace)
       },
       coordinator: { tell: (text, meta = {}) => deps.tell(text, { kind: "extension", ...meta, extension: ext }) },
       registerCommand: (name, command) => {
@@ -2368,13 +2368,13 @@ var createFactory = (world = {}) => (remy) => {
     notify: async (run, text) => void await remy.post(text, { workspace: run.workspace, session: run.session }),
     ...world
   };
-  function syncQueue(run) {
+  function syncWaitingList(run) {
     const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
     if (run.stage === "done")
-      return remy.queue.remove(run.pr);
+      return remy.waitingList.remove(run.pr);
     if (run.stage === "held")
-      return remy.queue.add({ ...base, rank: run.urgent ? 0 : 2, why: run.reason ?? "waits for you", action: `decide, then \`remy factory retry ${run.pr}\`` });
-    remy.queue.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
+      return remy.waitingList.add({ ...base, rank: run.urgent ? 0 : 2, why: run.reason ?? "waits for you", action: `decide, then \`remy factory retry ${run.pr}\`` });
+    remy.waitingList.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
   }
   let ticking = false;
   remy.on("tick", async () => {
@@ -2418,7 +2418,7 @@ var createFactory = (world = {}) => (remy) => {
         if (!f || !isActive(run) && Date.now() - run.since > KEEP_MS2) {
           if (!isActive(run) || !f)
             delete runs[url];
-          remy.queue.remove(url);
+          remy.waitingList.remove(url);
           continue;
         }
         try {
@@ -2426,7 +2426,7 @@ var createFactory = (world = {}) => (remy) => {
         } catch (e) {
           remy.log("factory step failed", url, e?.message ?? e);
         }
-        syncQueue(run);
+        syncWaitingList(run);
       }
     } finally {
       save();
@@ -2450,7 +2450,7 @@ var createFactory = (world = {}) => (remy) => {
   for (const run of Object.values(runs)) {
     if (run.stage === "asking" && run.ask && run.ask.answer === undefined)
       ask(run, run.ask.question);
-    syncQueue(run);
+    syncWaitingList(run);
   }
 };
 
@@ -2504,7 +2504,7 @@ function mergedCleanup(remy) {
 
 // src/extensions/queue-command.ts
 function queueCommand(remy) {
-  remy.registerCommand("queue", { description: "What waits on you, most urgent first", run: (_, ctx) => remy.queue.text(ctx.workspace) });
+  remy.registerCommand("queue", { description: "What waits on you, most urgent first", run: (_, ctx) => remy.waitingList.text(ctx.workspace) });
 }
 
 // src/extensions/slack-tasks.ts
@@ -2833,7 +2833,7 @@ function itemOf(s) {
     return { rank: 4, why: "stopped without a PR", action: "check what it did" };
   return;
 }
-function queueOf(snapshot) {
+function waitingListOf(snapshot) {
   const items = [];
   for (const s of snapshot.sessions) {
     const it = itemOf(s);
@@ -2842,7 +2842,7 @@ function queueOf(snapshot) {
   }
   return items.sort((a, b) => a.rank - b.rank || a.since - b.since).map(({ since, ...it }) => it);
 }
-function formatQueue(items, sessions = [], plain = false) {
+function formatWaitingList(items, sessions = [], plain = false) {
   const busy = sessions.filter((s) => s.status === "busy").length;
   const tail = busy ? `
 _${busy} more working on their own_` : "";
@@ -3219,7 +3219,7 @@ function tailLines(path, onLine, everyMs = 2000) {
 }
 
 // src/daemon/waiting-list.ts
-async function showQueue(m, prev, text, log) {
+async function showWaitingList(m, prev, text, log) {
   if (prev?.text === text)
     return prev;
   if (prev) {
@@ -3231,14 +3231,14 @@ async function showQueue(m, prev, text, log) {
       if (/message is not modified/i.test(why))
         return { id: prev.id, text };
       if (!MESSAGE_GONE.test(why)) {
-        log("queue edit failed, will retry", why);
+        log("waiting list edit failed, will retry", why);
         return prev;
       }
-      log("queue message gone, posting a new one", why);
+      log("waiting list message gone, posting a new one", why);
     }
   }
   const id = await m.post(text);
-  await m.pin?.(id).catch((e) => log("queue pin failed", e?.message ?? e));
+  await m.pin?.(id).catch((e) => log("waiting list pin failed", e?.message ?? e));
   return { id, text };
 }
 var MESSAGE_GONE = /message to edit not found|message can't be edited|message_not_found|cant_update_message/i;
@@ -3253,7 +3253,7 @@ function coalesce(run) {
     }, ms));
   };
 }
-function composeQueue(snap, workspace, entries, workspaceOf) {
+function composeWaitingList(snap, workspace, entries, workspaceOf) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s) === workspace);
   const claimed = new Set(entries.flatMap((e) => e.session ? [e.session] : []));
   const fromExtensions = entries.flatMap((e) => {
@@ -3265,9 +3265,9 @@ function composeQueue(snap, workspace, entries, workspaceOf) {
       return [];
     return [{ session: e.label, sessionId: `extension:${e.key}`, cwd: "", rank: e.rank, why: e.why, action: e.action, pr: e.url }];
   });
-  const own = queueOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
+  const own = waitingListOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
   const items = [...own, ...fromExtensions].sort((a, b) => a.rank - b.rank);
-  return formatQueue(items, sessions);
+  return formatWaitingList(items, sessions);
 }
 
 // src/sessions/format.ts
@@ -3538,7 +3538,7 @@ async function push(kind, content, meta = {}) {
   if (kind === "user_message" && meta.workspace)
     lastActive = meta.workspace;
   if (kind === "user_message")
-    scheduleQueue(QUEUE_AFTER_USER_MS);
+    scheduleWaitingList(WAITING_LIST_AFTER_USER_MS);
   if (kind === "user_message" || kind === "task_request") {
     if (kind === "user_message" && meta.session && host.answer(meta.session, content))
       return log("answer for an extension", meta.session);
@@ -3665,12 +3665,12 @@ async function refOf(sessionId, cwd) {
 async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
-  scheduleQueue();
+  scheduleWaitingList();
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
     setTimeout(async () => {
       agentsCache.at = 0;
-      scheduleQueue();
+      scheduleWaitingList();
       const s = await sessionInfo(e.session_id);
       if (s.status && s.status !== "waiting")
         return;
@@ -3708,7 +3708,7 @@ function tailEvents() {
 async function digest() {
   try {
     const { snapshot, changes: diffed, first } = await snapshotDiff();
-    await refreshQueue(snapshot);
+    await refreshWaitingList(snapshot);
     if (first)
       return;
     const spawned = readJson(PATHS.spawned, {});
@@ -3722,28 +3722,28 @@ async function digest() {
     log("digest error", e?.message ?? e);
   }
 }
-var queueRun = Promise.resolve();
-var QUEUE_AFTER_EVENT_MS = 1e4;
-var QUEUE_AFTER_USER_MS = 30000;
-var queueAfter = coalesce(() => void refreshQueue());
-function scheduleQueue(ms = QUEUE_AFTER_EVENT_MS) {
-  queueAfter(ms);
+var waitingListRun = Promise.resolve();
+var WAITING_LIST_AFTER_EVENT_MS = 1e4;
+var WAITING_LIST_AFTER_USER_MS = 30000;
+var waitingListAfter = coalesce(() => void refreshWaitingList());
+function scheduleWaitingList(ms = WAITING_LIST_AFTER_EVENT_MS) {
+  waitingListAfter(ms);
 }
-var queueText = (snap, workspace) => composeQueue(snap, workspace, host.queueEntries(), (s) => workspaceOf(s.cwd, s.repo));
-function refreshQueue(snapshot) {
-  queueRun = queueRun.then(async () => {
+var waitingListText = (snap, workspace) => composeWaitingList(snap, workspace, host.waitingEntries(), (s) => workspaceOf(s.cwd, s.repo));
+function refreshWaitingList(snapshot) {
+  waitingListRun = waitingListRun.then(async () => {
     try {
       const snap = snapshot ?? await takeSnapshot();
-      const state = readJson(PATHS.queue, {});
+      const state = readJson(PATHS.waitingList, {});
       for (const [name, b] of bridges) {
-        state[name] = await showQueue(b, state[name], queueText(snap, name), (...a) => log(...a, name));
+        state[name] = await showWaitingList(b, state[name], waitingListText(snap, name), (...a) => log(...a, name));
       }
-      writeJson(PATHS.queue, state);
+      writeJson(PATHS.waitingList, state);
     } catch (e) {
-      log("queue error", e?.message ?? e);
+      log("waiting list error", e?.message ?? e);
     }
   });
-  return queueRun;
+  return waitingListRun;
 }
 async function greeting() {
   await ready;
@@ -3794,7 +3794,7 @@ async function observe() {
     await emit(snapshotEvents(prev, next, viewWorkspace));
     if (prev)
       await host.emit("tick", { at: next.takenAt });
-    await refreshQueue(next);
+    await refreshWaitingList(next);
   } catch (e) {
     log("observe error", e?.message ?? e);
   } finally {
@@ -3824,8 +3824,8 @@ function newHost() {
     tell: (text, meta) => tell(meta.kind ?? "extension", text, meta),
     sessions: () => (lastSnapshot?.sessions ?? []).map((s) => sessionRef(s, viewWorkspace(s))),
     config,
-    queueChanged: () => scheduleQueue(1000),
-    queueText: async (workspace) => queueText(await takeSnapshot(), workspace),
+    waitingListChanged: () => scheduleWaitingList(1000),
+    waitingListText: async (workspace) => waitingListText(await takeSnapshot(), workspace),
     log,
     stateDir: join10(REMY_DIR, "state")
   });
@@ -4274,8 +4274,8 @@ async function status2(args) {
 async function queue(args) {
   const { values } = parse(args, { json: { type: "boolean" } });
   const s = await takeSnapshot();
-  const items = queueOf(s);
-  console.log(values.json ? JSON.stringify(items, null, 2) : formatQueue(items, s.sessions, true));
+  const items = waitingListOf(s);
+  console.log(values.json ? JSON.stringify(items, null, 2) : formatWaitingList(items, s.sessions, true));
 }
 async function changes() {
   const { changes, first } = await snapshotDiff();

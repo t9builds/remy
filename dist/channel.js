@@ -15347,7 +15347,7 @@ var PATHS = {
   config: join(REMY_DIR, "config.json"),
   events: join(REMY_DIR, "events.jsonl"),
   snapshot: join(REMY_DIR, "snapshot.json"),
-  queue: join(REMY_DIR, "queue.json"),
+  waitingList: join(REMY_DIR, "queue.json"),
   spawned: join(REMY_DIR, "spawned.json"),
   nicknames: join(REMY_DIR, "nicknames.json"),
   mcpConfig: join(REMY_DIR, "mcp.json"),

@@ -96,12 +96,12 @@ export const createFactory = (world: Partial<Env> = {}) => (remy: Remy) => {
   };
 
   /** The waiting list: a run in progress keeps its session off it; a held one is a judgment call on it. */
-  function syncQueue(run: Run) {
+  function syncWaitingList(run: Run) {
     const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
-    if (run.stage === "done") return remy.queue.remove(run.pr);
+    if (run.stage === "done") return remy.waitingList.remove(run.pr);
     if (run.stage === "held")
-      return remy.queue.add({ ...base, rank: run.urgent ? 0 : 2, why: run.reason ?? "waits for you", action: `decide, then \`remy factory retry ${run.pr}\`` });
-    remy.queue.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
+      return remy.waitingList.add({ ...base, rank: run.urgent ? 0 : 2, why: run.reason ?? "waits for you", action: `decide, then \`remy factory retry ${run.pr}\`` });
+    remy.waitingList.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
   }
 
   let ticking = false;
@@ -129,7 +129,7 @@ export const createFactory = (world: Partial<Env> = {}) => (remy: Remy) => {
         const f = await factoryAt(run.repoDir);
         if (!f || (!isActive(run) && Date.now() - run.since > KEEP_MS)) {
           if (!isActive(run) || !f) delete runs[url];
-          remy.queue.remove(url);
+          remy.waitingList.remove(url);
           continue;
         }
         try {
@@ -137,7 +137,7 @@ export const createFactory = (world: Partial<Env> = {}) => (remy: Remy) => {
         } catch (e: any) {
           remy.log("factory step failed", url, e?.message ?? e);
         }
-        syncQueue(run);
+        syncWaitingList(run);
       }
     } finally {
       save();
@@ -164,6 +164,6 @@ export const createFactory = (world: Partial<Env> = {}) => (remy: Remy) => {
   // Questions asked before a restart wait for their answers again.
   for (const run of Object.values(runs)) {
     if (run.stage === "asking" && run.ask && run.ask.answer === undefined) ask(run, run.ask.question);
-    syncQueue(run);
+    syncWaitingList(run);
   }
 };

@@ -348,11 +348,11 @@ export default (remy: Remy) => {
 | `post(text, { workspace, session, thread })` | Post to you |
 | `ask(question, { session })` | Ask you and wait: it's on the waiting list until you reply in its thread, and the reply goes to the extension, not the coordinator |
 | `spawn({ repo, task })`, `close(session)` | Start an agent, close a session |
-| `queue.add(entry)`, `queue.remove(key)`, `queue.text(workspace)` | Put something on the waiting list, take it off, read the list |
+| `waitingList.add(entry)`, `waitingList.remove(key)`, `waitingList.text(workspace)` | Put something on the waiting list, take it off, read the list |
 | `coordinator.tell(text)` | Hand something to the coordinator for a turn |
 | `registerCommand(name, { description, run })` | Answer `/name` in any workspace, without the coordinator |
 | `state.get` / `state.set` | A small JSON store of the extension's own (`~/.remy/state/`) |
-| `sessions()`, `log(…)` | Sessions as last seen; write to the daemon's log |
+| `sessions()`, `trustedRepos()`, `log(…)` | Sessions as last seen; the repos in `extensions.repos` that were found; write to the daemon's log |
 
 Extensions load from three places:
 

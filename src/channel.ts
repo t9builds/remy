@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
  * remy: the coordinator's channel. Runs only inside the coordinator session (loaded by `remy start`).
- * A thin client of the daemon (daemon.ts), which owns Slack, Telegram, session events, the waiting list and the
- * notices it posts itself: it connects over the link (link.ts), pushes the daemon's events into the session, forwards
+ * A thin client of the daemon (daemon/daemon.ts), which owns Slack, Telegram, session events, the waiting list and the
+ * notices it posts itself: it connects over the link (link/), pushes the daemon's events into the session, forwards
  * Claude's post / update calls, and relays the coordinator's own permission prompts both ways. When the daemon goes away it reconnects;
  * what the daemon pushed meanwhile arrives then.
  */

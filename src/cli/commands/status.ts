@@ -3,7 +3,7 @@ import { formatSession, formatTable } from "../../sessions/format";
 import { findSession, takeSnapshot } from "../../sessions/snapshot";
 import { formatMerged } from "../../sessions/close";
 import type { Spawned } from "../../sessions/spawned";
-import { formatQueue, queueOf } from "../../sessions/waiting-list";
+import { formatWaitingList, waitingListOf } from "../../sessions/waiting-list";
 import { readJson } from "../../shared/json-file";
 import { PATHS } from "../../shared/paths";
 import { parse } from "../args";
@@ -31,8 +31,8 @@ export async function status(args: string[]) {
 export async function queue(args: string[]) {
   const { values } = parse(args, { json: { type: "boolean" } });
   const s = await takeSnapshot();
-  const items = queueOf(s);
-  console.log(values.json ? JSON.stringify(items, null, 2) : formatQueue(items, s.sessions, true));
+  const items = waitingListOf(s);
+  console.log(values.json ? JSON.stringify(items, null, 2) : formatWaitingList(items, s.sessions, true));
 }
 
 export async function changes() {
