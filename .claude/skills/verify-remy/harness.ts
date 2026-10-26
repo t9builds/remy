@@ -140,47 +140,80 @@ async function until<T>(seconds: number, ok: () => Promise<T | undefined> | T | 
   return undefined;
 }
 
-async function launch(args: string[]) {
-  mkdirSync(ROOT, { recursive: true });
-  // Take the lock before any network call, so two launches can't both pass a check. It names this launch's pid
-  // too: until the daemon is up, that is the only sign the holder is alive.
-  const mine = JSON.stringify({ run: RUN, pid: process.pid });
+/**
+ * Take the verification lock, or die. It names this launch's pid too: until the daemon is up, that is the only sign
+ * the holder is alive. The lock is linked into place already written, so no one sees it empty; one that can't be
+ * read is held, not dead.
+ */
+function takeLock() {
+  const tmp = `${LOCK}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ run: RUN, pid: process.pid }));
   const take = () => {
     try {
-      writeFileSync(LOCK, mine, { flag: "wx" });
+      linkSync(tmp, LOCK);
       return true;
     } catch (e: any) {
       if (e.code !== "EEXIST") throw e;
       return false;
     }
   };
-  if (!take()) {
-    const raw = existsSync(LOCK) ? readFileSync(LOCK, "utf8") : "";
+  const read = (path: string) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch (e: any) {
+      if (e.code !== "ENOENT") throw e;
+      return undefined; // released in between
+    }
+  };
+  const busy = () =>
+    die(
+      `another verification runs (${readLock()?.run ?? "unknown"}); one at a time, since every run reads the same DM`,
+    );
+  // die() exits without unwinding, so the tmp file goes with the process.
+  process.once("exit", () => rmSync(tmp, { force: true }));
+  // A few tries: each ends in taking the lock, dying, or finding it released or taken over meanwhile.
+  for (let i = 0; i < 3; i++) {
+    if (take()) return;
+    const raw = read(LOCK);
+    if (raw === undefined) continue;
     const held = readLock();
-    const busy = () =>
-      die(`another verification runs (${held?.run}); one at a time, since every run reads the same DM`);
-    const heldRun = held && join(held.run, "run.json");
-    const daemon = heldRun && existsSync(heldRun) ? JSON.parse(readFileSync(heldRun, "utf8")).daemonPid : undefined;
-    if (held && (alive(held.pid) || alive(daemon))) busy();
+    if (!held) die(`${LOCK} can't be read: remove it if no verification runs`);
+    let daemon: number | undefined;
+    try {
+      daemon = JSON.parse(readFileSync(join(held.run, "run.json"), "utf8")).daemonPid;
+    } catch {} // no run.json yet, or half written: the launcher pid decides
+    if (alive(held.pid) || alive(daemon)) {
+      if (held.run === RUN) die("this checkout already has a run: `harness.ts cleanup` first");
+      busy();
+    }
     // A dead holder's lock: move it aside under a name only this launch uses, so a rival that saw the same dead
     // lock can't delete the one we are about to take.
     const aside = `${LOCK}.${process.pid}`;
     try {
       renameSync(LOCK, aside);
     } catch (e: any) {
-      if (e.code !== "ENOENT") throw e;
+      if (e.code === "ENOENT") continue;
+      throw e;
     }
-    if (existsSync(aside) && readFileSync(aside, "utf8") !== raw) {
-      // The rival took it first: what we moved is its live lock, so put it back.
-      try {
-        linkSync(aside, LOCK);
-      } catch {}
+    if (read(aside) === raw) {
       rmSync(aside, { force: true });
-      busy();
+      continue;
     }
+    // The rival took it first: what we moved is its live lock, so put it back. Best-effort: a third launch
+    // arriving between the rename and the link can take the lock, which needs three concurrent launches.
+    try {
+      linkSync(aside, LOCK);
+    } catch {}
     rmSync(aside, { force: true });
-    if (!take()) busy();
+    busy();
   }
+  busy();
+}
+
+async function launch(args: string[]) {
+  mkdirSync(ROOT, { recursive: true });
+  // Take the lock before any network call, so two launches can't both pass a check.
+  takeLock();
   // A launch that dies before its daemon starts gives the lock back.
   process.once("exit", () => {
     try {
