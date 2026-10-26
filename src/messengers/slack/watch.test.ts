@@ -36,12 +36,13 @@ function fakeSlack() {
   };
 }
 
-function watcher(slack: ReturnType<typeof fakeSlack>, tracked = new Set<string>()) {
+function watcher(slack: ReturnType<typeof fakeSlack>, tracked = new Set<string>(), trustedApps?: string[]) {
   const state: WatchState = { channels: {}, handled: {} };
   const fired: Trigger[] = [];
   const w = new ChannelWatcher(slack.api as any, {
     me: ME,
     bot: BOT,
+    trustedApps,
     emoji: "mouse",
     state,
     isTracked: (_c, root) => tracked.has(root),
@@ -92,6 +93,23 @@ test("only the owner's mentions count", async () => {
   s.say(ME, "no mention here");
   await w.scan();
   expect(fired).toEqual([]);
+});
+
+test("a mention posted through an app counts only when the app is in trustedApps", async () => {
+  for (const [trusted, count] of [
+    [undefined, 0],
+    [["AVERIFY"], 1],
+  ] as const) {
+    const s = fakeSlack();
+    const { w, fired } = watcher(s, new Set(), trusted && [...trusted]);
+    await w.scan();
+    const bug = s.say("UALEX", "crash on save");
+    const ask = s.reply(bug, ME, `<@${BOT}> fix this`);
+    ask.bot_id = "BAPP";
+    ask.app_id = "AVERIFY";
+    await w.scan();
+    expect(fired.length).toBe(count);
+  }
 });
 
 test("mentions in a thread that already has a task are left to Remy's thread reader", async () => {

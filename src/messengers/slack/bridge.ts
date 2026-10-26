@@ -22,12 +22,12 @@ import {
   permissionText,
   type Sink,
 } from "../messenger";
-import { Slack, type SlackMessage, socketMode } from "./client";
+import { fromUser, Slack, SlackError, type SlackMessage, socketMode } from "./client";
 import { formatTranscript, requestText, type SlackTask, taskEvent, taskId } from "./task";
 import { ChannelWatcher, type Trigger, type WatchState } from "./watch";
 
 /** A thread Remy follows, keyed by its root ts. `channel` is set for channel threads; DM threads leave it out. */
-type ThreadInfo = {
+export type ThreadInfo = {
   session?: string;
   expectReply: boolean;
   /** The user has replied since the last question in this thread. */
@@ -99,7 +99,8 @@ export class SlackBridge implements Messenger {
     const ts = await this.slack.post(channel ?? (await this.ensureDm()), text, thread?.ts);
     const root = thread?.ts ?? ts;
     const prev = this.state.threads[root];
-    if (opts.session || opts.expect_reply || prev) {
+    // A reply in a DM thread, such as an answer under the user's message, is a conversation the user may go on in.
+    if (opts.session || opts.expect_reply || prev || (thread && !channel)) {
       this.state.threads[root] = {
         ...prev,
         channel: channel ?? prev?.channel,
@@ -149,15 +150,13 @@ export class SlackBridge implements Messenger {
   /** The agent whose question in the DM is still open, for a DM that isn't a reply in its thread. */
   private awaiting() {
     const open = Object.values(this.state.threads)
-      .filter(
-        (t) => t.session && !t.channel && t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS,
-      )
+      .filter((t) => t.session && !t.channel && isOpen(t))
       .sort((a, b) => b.postedAt - a.postedAt);
     return open[0]?.session;
   }
 
   private async handleInbound(m: SlackMessage, threadRoot?: string, channel?: string) {
-    if (m.user !== this.settings.userId || m.bot_id) return; // gate on sender, never on the channel
+    if (!fromUser(m, this.settings.userId, this.settings.trustedApps)) return; // gate on sender, never on the channel
     if (m.subtype && m.subtype !== "thread_broadcast") return;
     this.lastInboundAt = Date.now();
     const v = parseVerdict(m.text);
@@ -221,16 +220,19 @@ export class SlackBridge implements Messenger {
       this.state.lastTs = m.ts;
       await this.handleInbound(m);
     }
-    // Thread replies don't show up in history; check the threads that wait for an answer.
+    // Thread replies don't show up in history; check the DM threads Remy posted in.
     if (this.tick++ % 2 === 0) {
-      const waiting = Object.entries(this.state.threads)
-        .filter(([, t]) => t.expectReply && !t.channel)
-        .sort(([, a], [, b]) => b.postedAt - a.postedAt)
-        .slice(0, 5);
-      for (const [root, t] of waiting) {
-        for (const m of await this.slack.replies(channel, root, t.lastSeen)) {
-          t.lastSeen = m.ts;
-          await this.handleInbound(m, root);
+      for (const [root, t] of dmThreadsToRead(this.state.threads)) {
+        try {
+          for (const m of await this.slack.replies(channel, root, t.lastSeen)) {
+            t.lastSeen = m.ts;
+            await this.handleInbound(m, root);
+          }
+        } catch (e) {
+          // The user deleted the root message: that thread is gone, the others still need reading.
+          if (!(e instanceof SlackError && e.code === "thread_not_found")) throw e;
+          this.log("thread gone", root);
+          delete this.state.threads[root];
         }
       }
     }
@@ -268,6 +270,7 @@ export class SlackBridge implements Messenger {
     this.state.watch ??= { channels: {}, handled: {} };
     this.watcher = new ChannelWatcher(this.slack, {
       me: this.settings.userId,
+      trustedApps: this.settings.trustedApps,
       bot: this.botUserId,
       emoji: this.triggerEmoji,
       state: this.state.watch,
@@ -379,6 +382,22 @@ export class SlackBridge implements Messenger {
       default_repo: task.defaultRepo ?? "",
     });
   }
+}
+
+/** Whether a thread's question is still open: it expects a reply, none came, and it isn't stale. */
+function isOpen(t: ThreadInfo) {
+  return t.expectReply && !t.answered && Date.now() - t.postedAt < AWAIT_ANSWER_MS;
+}
+
+/**
+ * The DM threads whose replies a poll reads: those with a question still open first, then any Remy posted in,
+ * newest first. A handful, since each costs a Slack read.
+ */
+export function dmThreadsToRead(threads: Record<string, ThreadInfo>, limit = 5) {
+  return Object.entries(threads)
+    .filter(([, t]) => !t.channel)
+    .sort(([, a], [, b]) => Number(isOpen(b)) - Number(isOpen(a)) || b.postedAt - a.postedAt)
+    .slice(0, limit);
 }
 
 const DM_SCOPES = ["chat:write", "im:history", "im:read", "im:write"];

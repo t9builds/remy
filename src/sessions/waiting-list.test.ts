@@ -31,6 +31,12 @@ const pr = (over: Partial<Pr> = {}): Pr => ({
 });
 const stop = (text: string, ts = 1) => ({ event: "Stop", ts, text });
 
+test("questionOf ignores sign-offs that follow a question", () => {
+  expect(questionOf("All green. Did that help? If you need anything else, I'm here.")).toBeUndefined();
+  expect(questionOf("Merged. Anything else? When you're ready, I can open the next PR.")).toBeUndefined();
+  expect(questionOf("Fixed the flaky test. Why was it flaky? After you pulled main it passes.")).toBeUndefined();
+});
+
 test("questionOf finds the last line that asks something", () => {
   expect(questionOf("Done.\n\n**Which table should I use?**\nI can also do both.")).toBe("Which table should I use?");
   expect(questionOf("All tests pass.")).toBeUndefined();
@@ -85,6 +91,31 @@ test("formats one line per item and counts the busy ones", () => {
     '*Waiting on you (1)*\n🟠 *<https://github.com/o/r/pull/7|risotto>* · CI failing: unit → reply "fix CI"\n      _fix login timeout_\n_1 more working on their own_',
   );
   expect(formatWaitingList([], [busy])).toBe("✅ *Nothing waits on you.*\n_1 more working on their own_");
+});
+
+test("questionOf finds a question that goes on to tell the user what happens next", () => {
+  expect(
+    questionOf("What's your favourite colour? Once you tell me, I'll write it to `colour.txt` in the repo root."),
+  ).toBe("What's your favourite colour?");
+  expect(questionOf("Done.\nShould I also update the docs? If you say yes, I'll open a second PR.")).toBe(
+    "Should I also update the docs?",
+  );
+  // Only on the turn's last line, and only when the rest speaks to the user.
+  expect(questionOf("Is the 5? Not sure, but tests pass.")).toBeUndefined();
+  expect(questionOf("Which one? Let me know and I'll go on.")).toBe("Which one?");
+  expect(questionOf("Which one? Once you pick, I'll go on.\nAll tests pass.")).toBeUndefined();
+  expect(questionOf("Opened https://x.dev/a?b=1 for you. Done.")).toBeUndefined();
+});
+
+test("a question followed by text that doesn't address the user isn't a question", () => {
+  expect(questionOf("Is the migration safe? Yes, and you can merge it.")).toBeUndefined();
+  expect(questionOf("Is it 5? Not sure, but your tests pass.")).toBeUndefined();
+  expect(questionOf("Done. Did that help? I am here if you need more.")).toBeUndefined();
+});
+
+test("a question followed by what happens next shows without the text before it", () => {
+  expect(questionOf("Done. Which one? Let me know.")).toBe("Which one?");
+  expect(questionOf("Opened `a.b`. Is it ok? Fine. Which one? Once you pick, I'll go on.")).toBe("Which one?");
 });
 
 test("questionOf skips question marks in URLs and code, and keeps the wording", () => {

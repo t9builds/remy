@@ -63,7 +63,9 @@ and whether `dist/` matches the source. An installed plugin runs the committed `
 run `bun run build` and commit `dist/` with it. `bun run format` fixes formatting and import order.
 
 Cover changed logic with a test beside it; pure functions with a fake world (see `extensions/factory/pipeline.test.ts`)
-are the cheapest. Report what you ran, and what you couldn't exercise against real Slack, Telegram, gh or Claude Code.
+are the cheapest. To see a change work for real, the `verify-remy` skill (`.claude/skills/verify-remy/`) runs this
+checkout's daemon and coordinator against a test Slack workspace and drives them as the user. Report what you ran, and
+what you couldn't exercise against real Slack, Telegram, gh or Claude Code.
 
 ## Documentation
 

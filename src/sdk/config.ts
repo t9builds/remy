@@ -26,6 +26,11 @@ export type SlackSettings = {
   transport: Transport;
   /** Default repo per Slack channel for tasks started from a thread, e.g. { "bugs": "api" }. Repo as for `remy spawn --repo`. */
   channelRepos?: Record<string, string>;
+  /**
+   * Slack app IDs (A…) whose posts as you count as yours. Slack marks a message an app posts with your token as the
+   * app's, and Remy ignores those unless the app is listed here; verify-remy drives Slack through its own app this way.
+   */
+  trustedApps?: string[];
 };
 
 /** Your private chat with your own Telegram bot. A bot serves one remy: Telegram hands its updates to a single reader. */

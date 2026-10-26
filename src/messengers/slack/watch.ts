@@ -7,7 +7,7 @@
  * and fetches replies only for threads whose latest_reply moved. Reactions on replies come from reactions.list.
  * The first scan of a channel only records where things stand, so nothing from before the start triggers.
  */
-import type { Slack, SlackMessage } from "./client";
+import { fromUser, type Slack, type SlackMessage } from "./client";
 
 export type WatchState = {
   /** Per channel: newest top-level ts seen, and per thread root the last reply ts read. */
@@ -37,6 +37,7 @@ export class ChannelWatcher {
     private slack: WatchSlack,
     private opts: {
       me: string;
+      trustedApps?: string[];
       bot: string;
       emoji: string;
       state: WatchState;
@@ -111,7 +112,7 @@ export class ChannelWatcher {
   }
 
   private async consider(ch: { id: string; name: string }, m: SlackMessage, root: string) {
-    if (m.user !== this.opts.me || m.bot_id) return;
+    if (!fromUser(m, this.opts.me, this.opts.trustedApps)) return;
     if (this.opts.isTracked(ch.id, root)) return;
     if (m.text?.includes(`<@${this.opts.bot}`)) await this.fire(ch, m, root, "mention");
   }
