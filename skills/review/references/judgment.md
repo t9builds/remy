@@ -41,21 +41,38 @@ Everything else is **decided**: a later PR can change it, and the record shows t
 
 ## Record
 
-The PR comment, posted after the fixes are pushed:
+The PR comment, posted after the fixes are pushed. A person skims it in seconds: the first two lines tell them whether they have anything to do, and the table puts what needs them first.
 
 ```markdown
 ### Review (round {round}): {pass|fixed|fail}
 
+{the headline for the verdict, below}
+
 {the intent, one line}
 
-| | Finding | Lenses | Outcome |
+| | Severity | Finding | Outcome |
 |---|---|---|---|
-| fix | {title} (`path:line`) | correctness, proof | fixed in {sha} |
-| decided | {title} | design | {what you chose, and why} |
-| person | {title} | correctness | {what is critical, and what to decide} |
-| dismissed | {title} | correctness | {why} |
+| 🛑 needs you | critical | {title} (`path:line`) | {what is critical, and what to decide} |
+| 🔧 fixed | warning | {title} (`path:line`) | fixed in {sha} |
+| 📝 decided | warning | {title} (`path:line`) | {what you chose, and why} |
 
-Checks: {what ran, and the result}
+<details><summary>Dismissed ({count})</summary>
+
+| Finding | Why |
+|---|---|
+| {title} | {why} |
+
+</details>
+
+Checks:
+- ✅ {command}: {result}
+- ❌ {command}: {result}
 ```
 
-Leave out an empty bucket. A review with no findings says so in one line, with the checks.
+The headline is one bold line, fixed by the verdict:
+
+- `pass`: **✅ Good to merge.** Nothing needs you{, and {n} calls I made are below}.
+- `fixed`: **🔧 Fixed {n} findings; the next round checks the fixes.** Nothing needs you yet.
+- `fail`: **🛑 Needs you:** {the critical problem, one line}.
+
+Severity is your own after the trace, not the reviewer's: `critical` (wrong behavior, data loss, a security hole, a broken check or written rule), `warning` (works but will hurt), `nit`. Rows go **needs you**, then **fixed**, then **decided**, most severe first within each. Keep each cell to a sentence; the `path:line` carries the detail. Leave out an empty bucket and an empty table. A review with no findings is the headline and the checks.
