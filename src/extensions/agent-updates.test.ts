@@ -52,6 +52,13 @@ test("the PR an agent opens goes to its thread", async () => {
   ]);
 });
 
+test("a PR title can't ping a channel", async () => {
+  const { posts, raise } = setup();
+  const pr = { number: 1, url: "https://x/1", title: "Fix <!here> and <@U1>", draft: false } as any;
+  await raise("pr.opened", { session: ref(), pr });
+  expect(posts[0]!.text).toBe("*flan* opened #1 Fix <\u200b!here> and <\u200b@U1>\nhttps://x/1");
+});
+
 test("your own sessions and the factory's step agents stay quiet", async () => {
   const { posts, raise } = setup();
   await raise("session.stopped", { session: ref({ spawned: false }), last: "done" });

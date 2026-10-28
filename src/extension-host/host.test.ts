@@ -33,6 +33,12 @@ function host(over: Partial<HostDeps> = {}) {
 }
 
 describe("extension host", () => {
+  test("post passes expectReply on as expect_reply, with the thread", async () => {
+    const { h, posts } = host();
+    await h.load("asker", "test", (remy) => void remy.post("q?", { session: "flan", expectReply: true }));
+    expect(posts).toEqual([{ text: "q?", opts: { session: "flan", expect_reply: true } }]);
+  });
+
   test("hands events to every handler; one failing doesn't stop the others", async () => {
     const { h, logs } = host();
     const got: string[] = [];

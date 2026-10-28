@@ -19,6 +19,7 @@ import {
   levelOf,
   type Step,
 } from "../../sdk/factory";
+import { defang } from "../../shared/notices";
 
 /** What an agent reported with `remy report`, or the user's `remy factory retry`. */
 export type Report = {
@@ -286,7 +287,7 @@ function verdictText(run: Pick<Run, "number" | "title" | "pr">, step: string, r:
       : r.verdict === "fixed"
         ? `🔧 ${step} fixed what it found`
         : `🛑 ${step} failed; the factory holds it`;
-  return `${what} on *#${run.number} ${run.title}*${r.summary ? `: ${r.summary}` : ""}\n${run.pr}`;
+  return `${what} on *#${run.number} ${defang(run.title)}*${r.summary ? `: ${defang(r.summary)}` : ""}\n${run.pr}`;
 }
 
 async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promise<boolean> {

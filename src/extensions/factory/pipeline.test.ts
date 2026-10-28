@@ -171,6 +171,15 @@ describe("the ADR-0004 pipeline", () => {
     expect(w.asked).toEqual([]);
   });
 
+  test("a verdict summary can't ping a channel", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env);
+    w.report("pass", "ask <!channel> and <@U123>");
+    await go(run, env);
+    expect(w.notices[0]).toBe(`✅ review passed on *#7 Fix login*: ask <\u200b!channel> and <\u200b@U123>\n${URL}`);
+  });
+
   test("fixes get a fresh agent once CI is green on the new head, up to maxRounds", async () => {
     const { w, env } = world();
     const run = newRun();

@@ -587,10 +587,36 @@ async function importExtension(path) {
 // src/extension-host/load.ts
 import { join as join7 } from "path";
 
+// src/shared/notices.ts
+var defang = (text) => text.replace(/<(?=[!@])/g, "<\u200B");
+var noticeWorthy = (c) => c.what === "merged" || c.what === "ended" || c.what === "pr_state" && /\u2192 #\d+ merged/.test(c.detail);
+var repoName = (repo) => repo?.split("/").pop();
+var link = (url, label) => url ? `<${url}|${label}>` : label;
+function cleanupNote(detail) {
+  const cleanup = detail.replace(/^PR #\d+ merged;\s*/, "");
+  if (cleanup.startsWith("stopped; worktree kept"))
+    return " \xB7 worktree kept: it has uncommitted or unpushed work";
+  if (cleanup.startsWith("not removed"))
+    return ` \xB7 couldn't close the session ${cleanup.replace(/^not removed\s*/, "")}`;
+  return "";
+}
+function line(c) {
+  const who = [`*${c.session}*`, repoName(c.repo)].filter(Boolean).join(" \xB7 ");
+  if (c.what === "ended")
+    return `\u23F9\uFE0F ${who} \xB7 ended \xB7 ${c.pr ? link(c.pr, c.detail) : c.detail}`;
+  const number = /#(\d+)/.exec(c.what === "merged" ? c.detail : c.detail.split("\u2192").pop())?.[1];
+  const merged = `${who} \xB7 ${link(c.pr, number ? `PR #${number}` : "PR")} merged`;
+  return `\u2705 ${merged}${c.what === "merged" ? cleanupNote(c.detail) : ""}`;
+}
+function formatNotice(changes) {
+  const lines = changes.filter(noticeWorthy).map(line);
+  return lines.length ? lines.join(`
+`) : undefined;
+}
+
 // src/extensions/agent-updates.ts
 var MAX_LAST = 3000;
 var reportsInThread = (s) => s.spawned && !s.role;
-var defang = (text) => text.replace(/<(?=[!@])/g, "<\u200B");
 function turnText(name, last, question) {
   const said = last?.trim();
   if (!said)
@@ -630,7 +656,7 @@ ${last}`, {
   remy.on("pr.opened", async ({ session, pr }) => {
     if (!reportsInThread(session))
       return;
-    await remy.post(`*${session.name}* opened #${pr.number} ${pr.title}${pr.draft ? " (draft)" : ""}
+    await remy.post(`*${session.name}* opened #${pr.number} ${defang(pr.title)}${pr.draft ? " (draft)" : ""}
 ${pr.url}`, {
       session: session.name
     });
@@ -1066,7 +1092,7 @@ async function mergedByHand(run, f, env) {
 }
 function verdictText(run, step, r) {
   const what = r.verdict === "pass" ? `\u2705 ${step} passed` : r.verdict === "fixed" ? `\uD83D\uDD27 ${step} fixed what it found` : `\uD83D\uDED1 ${step} failed; the factory holds it`;
-  return `${what} on *#${run.number} ${run.title}*${r.summary ? `: ${r.summary}` : ""}
+  return `${what} on *#${run.number} ${defang(run.title)}*${r.summary ? `: ${defang(r.summary)}` : ""}
 ${run.pr}`;
 }
 async function agentStep(run, step, f, env) {
@@ -1423,32 +1449,6 @@ var createFactory = (world = {}) => (remy) => {
     syncWaitingList(run);
   }
 };
-
-// src/shared/notices.ts
-var noticeWorthy = (c) => c.what === "merged" || c.what === "ended" || c.what === "pr_state" && /\u2192 #\d+ merged/.test(c.detail);
-var repoName = (repo) => repo?.split("/").pop();
-var link = (url, label) => url ? `<${url}|${label}>` : label;
-function cleanupNote(detail) {
-  const cleanup = detail.replace(/^PR #\d+ merged;\s*/, "");
-  if (cleanup.startsWith("stopped; worktree kept"))
-    return " \xB7 worktree kept: it has uncommitted or unpushed work";
-  if (cleanup.startsWith("not removed"))
-    return ` \xB7 couldn't close the session ${cleanup.replace(/^not removed\s*/, "")}`;
-  return "";
-}
-function line(c) {
-  const who = [`*${c.session}*`, repoName(c.repo)].filter(Boolean).join(" \xB7 ");
-  if (c.what === "ended")
-    return `\u23F9\uFE0F ${who} \xB7 ended \xB7 ${c.pr ? link(c.pr, c.detail) : c.detail}`;
-  const number = /#(\d+)/.exec(c.what === "merged" ? c.detail : c.detail.split("\u2192").pop())?.[1];
-  const merged = `${who} \xB7 ${link(c.pr, number ? `PR #${number}` : "PR")} merged`;
-  return `\u2705 ${merged}${c.what === "merged" ? cleanupNote(c.detail) : ""}`;
-}
-function formatNotice(changes) {
-  const lines = changes.filter(noticeWorthy).map(line);
-  return lines.length ? lines.join(`
-`) : undefined;
-}
 
 // src/extensions/merged-cleanup.ts
 var shouldClose = (s) => s.spawned && s.pr?.state === "MERGED" && s.status !== "busy";

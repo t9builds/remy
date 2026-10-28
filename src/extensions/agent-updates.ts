@@ -5,14 +5,12 @@
  * report through `remy report` instead, so they stay quiet here.
  */
 import type { Remy, SessionRef } from "../sdk/extension";
+import { defang } from "../shared/notices";
 
 /** Long enough for an agent's usual summary; Slack and Telegram both cut a message well before it gets long. */
 const MAX_LAST = 3000;
 
 const reportsInThread = (s: SessionRef) => s.spawned && !s.role;
-
-/** The agent's words may come from a channel's thread: a zero-width space keeps `<!channel>` or `<@U…>` from notifying people. */
-const defang = (text: string) => text.replace(/<(?=[!@])/g, "<\u200b");
 
 /** What to post when an agent ends its turn, or undefined when it said nothing. */
 export function turnText(name: string, last: string | undefined, question: string | undefined) {
@@ -45,8 +43,11 @@ export default function agentUpdates(remy: Remy) {
   });
   remy.on("pr.opened", async ({ session, pr }) => {
     if (!reportsInThread(session)) return;
-    await remy.post(`*${session.name}* opened #${pr.number} ${pr.title}${pr.draft ? " (draft)" : ""}\n${pr.url}`, {
-      session: session.name,
-    });
+    await remy.post(
+      `*${session.name}* opened #${pr.number} ${defang(pr.title)}${pr.draft ? " (draft)" : ""}\n${pr.url}`,
+      {
+        session: session.name,
+      },
+    );
   });
 }
