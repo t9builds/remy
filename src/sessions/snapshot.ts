@@ -6,6 +6,7 @@ import { PATHS } from "../shared/paths";
 import { listAgents } from "./agents";
 import { readEvents } from "./events";
 import { gitInfo, prInfo } from "./git";
+import { GITBUTLER_WORKSPACE, sessionBranch } from "./gitbutler";
 import { aboutOf, type Nicknames } from "./nicknames";
 import { type Spawned, spawnedEntry } from "./spawned";
 
@@ -29,7 +30,8 @@ export type SessionView = {
 
 export type Snapshot = { takenAt: number; sessions: SessionView[] };
 
-const DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
+/** Branches that never head a PR: trunks, and a GitButler workspace whose session named no branch of its own. */
+const NO_PR_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk", GITBUTLER_WORKSPACE]);
 
 export async function takeSnapshot(): Promise<Snapshot> {
   const config = loadConfig();
@@ -47,8 +49,13 @@ export async function takeSnapshot(): Promise<Snapshot> {
     agents.map(async (a): Promise<SessionView> => {
       const ev = latest.get(a.sessionId);
       const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
-      const { branch, repo } = await gitInfo(cwd);
-      const pr = branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
+      const git = await gitInfo(cwd);
+      // A GitButler workspace has every session on one branch; the session's own commands say which is its.
+      const branch =
+        git.branch === GITBUTLER_WORKSPACE
+          ? ((await sessionBranch(cwd, ev?.transcript_path)) ?? git.branch)
+          : git.branch;
+      const pr = branch && !NO_PR_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
       const spawn = spawnedEntry(spawned, a.name, a.sessionId);
       return {
         sessionId: a.sessionId,
@@ -60,7 +67,7 @@ export async function takeSnapshot(): Promise<Snapshot> {
         spawned: !!spawn,
         role: spawn?.role,
         about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
-        repo,
+        repo: git.repo,
         branch,
         pr,
         lastEvent: ev && { event: ev.event, type: ev.type, ts: ev.ts, text: ev.message ?? ev.last },
