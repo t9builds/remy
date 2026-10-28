@@ -12,6 +12,7 @@ function world(over: { unattended?: boolean; graceMs?: number; postFails?: boole
   const posts: { text: string; thread?: string }[] = [];
   const updates: { id: string; text: string }[] = [];
   const asks: string[] = [];
+  const unposted: { sessionId: string; question: string }[] = [];
   const answered: string[] = [];
   let listed = 0;
   const bridge = {
@@ -28,11 +29,12 @@ function world(over: { unattended?: boolean; graceMs?: number; postFails?: boole
     route: async () => ({ bridge, thread: "t1" }),
     sessionInfo: async () => ({ name: "saffron", unattended: over.unattended ?? true }),
     asks: ({ question }) => void asks.push(question),
+    unposted: ({ sessionId, question }) => void unposted.push({ sessionId, question }),
     scheduleWaitingList: () => void listed++,
     log: () => {},
     graceMs: over.graceMs ?? 30,
   });
-  return { pickers, posts, updates, asks, answered, listed: () => listed };
+  return { pickers, posts, updates, asks, unposted, answered, listed: () => listed };
 }
 
 const ask = (w: ReturnType<typeof world>, questions = COLOUR) => w.pickers.relay({ sessionId: "s1", questions });
@@ -130,10 +132,19 @@ test("a picker rejected or interrupted in the terminal is closed in chat", async
   expect(await w.pickers.answer({ session: "saffron" }, "1")).toBe(false);
 });
 
-test("a picker that couldn't be posted is settled, so the terminal's prompt pings as before", async () => {
+test("a picker that couldn't be posted is settled and the daemon is told, so the coordinator is pinged", async () => {
   const w = world({ postFails: true });
   const done = ask(w);
   expect(await done).toEqual({ answers: undefined });
   expect(w.pickers.has("s1")).toBe(false);
   expect(w.asks).toEqual([]);
+  expect(w.unposted).toEqual([{ sessionId: "s1", question: "Which colour?" }]);
+});
+
+test("an attended session's failed post tells the daemon too, after the grace", async () => {
+  const w = world({ postFails: true, unattended: false, graceMs: 20 });
+  const done = ask(w);
+  expect(await done).toEqual({ answers: undefined });
+  expect(w.pickers.has("s1")).toBe(false);
+  expect(w.unposted).toEqual([{ sessionId: "s1", question: "Which colour?" }]);
 });

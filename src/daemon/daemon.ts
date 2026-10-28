@@ -259,6 +259,27 @@ async function refOf(sessionId: string, cwd?: string): Promise<SessionRef> {
 
 const agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-updates" && !l.error);
 
+/** Tell the extensions and the coordinator that a session is blocked on the user. Once a minute per session. */
+async function pingNeedsInput(a: {
+  sessionId: string;
+  cwd?: string;
+  question: string;
+  type?: string;
+  session: string;
+}) {
+  if (debounced(`input:${a.sessionId}`)) return;
+  const reason = a.type === "permission_prompt" ? "permission_prompt" : "input";
+  void emit([
+    { name: "session.asks", payload: { session: await refOf(a.sessionId, a.cwd), question: a.question, reason } },
+  ]);
+  await push("agent_needs_input", a.question, {
+    workspace: workspaceOf(a.cwd),
+    session: a.session,
+    reason: a.type ?? "",
+    cwd: a.cwd ?? "",
+  });
+}
+
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
   scheduleWaitingList();
@@ -274,19 +295,12 @@ async function onEvent(e: RemyEvent) {
       if (s.status && s.status !== "waiting") return;
       // A picker's prompt: Remy asks in chat itself (daemon/pickers.ts).
       if (pickers.has(e.session_id)) return;
-      if (debounced(`input:${e.session_id}`)) return;
-      const reason = e.type === "permission_prompt" ? "permission_prompt" : "input";
-      void emit([
-        {
-          name: "session.asks",
-          payload: { session: await refOf(e.session_id, e.cwd), question: e.message ?? "waiting for input", reason },
-        },
-      ]);
-      await push("agent_needs_input", e.message ?? "waiting for input", {
-        workspace,
+      await pingNeedsInput({
+        sessionId: e.session_id,
+        cwd: e.cwd,
+        question: e.message ?? "waiting for input",
+        type: e.type,
         session: s.name,
-        reason: e.type ?? "",
-        cwd: e.cwd ?? "",
       });
     }, ATTENDED_GRACE_MS);
     return;
@@ -335,6 +349,13 @@ const pickers = createPickers({
   },
   asks: async ({ sessionId, cwd, question }) =>
     emit([{ name: "session.asks", payload: { session: await refOf(sessionId, cwd), question, reason: "question" } }]),
+  unposted: async ({ sessionId, cwd, question }) => {
+    agentsCache.at = 0;
+    const s = await sessionInfo(sessionId);
+    // Answered in the terminal in the meantime: nobody is blocked.
+    if (s.status && s.status !== "waiting") return;
+    await pingNeedsInput({ sessionId, cwd, question, type: "agent_needs_input", session: s.name });
+  },
   scheduleWaitingList: () => scheduleWaitingList(),
   log,
   graceMs: ATTENDED_GRACE_MS,

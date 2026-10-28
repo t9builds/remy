@@ -4055,8 +4055,15 @@ function createPickers(deps) {
       p.posted = { bridge, id, thread, text };
     } catch (e) {
       log("picker: posting failed", p.name, e?.message ?? e);
-      if (pickers.get(p.sessionId) === p)
+      if (pickers.get(p.sessionId) === p) {
         settle(p.sessionId);
+        deps.unposted({
+          sessionId: p.sessionId,
+          cwd: p.cwd,
+          question: p.questions.map((q) => q.question).join(`
+`)
+        });
+      }
       return;
     }
     if (p.outcome)
@@ -4382,6 +4389,20 @@ async function refOf(sessionId, cwd) {
   };
 }
 var agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-updates" && !l.error);
+async function pingNeedsInput(a) {
+  if (debounced(`input:${a.sessionId}`))
+    return;
+  const reason = a.type === "permission_prompt" ? "permission_prompt" : "input";
+  emit([
+    { name: "session.asks", payload: { session: await refOf(a.sessionId, a.cwd), question: a.question, reason } }
+  ]);
+  await push("agent_needs_input", a.question, {
+    workspace: workspaceOf(a.cwd),
+    session: a.session,
+    reason: a.type ?? "",
+    cwd: a.cwd ?? ""
+  });
+}
 async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
@@ -4397,20 +4418,12 @@ async function onEvent(e) {
         return;
       if (pickers.has(e.session_id))
         return;
-      if (debounced(`input:${e.session_id}`))
-        return;
-      const reason = e.type === "permission_prompt" ? "permission_prompt" : "input";
-      emit([
-        {
-          name: "session.asks",
-          payload: { session: await refOf(e.session_id, e.cwd), question: e.message ?? "waiting for input", reason }
-        }
-      ]);
-      await push("agent_needs_input", e.message ?? "waiting for input", {
-        workspace,
-        session: s.name,
-        reason: e.type ?? "",
-        cwd: e.cwd ?? ""
+      await pingNeedsInput({
+        sessionId: e.session_id,
+        cwd: e.cwd,
+        question: e.message ?? "waiting for input",
+        type: e.type,
+        session: s.name
       });
     }, ATTENDED_GRACE_MS);
     return;
@@ -4458,6 +4471,13 @@ var pickers = createPickers({
     return sessionInfo(sessionId);
   },
   asks: async ({ sessionId, cwd, question }) => emit([{ name: "session.asks", payload: { session: await refOf(sessionId, cwd), question, reason: "question" } }]),
+  unposted: async ({ sessionId, cwd, question }) => {
+    agentsCache.at = 0;
+    const s = await sessionInfo(sessionId);
+    if (s.status && s.status !== "waiting")
+      return;
+    await pingNeedsInput({ sessionId, cwd, question, type: "agent_needs_input", session: s.name });
+  },
   scheduleWaitingList: () => scheduleWaitingList(),
   log,
   graceMs: ATTENDED_GRACE_MS

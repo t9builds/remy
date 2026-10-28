@@ -15,6 +15,8 @@ export type PickersDeps = {
   sessionInfo(sessionId: string): Promise<{ name: string; unattended: boolean }>;
   /** The picker is waiting on the user in chat: tell the extensions (`session.asks`). */
   asks(a: { sessionId: string; cwd?: string; question: string }): void | Promise<void>;
+  /** The picker couldn't be posted, so nothing in chat asks the user: the daemon pings the coordinator instead. */
+  unposted(a: { sessionId: string; cwd?: string; question: string }): void | Promise<void>;
   scheduleWaitingList(): void;
   log(...a: unknown[]): void;
   /** How long someone at an attended session's terminal gets to answer there before Remy asks in chat. */
@@ -68,8 +70,15 @@ export function createPickers(deps: PickersDeps) {
       p.posted = { bridge, id, thread, text };
     } catch (e: any) {
       log("picker: posting failed", p.name, e?.message ?? e);
-      // Nothing in chat asks the user: leave it to the terminal, whose prompt pings the coordinator as usual.
-      if (pickers.get(p.sessionId) === p) settle(p.sessionId);
+      // Leave it to the terminal and ping the coordinator ourselves: the prompt's own ping may already have passed.
+      if (pickers.get(p.sessionId) === p) {
+        settle(p.sessionId);
+        void deps.unposted({
+          sessionId: p.sessionId,
+          cwd: p.cwd,
+          question: p.questions.map((q) => q.question).join("\n"),
+        });
+      }
       return;
     }
     // Answered in the terminal while it was being posted.
