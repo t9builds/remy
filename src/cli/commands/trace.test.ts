@@ -6,6 +6,9 @@ import { buildTrace, formatTrace, type TraceWorld } from "./trace";
 type Report = TraceWorld["reports"][number];
 type Run = TraceWorld["runs"][string];
 
+// picocolors colours output under CI; the text is what's checked.
+const plain = (text: string) => Bun.stripANSI(text);
+
 const PR = "https://github.com/o/r/pull/7";
 const OTHER = "https://github.com/o/other/pull/7";
 
@@ -118,7 +121,7 @@ test("an unknown target says what lists the known ones", () => {
 });
 
 test("the text trace shows each agent's step, transcript and verdict, and flags a step agent without a report", () => {
-  const text = formatTrace(buildTrace(PR, world()));
+  const text = plain(formatTrace(buildTrace(PR, world())));
   expect(text).toContain("#7 Fix it");
   expect(text).toContain("factory: agent, step 2, round 2");
   expect(text).toContain("review for o/r#7  basil");
@@ -142,9 +145,9 @@ test("a subagent's failed call shows on the subagent tools line, and --calls lis
     [call("t1", "m1", "Bash", { command: "ls" })],
     [{ name: "Proof review", entries: [call("u1", "s1", "Bash", { command: "false" }), failed("u1")] }],
   );
-  const text = formatTrace(buildTrace("thyme", world({ transcript: () => ({ path: "/t/x.jsonl", summary }) })), {
-    calls: true,
-  });
+  const text = plain(
+    formatTrace(buildTrace("thyme", world({ transcript: () => ({ path: "/t/x.jsonl", summary }) })), { calls: true }),
+  );
   expect(text).toMatch(/ {2}tools Bash 1\n/);
   expect(text).toContain("subagent tools Bash 1 (1 failed)");
   expect(text).toMatch(/\[Proof review\] .*Bash.* false/);
