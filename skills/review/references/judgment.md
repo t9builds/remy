@@ -67,6 +67,8 @@ The PR comment, posted after the fixes are pushed. A person skims it in seconds:
 Checks:
 - ✅ {command}: {result}
 - ❌ {command}: {result}
+
+{optional, added later if a thread call failed: `Threads: {what failed}`; see threads.md}
 ```
 
 The headline is one bold line, fixed by the verdict:

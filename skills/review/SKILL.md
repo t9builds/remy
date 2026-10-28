@@ -36,7 +36,7 @@ Done when all three have returned their findings, or said "no findings", and `gi
 
 ## 5. Judge
 
-Follow [references/judgment.md](references/judgment.md). Merge duplicates, trace each finding to the code, and put every one in exactly one bucket: **fix**, **decided**, **person** or **dismissed**, with a one-line reason. **person** is only for what is critical: everything else, you decide.
+Follow [references/judgment.md](references/judgment.md). Merge duplicates, trace each finding to the code, and put every one in exactly one bucket: **fix**, **decided**, **person** or **dismissed**, with a one-line reason. **person** is only for what is critical: everything else, you decide. Each open marked thread from an earlier round is a finding too: trace it against the code at the current head and bucket it.
 
 Done when every finding has a bucket and a reason you checked against the code, not taken from the reviewer.
 
