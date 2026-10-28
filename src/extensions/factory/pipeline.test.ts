@@ -160,7 +160,14 @@ describe("the ADR-0004 pipeline", () => {
     w.report("pass", "works on prod");
     await go(run, env);
     expect(run.stage).toBe("done");
-    expect(w.notices).toEqual([`✅ *#7 Fix login* is through the factory: works on prod\n${URL}`]);
+    // Each verdict goes to the author's thread as it comes.
+    expect(w.notices).toEqual([
+      `✅ review passed on *#7 Fix login*: tests pass, nothing wrong\n${URL}`,
+      `✅ verify-dev passed on *#7 Fix login*: login works on dev\n${URL}`,
+      `✅ release-check passed on *#7 Fix login*: small, well tested\n${URL}`,
+      `✅ verify-prod passed on *#7 Fix login*: works on prod\n${URL}`,
+      `✅ *#7 Fix login* is through the factory: works on prod\n${URL}`,
+    ]);
     expect(w.asked).toEqual([]);
   });
 
@@ -187,6 +194,7 @@ describe("the ADR-0004 pipeline", () => {
     await go(run, env);
     expect(run.stage).toBe("held");
     expect(run.reason).toBe("review still fixing after 3 rounds: and again");
+    expect(w.notices[0]).toBe(`🔧 review fixed what it found on *#7 Fix login*: added a missing null check\n${URL}`);
   });
 
   test("new commits after the review send the PR back to it", async () => {

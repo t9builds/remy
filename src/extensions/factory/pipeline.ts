@@ -278,6 +278,17 @@ async function mergedByHand(run: Run, f: Factory, env: Env) {
   return next(run, env.now(), merge + 1);
 }
 
+/** An agent step's verdict, for the PR author's thread. */
+function verdictText(run: Pick<Run, "number" | "title" | "pr">, step: string, r: Report) {
+  const what =
+    r.verdict === "pass"
+      ? `✅ ${step} passed`
+      : r.verdict === "fixed"
+        ? `🔧 ${step} fixed what it found`
+        : `🛑 ${step} failed; the factory holds it`;
+  return `${what} on *#${run.number} ${run.title}*${r.summary ? `: ${r.summary}` : ""}\n${run.pr}`;
+}
+
 async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
   if (run.stage === "awaiting-fix") {
@@ -325,6 +336,10 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
   run.agent = undefined;
   run.reports.push(report);
   const summary = report.summary ?? "";
+  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "hold");
+  // A failure that asks or alerts says so itself. The verdict is taken by now: a post that fails mustn't redo the step.
+  if (report.verdict !== "fail" || onFail === "hold")
+    await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "pass") return next(run, now);
   if (report.verdict === "fixed") {
     if (step.repeat !== "until-clean") return next(run, now);
@@ -334,7 +349,6 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
     enter(run, "awaiting-fix", now);
     return false;
   }
-  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "hold");
   if (onFail === "ask-human")
     return ask(
       run,

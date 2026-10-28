@@ -152,7 +152,7 @@ export class ExtensionHost {
       on: (event, fn) => {
         this.handlers.set(event, [...(this.handlers.get(event) ?? []), { ext, fn }]);
       },
-      post: (text, opts = {}) => deps.post(text, opts),
+      post: (text, { expectReply, ...opts } = {}) => deps.post(text, { ...opts, expect_reply: expectReply }),
       ask: async (question, opts) => {
         if (this.asks.has(opts.session)) throw new Error(`"${opts.session}" already waits for an answer`);
         const answer = new Promise<string>((resolve) => this.asks.set(opts.session, { ext, resolve }));

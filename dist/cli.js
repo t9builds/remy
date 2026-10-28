@@ -494,7 +494,7 @@ class ExtensionHost {
       on: (event, fn) => {
         this.handlers.set(event, [...this.handlers.get(event) ?? [], { ext, fn }]);
       },
-      post: (text, opts = {}) => deps.post(text, opts),
+      post: (text, { expectReply, ...opts } = {}) => deps.post(text, { ...opts, expect_reply: expectReply }),
       ask: async (question, opts) => {
         if (this.asks.has(opts.session))
           throw new Error(`"${opts.session}" already waits for an answer`);
@@ -586,6 +586,38 @@ async function importExtension(path) {
 
 // src/extension-host/load.ts
 import { join as join7 } from "path";
+
+// src/extensions/agent-updates.ts
+var MAX_LAST = 3000;
+var reportsInThread = (s) => s.spawned && !s.role;
+function turnText(name, last, question) {
+  const said = last?.trim();
+  if (!said)
+    return;
+  const body = said.length > MAX_LAST ? `${said.slice(0, MAX_LAST)}\u2026
+_(cut; \`claude logs ${name}\` has all of it)_` : said;
+  return question ? `\u2753 *${name}* asks:
+${body}
+_Reply here to answer._` : `*${name}* finished its turn:
+${body}`;
+}
+function agentUpdates(remy) {
+  remy.on("session.stopped", async ({ session, last, question }) => {
+    if (!reportsInThread(session))
+      return;
+    const text = turnText(session.name, last, question);
+    if (text)
+      await remy.post(text, { session: session.name, expectReply: !!question });
+  });
+  remy.on("pr.opened", async ({ session, pr }) => {
+    if (!reportsInThread(session))
+      return;
+    await remy.post(`*${session.name}* opened #${pr.number} ${pr.title}${pr.draft ? " (draft)" : ""}
+${pr.url}`, {
+      session: session.name
+    });
+  });
+}
 
 // src/extensions/factory/factory.ts
 import { existsSync as existsSync6, statSync as statSync5 } from "fs";
@@ -1014,6 +1046,11 @@ async function mergedByHand(run, f, env) {
   run.mergeSha = d.mergeSha;
   return next(run, env.now(), merge + 1);
 }
+function verdictText(run, step, r) {
+  const what = r.verdict === "pass" ? `\u2705 ${step} passed` : r.verdict === "fixed" ? `\uD83D\uDD27 ${step} fixed what it found` : `\uD83D\uDED1 ${step} failed; the factory holds it`;
+  return `${what} on *#${run.number} ${run.title}*${r.summary ? `: ${r.summary}` : ""}
+${run.pr}`;
+}
 async function agentStep(run, step, f, env) {
   const now = env.now();
   if (run.stage === "awaiting-fix") {
@@ -1059,6 +1096,9 @@ async function agentStep(run, step, f, env) {
   run.agent = undefined;
   run.reports.push(report);
   const summary = report.summary ?? "";
+  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "hold");
+  if (report.verdict !== "fail" || onFail === "hold")
+    await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "pass")
     return next(run, now);
   if (report.verdict === "fixed") {
@@ -1070,7 +1110,6 @@ async function agentStep(run, step, f, env) {
     enter(run, "awaiting-fix", now);
     return false;
   }
-  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "hold");
   if (onFail === "ask-human")
     return ask(run, env, "continue", `${step.name} for #${run.number} ${run.title} says: ${summary}. Go on anyway? Reply yes, or no to stop here.`);
   if (onFail === "notify-author") {
@@ -1408,7 +1447,7 @@ function mergedCleanup(remy) {
         { session: s.name, repo: s.repo, what: "merged", detail: `PR #${pr.number} merged; ${cleanup}`, pr: pr.url }
       ]);
       if (text)
-        await remy.post(text, { workspace: s.workspace });
+        await remy.post(text, { workspace: s.workspace, session: s.name });
     } finally {
       closing.delete(s.sessionId);
     }
@@ -1437,6 +1476,7 @@ function waitingListCommand(remy) {
 var BUILTINS = {
   "merged-cleanup": mergedCleanup,
   "slack-tasks": slackTasks,
+  "agent-updates": agentUpdates,
   queue: waitingListCommand,
   factory: factory_default
 };
@@ -1661,6 +1701,123 @@ class LinkServer {
       send(socket, { type: "event", event });
     if (held.length)
       this.handlers.held?.(this.held);
+  }
+}
+
+// src/messengers/fanout.ts
+var encodeId = (parts) => Object.entries(parts).map(([k, v]) => `${k}:${v}`).join("|");
+function decodeId(id) {
+  const parts = {};
+  for (const piece of id.split("|")) {
+    const i = piece.indexOf(":");
+    const k = piece.slice(0, i);
+    if (k === "slack" || k === "telegram")
+      parts[k] = piece.slice(i + 1);
+  }
+  return parts;
+}
+var slackThreadFor = (m, ref) => m instanceof Fanout ? encodeId({ slack: ref }) : ref;
+
+class Fanout {
+  workspace;
+  mode;
+  main;
+  log;
+  members = new Map;
+  lastFrom;
+  constructor(workspace, mode, main, log = () => {}) {
+    this.workspace = workspace;
+    this.mode = mode;
+    this.main = main;
+    this.log = log;
+    this.lastFrom = main;
+  }
+  add(kind, m) {
+    this.members.set(kind, m);
+  }
+  get kinds() {
+    return [...this.members.keys()];
+  }
+  sinkFor(kind, sink) {
+    const prefix = (meta) => {
+      const out = { ...meta, via: kind };
+      for (const key of ["id", "thread"])
+        if (out[key])
+          out[key] = encodeId({ [kind]: out[key] });
+      return out;
+    };
+    return {
+      ...sink,
+      push: async (event, content, meta = {}) => {
+        if (event === "user_message") {
+          this.lastFrom = kind;
+          await this.share(kind, content, meta.session);
+        }
+        await sink.push(event, content, prefix(meta));
+      }
+    };
+  }
+  async share(from, text, session) {
+    for (const [k, m] of this.members) {
+      if (k === from)
+        continue;
+      if (session)
+        m.answered(session);
+      const echo = this.mode === "mirror" || this.mode === "pings" && k === this.main;
+      if (echo)
+        await m.post(`\uD83D\uDCAC _You, in ${messengerLabel(from)}:_ ${text}`, { session: session || undefined }).catch((e) => this.log("echo failed", k, e?.message ?? e));
+    }
+  }
+  targets(opts, parts) {
+    const live = this.kinds;
+    const inThread = live.filter((k) => parts[k]);
+    if (this.mode === "mirror")
+      return live;
+    if (this.mode === "follow") {
+      if (inThread.length)
+        return inThread;
+      return [live.includes(this.lastFrom) ? this.lastFrom : live[0]];
+    }
+    if (!live.includes(this.main))
+      return live;
+    return live.filter((k) => k === this.main || opts.expect_reply || parts[k]);
+  }
+  async post(text, opts = {}) {
+    const parts = opts.thread ? decodeId(opts.thread) : {};
+    const out = {};
+    let error;
+    for (const k of this.targets(opts, parts)) {
+      try {
+        out[k] = await this.members.get(k).post(text, { ...opts, thread: parts[k] });
+      } catch (e) {
+        error ??= e;
+        this.log("post failed", k, e?.message ?? e);
+      }
+    }
+    if (!Object.keys(out).length)
+      throw error ?? new Error(`no app of workspace "${this.workspace}" took the message`);
+    return encodeId(out);
+  }
+  async update(id, text) {
+    for (const [k, part] of Object.entries(decodeId(id)))
+      await this.members.get(k)?.update(part, text);
+  }
+  async pin(id) {
+    for (const [k, part] of Object.entries(decodeId(id)))
+      await this.members.get(k)?.pin?.(part);
+  }
+  async askPermission(p) {
+    const to = this.mode === "follow" ? this.targets({}, {}) : this.kinds;
+    for (const k of to)
+      await this.members.get(k).askPermission(p);
+  }
+  answered(session) {
+    for (const m of this.members.values())
+      m.answered(session);
+  }
+  async start() {
+    for (const m of this.members.values())
+      await m.start();
   }
 }
 
@@ -2430,122 +2587,6 @@ async function slackChecks(workspace, settings) {
   if (settings.transport === "socket")
     out.push({ label: "Slack app-level token (Socket Mode)", ok: !!readToken(workspace, "slack-app"), hint: fix });
   return out;
-}
-
-// src/messengers/fanout.ts
-var encodeId = (parts) => Object.entries(parts).map(([k, v]) => `${k}:${v}`).join("|");
-function decodeId(id) {
-  const parts = {};
-  for (const piece of id.split("|")) {
-    const i = piece.indexOf(":");
-    const k = piece.slice(0, i);
-    if (k === "slack" || k === "telegram")
-      parts[k] = piece.slice(i + 1);
-  }
-  return parts;
-}
-
-class Fanout {
-  workspace;
-  mode;
-  main;
-  log;
-  members = new Map;
-  lastFrom;
-  constructor(workspace, mode, main, log = () => {}) {
-    this.workspace = workspace;
-    this.mode = mode;
-    this.main = main;
-    this.log = log;
-    this.lastFrom = main;
-  }
-  add(kind, m) {
-    this.members.set(kind, m);
-  }
-  get kinds() {
-    return [...this.members.keys()];
-  }
-  sinkFor(kind, sink) {
-    const prefix = (meta) => {
-      const out = { ...meta, via: kind };
-      for (const key of ["id", "thread"])
-        if (out[key])
-          out[key] = encodeId({ [kind]: out[key] });
-      return out;
-    };
-    return {
-      ...sink,
-      push: async (event, content, meta = {}) => {
-        if (event === "user_message") {
-          this.lastFrom = kind;
-          await this.share(kind, content, meta.session);
-        }
-        await sink.push(event, content, prefix(meta));
-      }
-    };
-  }
-  async share(from, text, session) {
-    for (const [k, m] of this.members) {
-      if (k === from)
-        continue;
-      if (session)
-        m.answered(session);
-      const echo = this.mode === "mirror" || this.mode === "pings" && k === this.main;
-      if (echo)
-        await m.post(`\uD83D\uDCAC _You, in ${messengerLabel(from)}:_ ${text}`, { session: session || undefined }).catch((e) => this.log("echo failed", k, e?.message ?? e));
-    }
-  }
-  targets(opts, parts) {
-    const live = this.kinds;
-    const inThread = live.filter((k) => parts[k]);
-    if (this.mode === "mirror")
-      return live;
-    if (this.mode === "follow") {
-      if (inThread.length)
-        return inThread;
-      return [live.includes(this.lastFrom) ? this.lastFrom : live[0]];
-    }
-    if (!live.includes(this.main))
-      return live;
-    return live.filter((k) => k === this.main || opts.expect_reply || parts[k]);
-  }
-  async post(text, opts = {}) {
-    const parts = opts.thread ? decodeId(opts.thread) : {};
-    const out = {};
-    let error;
-    for (const k of this.targets(opts, parts)) {
-      try {
-        out[k] = await this.members.get(k).post(text, { ...opts, thread: parts[k] });
-      } catch (e) {
-        error ??= e;
-        this.log("post failed", k, e?.message ?? e);
-      }
-    }
-    if (!Object.keys(out).length)
-      throw error ?? new Error(`no app of workspace "${this.workspace}" took the message`);
-    return encodeId(out);
-  }
-  async update(id, text) {
-    for (const [k, part] of Object.entries(decodeId(id)))
-      await this.members.get(k)?.update(part, text);
-  }
-  async pin(id) {
-    for (const [k, part] of Object.entries(decodeId(id)))
-      await this.members.get(k)?.pin?.(part);
-  }
-  async askPermission(p) {
-    const to = this.mode === "follow" ? this.targets({}, {}) : this.kinds;
-    for (const k of to)
-      await this.members.get(k).askPermission(p);
-  }
-  answered(session) {
-    for (const m of this.members.values())
-      m.answered(session);
-  }
-  async start() {
-    for (const m of this.members.values())
-      await m.start();
-  }
 }
 
 // src/messengers/telegram/format.ts
@@ -3675,7 +3716,7 @@ function snapshotEvents(prev, next, workspaceOf) {
 function hookEvents(e, session) {
   if (e.event === "Stop") {
     const question = questionOf(e.last);
-    const stopped = { name: "session.stopped", payload: { session, last: e.last } };
+    const stopped = { name: "session.stopped", payload: { session, last: e.last, question } };
     return question ? [stopped, { name: "session.asks", payload: { session, question, reason: "question" } }] : [stopped];
   }
   if (e.event === "SessionEnd")
@@ -3856,8 +3897,11 @@ function status() {
 async function route(a) {
   const origin = a.session && !a.thread ? await spawnOrigin(a.session) : undefined;
   if (origin)
-    Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
-  return bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+    a.workspace = origin.workspace;
+  const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+  if (origin && bridge.workspace === origin.workspace)
+    a.thread = slackThreadFor(bridge, threadRef(origin.channel, origin.threadTs));
+  return bridge;
 }
 async function callTool(name, a) {
   const bridge = await route(a);
@@ -3910,6 +3954,7 @@ async function sessionInfo(sessionId) {
     name: row?.name ?? sessionId.slice(0, 8),
     status: row?.status,
     spawned: !!spawn,
+    role: spawn?.role,
     unattended: !!spawn || row?.kind === "background",
     merged: !!spawn?.merged
   };
@@ -3932,10 +3977,12 @@ async function refOf(sessionId, cwd) {
     sessionId,
     cwd: cwd ?? "",
     spawned: s.spawned,
+    role: s.role,
     status: s.status ?? "",
     workspace: workspaceOf(cwd)
   };
 }
+var agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-updates" && !l.error);
 async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
@@ -3972,6 +4019,8 @@ async function onEvent(e) {
     if (!s.unattended || s.merged)
       return;
     if (!questionOf(e.last))
+      return;
+    if (e.event === "Stop" && s.spawned && !s.role && agentUpdatesOn())
       return;
     if (debounced(`done:${e.session_id}`, 30000))
       return;

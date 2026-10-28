@@ -22,6 +22,7 @@ import { loadExtensions } from "../extension-host/load";
 import { coordinatorTools } from "../link/coordinator-tools";
 import { type DaemonStatus, type LinkEvent, RESTART_EXIT, type Request } from "../link/protocol";
 import { LinkServer } from "../link/server";
+import { slackThreadFor } from "../messengers/fanout";
 import type { Messenger, Sink } from "../messengers/messenger";
 import { threadRef } from "../messengers/slack/bridge";
 import { describeMessengers, type Off, openWorkspaces } from "../messengers/workspaces";
@@ -149,8 +150,12 @@ function status(): DaemonStatus {
 /** Where a post goes: an agent started from a Slack channel thread reports in that thread, else the session's workspace. */
 async function route(a: { workspace?: string; session?: string; thread?: string }) {
   const origin = a.session && !a.thread ? await spawnOrigin(a.session) : undefined;
-  if (origin) Object.assign(a, { workspace: origin.workspace, thread: threadRef(origin.channel, origin.threadTs) });
-  return bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+  if (origin) a.workspace = origin.workspace;
+  const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
+  // A workspace that is off falls back to another one, where that channel's thread doesn't exist.
+  if (origin && bridge.workspace === origin.workspace)
+    a.thread = slackThreadFor(bridge, threadRef(origin.channel, origin.threadTs));
+  return bridge;
 }
 
 async function callTool(name: string, a: Record<string, any>) {
@@ -216,6 +221,7 @@ async function sessionInfo(sessionId: string) {
     name: row?.name ?? sessionId.slice(0, 8),
     status: row?.status,
     spawned: !!spawn,
+    role: spawn?.role,
     unattended: !!spawn || row?.kind === "background",
     merged: !!spawn?.merged,
   };
@@ -241,10 +247,13 @@ async function refOf(sessionId: string, cwd?: string): Promise<SessionRef> {
     sessionId,
     cwd: cwd ?? "",
     spawned: s.spawned,
+    role: s.role,
     status: s.status ?? "",
     workspace: workspaceOf(cwd),
   };
 }
+
+const agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-updates" && !l.error);
 
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
@@ -281,6 +290,8 @@ async function onEvent(e: RemyEvent) {
     if (!s.unattended || s.merged) return;
     // Only a question needs the coordinator. Otherwise the pinned list shows the turn's end, and the notice an exit.
     if (!questionOf(e.last)) return;
+    // Remy's own agents post the question in their thread themselves (extensions/agent-updates.ts).
+    if (e.event === "Stop" && s.spawned && !s.role && agentUpdatesOn()) return;
     if (debounced(`done:${e.session_id}`, 30_000)) return;
     const what = e.event === "Stop" ? "finished its turn" : `ended (${e.type ?? "exit"})`;
     await push("agent_finished", `${s.name} ${what}.\n\nLast message:\n${e.last ?? "(none)"}`, {
