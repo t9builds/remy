@@ -3391,6 +3391,14 @@ function spawnedEntry(spawned, name, sessionId) {
   const s = spawned[name];
   return s && !s.id ? s : undefined;
 }
+function noteSession(spawned, sessionId, transcript) {
+  const s = Object.values(spawned).find((x) => x.id && sessionId?.startsWith(x.id));
+  if (!s || s.sessionId === sessionId && (s.transcript || !transcript))
+    return false;
+  s.sessionId = sessionId;
+  s.transcript ??= transcript;
+  return true;
+}
 
 // src/sessions/snapshot.ts
 var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
@@ -4007,6 +4015,9 @@ var agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-upd
 async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
+  const spawned = readJson(PATHS.spawned, {});
+  if (noteSession(spawned, e.session_id, e.transcript_path))
+    writeJson(PATHS.spawned, spawned);
   scheduleWaitingList();
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
@@ -4446,7 +4457,8 @@ async function report(args) {
     step,
     verdict,
     summary: values.summary,
-    head: await headOf(values.pr)
+    head: await headOf(values.pr),
+    session: process.env.CLAUDE_CODE_SESSION_ID
   });
   const note = disabledNote("nothing reads it until you turn it back on");
   say(note ? "Recorded." : "Recorded. Remy picks it up within a minute or so.", note);
@@ -4692,6 +4704,332 @@ async function changes() {
   console.log(first ? "Baseline stored; nothing to compare yet." : changes.length ? JSON.stringify(changes, null, 2) : "No changes.");
 }
 
+// src/cli/commands/trace.ts
+import { existsSync as existsSync10 } from "fs";
+import { join as join14 } from "path";
+
+// src/sessions/transcript.ts
+import { existsSync as existsSync9, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
+import { homedir as homedir4 } from "os";
+import { join as join13 } from "path";
+var projectDirOf = (cwd, claudeDir = claudeHome()) => join13(claudeDir, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
+var claudeHome = () => process.env.CLAUDE_CONFIG_DIR ?? join13(homedir4(), ".claude");
+function findTranscript(id, cwd, claudeDir = claudeHome()) {
+  const inDir = (dir) => {
+    try {
+      const f = readdirSync2(dir).find((n) => n.startsWith(id) && n.endsWith(".jsonl"));
+      return f ? join13(dir, f) : undefined;
+    } catch {
+      return;
+    }
+  };
+  if (cwd) {
+    const hit = inDir(projectDirOf(cwd, claudeDir));
+    if (hit)
+      return hit;
+  }
+  const projects = join13(claudeDir, "projects");
+  try {
+    for (const d of readdirSync2(projects)) {
+      const hit = inDir(join13(projects, d));
+      if (hit)
+        return hit;
+    }
+  } catch {}
+  return;
+}
+function readLines2(path) {
+  try {
+    return readFileSync5(path, "utf8").split(`
+`).filter(Boolean).flatMap((l) => {
+      try {
+        return [JSON.parse(l)];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+function readTranscript(path) {
+  if (!existsSync9(path))
+    return;
+  const dir = join13(path.replace(/\.jsonl$/, ""), "subagents");
+  let subagents = [];
+  try {
+    subagents = readdirSync2(dir).filter((f) => f.endsWith(".jsonl")).map((f) => {
+      const meta = readJsonOr(join13(dir, f.replace(/\.jsonl$/, ".meta.json")));
+      return { name: meta?.description ?? f.replace(/\.jsonl$/, ""), entries: readLines2(join13(dir, f)) };
+    });
+  } catch {}
+  return summarize(readLines2(path), subagents);
+}
+function readJsonOr(path) {
+  try {
+    return JSON.parse(readFileSync5(path, "utf8"));
+  } catch {
+    return;
+  }
+}
+function inputOf(name, input = {}) {
+  const v = input.command ?? input.skill ?? input.url ?? input.file_path ?? input.path ?? input.pattern ?? input.query ?? input.description ?? input.prompt;
+  const s = typeof v === "string" ? v : JSON.stringify(input);
+  const line = s.replace(/\s+/g, " ").trim();
+  return name === "Skill" && input.args ? `${line} ${String(input.args).replace(/\s+/g, " ")}`.slice(0, 200) : line.slice(0, 200);
+}
+function summarize(main, subagents = []) {
+  const s = {
+    models: [],
+    prompts: 0,
+    requests: 0,
+    tools: {},
+    subagentTools: {},
+    errors: {},
+    skills: [],
+    subagents: [],
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    calls: []
+  };
+  const seen = new Set;
+  const stamps = [];
+  const walk = (entries, agent) => {
+    const toolOf = new Map;
+    for (const e of entries) {
+      if (typeof e.timestamp === "string")
+        stamps.push(e.timestamp);
+      if (e.type === "cost-state" && !agent && typeof e.totalCostUSD === "number")
+        s.costUsd = e.totalCostUSD;
+      const content = e.message?.content;
+      if (e.type === "user" && !agent && !e.isMeta && isPrompt(e))
+        s.prompts++;
+      if (e.type === "user" && !agent) {
+        const text = typeof content === "string" ? content : "";
+        for (const m of text.matchAll(/<command-name>\/?([^<]+)<\/command-name>/g))
+          addOnce(s.skills, m[1].trim());
+      }
+      if (e.type === "user" && Array.isArray(content)) {
+        for (const c of content)
+          if (c?.type === "tool_result" && c.is_error) {
+            const call = toolOf.get(c.tool_use_id);
+            if (call) {
+              call.error = true;
+              s.errors[call.tool] = (s.errors[call.tool] ?? 0) + 1;
+            }
+          }
+      }
+      if (e.type !== "assistant" || !e.message)
+        continue;
+      const m = e.message;
+      const key = m.id ?? e.requestId ?? e.uuid;
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        s.requests++;
+        if (m.model && m.model !== "<synthetic>")
+          addOnce(s.models, m.model);
+        const u = m.usage ?? {};
+        s.tokens.input += u.input_tokens ?? 0;
+        s.tokens.output += u.output_tokens ?? 0;
+        s.tokens.cacheRead += u.cache_read_input_tokens ?? 0;
+        s.tokens.cacheWrite += u.cache_creation_input_tokens ?? 0;
+      }
+      if (!Array.isArray(m.content))
+        continue;
+      for (const c of m.content) {
+        if (c?.type !== "tool_use")
+          continue;
+        const tools = agent ? s.subagentTools : s.tools;
+        tools[c.name] = (tools[c.name] ?? 0) + 1;
+        const call = { at: e.timestamp, tool: c.name, input: inputOf(c.name, c.input), agent };
+        toolOf.set(c.id, call);
+        s.calls.push(call);
+        if (c.name === "Skill" && c.input?.skill)
+          addOnce(s.skills, String(c.input.skill));
+        if ((c.name === "Agent" || c.name === "Task") && !agent)
+          s.subagents.push({ description: String(c.input?.description ?? ""), type: c.input?.subagent_type });
+      }
+    }
+  };
+  walk(main);
+  for (const a of subagents)
+    walk(a.entries, a.name);
+  stamps.sort();
+  s.start = stamps[0];
+  s.end = stamps.at(-1);
+  s.calls.sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
+  return s;
+}
+function isPrompt(e) {
+  if (e.origin?.kind)
+    return e.origin.kind === "human";
+  const content = e.message?.content;
+  if (typeof content === "string")
+    return !/^<(local-command|task-notification|system-reminder)/.test(content);
+  return Array.isArray(content) && content.some((c) => c?.type === "text") && !content.some((c) => c?.type === "tool_result");
+}
+function addOnce(list, v) {
+  if (!list.includes(v))
+    list.push(v);
+}
+
+// src/cli/commands/trace.ts
+var prNumber = (url) => Number(url.match(/\/pull\/(\d+)$/)?.[1]);
+function resolvePr(want, w) {
+  const urls = new Set([
+    ...Object.keys(w.runs),
+    ...w.reports.map((r) => r.pr),
+    ...Object.values(w.spawned).flatMap((s) => s.pr ? [s.pr] : [])
+  ]);
+  if (urls.has(want))
+    return want;
+  const n = Number(want.replace(/^#/, ""));
+  if (!Number.isInteger(n) || n <= 0)
+    return;
+  const hits = [...urls].filter((u) => prNumber(u) === n);
+  if (hits.length > 1)
+    throw new Error(`#${n} is more than one PR; give its URL:
+${hits.join(`
+`)}`);
+  return hits[0];
+}
+function buildTrace(want, w) {
+  const pr = resolvePr(want, w);
+  const entries = Object.entries(w.spawned).filter(([name, s]) => pr ? s.pr === pr : name === want || !!s.id && (want.startsWith(s.id) || s.id.startsWith(want)));
+  if (!pr && !entries.length)
+    throw new Error(`no PR or agent "${want}" that Remy knows; \`remy factory\` and \`remy status\` list them`);
+  const one = !pr && entries.length === 1 ? entries[0] : undefined;
+  if (one?.[1].pr) {
+    const t = buildTrace(one[1].pr, w);
+    return { ...t, agents: t.agents.filter((a) => a.name === one[0]), reports: [] };
+  }
+  entries.sort(([, a], [, b]) => a.startedAt - b.startedAt);
+  const agents = entries.map(([name, s]) => {
+    const cwd = s.label ? join14(s.repo, ".claude", "worktrees", s.label) : s.repo;
+    const ev = s.id ? w.events.find((e) => e.session_id?.startsWith(s.id)) : undefined;
+    const sessionId = s.sessionId ?? ev?.session_id;
+    const t = sessionId || s.id ? w.transcript(sessionId ?? s.id, cwd, s.transcript ?? ev?.transcript_path) : {};
+    return {
+      name,
+      task: s.task,
+      role: s.role,
+      startedAt: s.startedAt,
+      sessionId: sessionId ?? t.path?.match(/([0-9a-f-]{36})\.jsonl$/)?.[1] ?? s.id,
+      transcript: t.path,
+      cwd,
+      merged: s.merged ? true : undefined,
+      reports: [],
+      summary: t.summary
+    };
+  });
+  const reports = pr ? w.reports.filter((r) => r.pr === pr) : [];
+  const loose = [];
+  for (const r of reports) {
+    const a = reporterOf(r, agents);
+    if (a)
+      a.reports.push(r);
+    else
+      loose.push(r);
+  }
+  for (const a of agents)
+    if (!pr)
+      a.reports = w.reports.filter((r) => a.sessionId && r.session?.startsWith(a.sessionId));
+  const run = pr ? w.runs[pr] : undefined;
+  return {
+    pr,
+    run: run && {
+      number: run.number,
+      title: run.title,
+      repo: run.repo,
+      stage: run.stage,
+      step: run.step,
+      round: run.round,
+      reason: run.reason,
+      head: run.head
+    },
+    agents,
+    reports: loose
+  };
+}
+function reporterOf(r, agents) {
+  if (r.kind)
+    return;
+  if (r.session)
+    return agents.find((a) => a.sessionId && r.session.startsWith(a.sessionId));
+  return agents.findLast((a) => a.startedAt <= r.at && a.task.startsWith(`${r.step} for `));
+}
+var n = (x) => x >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : String(x);
+function duration(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60)
+    return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+var time = (ms) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+var counts = (c, errors = {}) => Object.entries(c).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}${errors[k] ? import_picocolors.default.red(` (${errors[k]} failed)`) : ""}`).join(" \xB7 ");
+function verdictLine(r) {
+  const v = r.verdict === "fail" ? import_picocolors.default.red(r.verdict) : r.verdict === "pass" ? import_picocolors.default.green(r.verdict) : import_picocolors.default.yellow(r.verdict ?? "");
+  return `${r.step} ${v}${r.head ? import_picocolors.default.dim(` @${r.head.slice(0, 7)}`) : ""}: ${r.summary ?? ""}`;
+}
+function formatTrace(t, opts = {}) {
+  const out = [];
+  if (t.pr) {
+    const r = t.run;
+    out.push(import_picocolors.default.bold(r ? `#${r.number} ${r.title}` : `#${prNumber(t.pr)}`) + (r ? import_picocolors.default.dim(` (${r.repo})`) : ""), t.pr, r ? `factory: ${r.stage}, step ${r.step + 1}${r.round > 1 ? `, round ${r.round}` : ""}${r.reason ? ` \xB7 ${r.reason}` : ""}` : import_picocolors.default.dim("factory: no run now (done runs are dropped after a while)"), "");
+  }
+  if (!t.agents.length)
+    out.push(import_picocolors.default.dim("No agents Remy started for it."));
+  for (const a of t.agents) {
+    const s = a.summary;
+    const span = s?.start && s.end ? Date.parse(s.end) - Date.parse(s.start) : undefined;
+    out.push(`${import_picocolors.default.bold(a.task)}  ${import_picocolors.default.cyan(a.name)}  ${time(a.startedAt)}${span !== undefined ? ` \xB7 ${duration(span)}` : ""}${s?.costUsd !== undefined ? ` \xB7 $${s.costUsd.toFixed(2)}` : ""}`);
+    out.push(import_picocolors.default.dim(`  session ${a.sessionId ?? "?"}`));
+    out.push(import_picocolors.default.dim(`  transcript ${a.transcript ?? "not found (Claude Code may have cleaned it up)"}`));
+    if (s) {
+      out.push(`  requests ${s.requests} \xB7 prompts ${s.prompts}${s.models.length ? ` \xB7 ${s.models.join(", ")}` : ""}`, `  tokens in ${n(s.tokens.input)} \xB7 out ${n(s.tokens.output)} \xB7 cache read ${n(s.tokens.cacheRead)} \xB7 cache write ${n(s.tokens.cacheWrite)}`);
+      if (Object.keys(s.tools).length)
+        out.push(`  tools ${counts(s.tools, s.errors)}`);
+      if (s.skills.length)
+        out.push(`  skills ${s.skills.join(", ")}`);
+      if (s.subagents.length)
+        out.push(`  subagents ${s.subagents.map((x) => `${x.description}${x.type ? import_picocolors.default.dim(` (${x.type})`) : ""}`).join(" \xB7 ")}`);
+      if (Object.keys(s.subagentTools).length)
+        out.push(`  subagent tools ${counts(s.subagentTools)}`);
+      if (opts.calls)
+        for (const c of s.calls)
+          out.push(import_picocolors.default.dim(`    ${c.at?.slice(11, 19) ?? ""} `) + `${c.agent ? import_picocolors.default.dim(`[${c.agent}] `) : ""}${c.error ? import_picocolors.default.red(c.tool) : c.tool} ${import_picocolors.default.dim(c.input)}`);
+    }
+    for (const r of a.reports)
+      out.push(`  ${verdictLine(r)}`);
+    if (!a.reports.length && a.role === "factory")
+      out.push(import_picocolors.default.yellow("  no report"));
+    out.push("");
+  }
+  for (const r of t.reports)
+    out.push(r.kind === "retry" ? import_picocolors.default.dim(`${time(r.at)} retry asked`) : `${time(r.at)} ${verdictLine(r)}`);
+  return out.join(`
+`).trimEnd();
+}
+async function trace(args) {
+  const { values, positionals } = parse(args, { json: { type: "boolean" }, calls: { type: "boolean" } });
+  const want = positionals[0];
+  if (!want)
+    throw new Error(`usage: ${import_picocolors.default.cyan("remy trace <pr-url|#number|agent> [--calls] [--json]")}`);
+  const t = buildTrace(want, {
+    runs: readJson(PATHS.factory, {}).runs ?? {},
+    reports: readReports(),
+    spawned: readJson(PATHS.spawned, {}),
+    events: readEvents(),
+    transcript: (id, cwd, known) => {
+      const path = known && existsSync10(known) ? known : findTranscript(id, cwd);
+      return { path, summary: path ? readTranscript(path) : undefined };
+    }
+  });
+  const text = values.json ? JSON.stringify(t, null, 2) : formatTrace(t, { calls: values.calls });
+  await new Promise((done) => process.stdout.write(`${text}
+`, () => done()));
+}
+
 // src/cli/hook.ts
 async function runHook() {
   if (process.env.REMY_ROLE === "coordinator")
@@ -4734,8 +5072,8 @@ function trim(s, n) {
 
 // src/cli/setup.ts
 import { chmodSync as chmodSync2, mkdirSync as mkdirSync4, writeFileSync as writeFileSync4 } from "fs";
-import { homedir as homedir4 } from "os";
-import { join as join13 } from "path";
+import { homedir as homedir5 } from "os";
+import { join as join15 } from "path";
 
 // node_modules/@clack/core/dist/index.mjs
 import { styleText } from "util";
@@ -5494,7 +5832,7 @@ var n$1 = class n extends y {
     });
   }
 };
-class n extends y {
+class n2 extends y {
   get userInputWithCursor() {
     if (this.state === "submit")
       return this.userInput;
@@ -6040,7 +6378,7 @@ ${f}
   }).prompt();
 };
 var i = `${styleText2("gray", S_BAR)}  `;
-var text = (t) => new n({
+var text = (t) => new n2({
   validate: t.validate,
   placeholder: t.placeholder,
   defaultValue: t.defaultValue,
@@ -6125,7 +6463,7 @@ async function general(c) {
   const roots = await answer(text({
     message: "Folders that hold your repos",
     placeholder: "~/Repositories, ~/work",
-    initialValue: c.repoRoots.map((r) => r.replace(homedir4(), "~")).join(", "),
+    initialValue: c.repoRoots.map((r) => r.replace(homedir5(), "~")).join(", "),
     validate: (v) => list(v ?? "").length ? undefined : "At least one folder"
   }));
   c.repoRoots = list(roots).map(expandHome);
@@ -6395,9 +6733,9 @@ async function pairTelegram(tg, username, workspace) {
   throw new Error(`No message reached @${username}; run \`remy setup ${workspace}\` again.`);
 }
 function installShim() {
-  const bin = join13(homedir4(), ".local", "bin");
+  const bin = join15(homedir5(), ".local", "bin");
   mkdirSync4(bin, { recursive: true });
-  const shim = join13(bin, "remy");
+  const shim = join15(bin, "remy");
   writeFileSync4(shim, `#!/bin/sh
 # Installed by \`remy setup\`. Uses the installed remy plugin, falling back to the copy setup ran from.
 root=$(bun -e 'try{const p=require(process.env.HOME+"/.claude/plugins/installed_plugins.json").plugins["remy@remy"];console.log(p?.[p.length-1]?.installPath??"")}catch{}')
@@ -6426,6 +6764,10 @@ var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, 
     "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts"
   ],
   ["report <step> pass|fail|fixed --pr <url> --summary <text>", "A factory agent's verdict on its step"],
+  [
+    "trace <pr|agent> [--calls] [--json]",
+    "What Remy's agents did for a PR, or one agent did: tools, skills, subagents, tokens, cost, verdicts; --calls lists each tool call"
+  ],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
   ["doctor", "Check requirements, tokens and scopes"],
   ["dir", "Print remy's state folder"]
@@ -6438,6 +6780,7 @@ var COMMANDS = {
   spawn,
   factory,
   report,
+  trace,
   post,
   setup: async (args) => setup(parse(args, {}).positionals[0]),
   start,

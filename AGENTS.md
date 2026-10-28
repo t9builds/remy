@@ -40,8 +40,8 @@ Imports point toward `sdk/`. `cli/` and `daemon/` compose the rest, and nothing 
 of them build on `config/`, `shared/` and `sdk/`. `sdk/` imports nothing of Remy's. A built-in extension acts through
 the Remy API like anyone's extension: it imports `sdk/`, `shared/` and its own files. When it needs more, add that to `sdk/extension.ts` and
 implement it in `extension-host/host.ts`. The core reaches built-ins only through `extensions/index.ts`; the one
-exception is `cli/commands/factory.ts`, which uses the factory's own modules to read and write its files, so
-`remy factory` and `remy report` work while the daemon is down. `.dependency-cruiser.cjs` holds the exact rules; when it
+exception is `cli/commands/factory.ts` and `cli/commands/trace.ts`, which use the factory's own modules to read and
+write its files, so `remy factory`, `remy report` and `remy trace` work while the daemon is down. `.dependency-cruiser.cjs` holds the exact rules; when it
 reports a violation, move the code to the module that owns it and keep the rule.
 
 ## Conventions

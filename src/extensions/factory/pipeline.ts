@@ -31,6 +31,8 @@ export type Report = {
   summary?: string;
   /** The PR's head when the agent reported: the commit its verdict covers. */
   head?: string;
+  /** The session that reported, so its transcript can be found (`remy trace`). */
+  session?: string;
   kind?: "retry";
 };
 

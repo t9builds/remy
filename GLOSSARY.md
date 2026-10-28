@@ -23,6 +23,10 @@ Any Claude Code session on the user's machine, whoever started it.
 A background session Remy started for a task.
 _Avoid_: worker, bot
 
+**Trace**:
+What Remy's agents did for a PR, or one agent did, read from Claude Code's transcripts: tools, skills, subagents, tokens, cost and verdicts. `remy trace` shows it.
+_Avoid_: log, history
+
 **Waiting list**:
 The one list of everything that needs the user now, most urgent first. `/queue` and `remy queue` show it; in code and docs it's the waiting list.
 _Avoid_: queue, inbox, notifications
