@@ -57,6 +57,20 @@ you:  stream it, accounts are under 50k rows
 remy: Sent to saffron.
 ```
 
+When an agent asks with Claude Code's multiple-choice picker, Remy posts the options in its thread, and your reply answers the picker itself, so the agent goes on without anyone at its terminal:
+
+```
+remy: ❓ saffron asks:
+      Export · How should the CSV export run?
+         1. Stream it — accounts are small
+         2. Background job — email a link
+      Reply here with a number, or in your own words.
+you:  1
+remy: ✅ Stream it
+```
+
+Reply with a number, a label, several numbers for a pick-any question, or your own words; with several questions, one line each. Right after the picker is posted, a plain message that picks an option works too. A background agent's picker comes at once; one in a terminal you may be sitting at comes after 45 seconds, and answering it there first marks the message answered (rejecting it there closes it).
+
 Instead of a message per finished agent, Remy keeps one pinned message that lists what waits on you, most urgent first, and edits it in place as things change. Read the top line and do that:
 
 ```
@@ -97,7 +111,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 |---|---|
 | Plugin hooks (`Stop`, `Notification`, `SessionEnd`) | Every session appends its events to `~/.remy/events.jsonl` |
 | Plugin hook (`UserPromptSubmit`) | Names a session that has no name yet after a dish or ingredient (`src/sessions/kitchen-names.ts`), on its first prompt, and keeps that prompt in `~/.remy/nicknames.json` as what the session is about |
-| `remy status` (`src/sessions/`) | Joins `claude agents --json`, each session's git branch and `gh pr view` |
+| `remy status` (`src/sessions/`) | Joins `claude agents --json`, each session's git branch and `gh pr view`. In a GitButler workspace, the branch is the one the session last named in its `but` or `gh pr create` commands ([ADR-0010](docs/adr/0010-gitbutler-session-branch-from-its-commands.md)) |
 | `src/sessions/waiting-list.ts` | Ranks what waits on you from that snapshot; the daemon keeps it as one message per workspace (`~/.remy/queue.json`) |
 | `remy daemon` (`src/daemon/`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, posts the merged/ended notices itself (`src/shared/notices.ts`), runs extensions and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
 | `src/sdk/` | What extensions and a repo's `.remy/factory.ts` import: the extension API (`extension.ts`) and the pipeline helpers (`factory.ts`, imported as `remy/factory`) |
@@ -324,7 +338,7 @@ A path covers the folder and everything inside it, not sibling folders that shar
 
 ## Extensions
 
-Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `agent-updates` posts in each agent's thread what it said at the end of every turn and the PR it opened, `queue` answers `/queue`, and `factory` runs [pipelines](#factory). Turn one off with `extensions.disabled` and write your own instead.
+Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `agent-updates` posts in each agent's thread what it said at the end of every turn, rendered as Markdown, and the PR it opened, `queue` answers `/queue`, and `factory` runs [pipelines](#factory). Turn one off with `extensions.disabled` and write your own instead.
 
 ```ts
 // ~/.remy/extensions/red-ci.ts
@@ -347,7 +361,7 @@ export default (remy: Remy) => {
 
 | Actions | |
 |---|---|
-| `post(text, { workspace, session, thread, expectReply })` | Post to you; with `session`, in that agent's thread (the Slack thread its task came from, else its DM thread) |
+| `post(text, { workspace, session, thread, expectReply, markdown })` | Post to you; with `session`, in that agent's thread (the Slack thread its task came from, else its DM thread). Text is Slack mrkdwn; with `markdown`, standard Markdown, which Slack renders as rich text (headings, lists, tables, code) |
 | `ask(question, { session })` | Ask you and wait: it's on the waiting list until you reply in its thread, and the reply goes to the extension, not the coordinator |
 | `spawn({ repo, task })`, `close(session)` | Start an agent, close a session |
 | `waitingList.add(entry)`, `waitingList.remove(key)`, `waitingList.text(workspace)` | Put something on the waiting list, take it off, read the list |
@@ -426,11 +440,12 @@ How far Remy goes on its own is the lower of the repo's `autonomy` and yours in 
 
 A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a `fail`, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
 
-The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Step agents count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
+The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Sessions sharing a [GitButler](https://gitbutler.com) workspace each get the PR of the branch they named, so one session's PR never runs as another's. Step agents count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
 
 ## Limits
 
-- A message from another session can't approve a permission prompt. When an agent waits on one, remy tells you to `claude attach <name>`. Spawned agents run in auto mode, so this is rare.
+- A message from another session can't approve a permission prompt. When an agent waits on one, remy tells you to `claude attach <name>`. Spawned agents run in auto mode, so this is rare. Pickers are the exception: you answer them from the chat.
+- A picker that waits while the daemon restarts is left to the terminal.
 - The coordinator's own permission prompts are relayed to the chat: reply `yes <id>` or `no <id>`, or tap the buttons in Telegram.
 - With `poll`, Slack replies arrive within about 4 seconds while you're chatting and 15 seconds when idle. Slack allows about 50 reads a minute per app, shared by everyone using it, which is enough for 3–4 active people. `socket` is instant.
 - The coordinator's own permission prompts go to the workspace you last wrote from (the catch-all until you've written).

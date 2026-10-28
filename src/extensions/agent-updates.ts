@@ -2,7 +2,8 @@
  * Built-in: an agent Remy started reports in its own thread (the Slack thread its task came from, else its thread in
  * the DM): the end of each turn with what it said, and the PR it opens. A turn that ends on a question expects a
  * reply, and the user's replies in that thread reach the agent through the coordinator. The factory's step agents
- * report through `remy report` instead, so they stay quiet here.
+ * report through `remy report` instead, so they stay quiet here. An agent writes Markdown, so a turn goes as Markdown,
+ * which Slack renders as rich text.
  */
 import type { Remy, SessionRef } from "../sdk/extension";
 import { defang } from "../shared/notices";
@@ -16,10 +17,17 @@ const reportsInThread = (s: SessionRef) => s.spawned && !s.role;
 export function turnText(name: string, last: string | undefined, question: string | undefined) {
   const said = last?.trim();
   if (!said) return undefined;
-  const cut =
-    said.length > MAX_LAST ? `${said.slice(0, MAX_LAST)}…\n_(cut; \`claude logs ${name}\` has all of it)_` : said;
+  let cut = said;
+  if (said.length > MAX_LAST) {
+    let kept = `${said.slice(0, MAX_LAST)}…`;
+    // A cut inside a code block would put the footer in the code; close the fence first, on a line of its own.
+    if ((kept.match(/```/g)?.length ?? 0) % 2) kept += "\n```";
+    cut = `${kept}\n\n_(cut; \`claude logs ${name}\` has all of it)_`;
+  }
   const body = defang(cut);
-  return question ? `❓ *${name}* asks:\n${body}\n_Reply here to answer._` : `*${name}* finished its turn:\n${body}`;
+  return question
+    ? `❓ **${name}** asks:\n\n${body}\n\n_Reply here to answer._`
+    : `**${name}** finished its turn:\n\n${body}`;
 }
 
 export default function agentUpdates(remy: Remy) {
@@ -28,7 +36,7 @@ export default function agentUpdates(remy: Remy) {
     const text = turnText(session.name, last, question);
     if (!text) return;
     try {
-      await remy.post(text, { session: session.name, expectReply: !!question });
+      await remy.post(text, { session: session.name, expectReply: !!question, markdown: true });
     } catch (e) {
       // The daemon doesn't push a question for these agents, so a failed post must not lose it.
       if (!question) throw e;

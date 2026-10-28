@@ -42,6 +42,7 @@ import { VERSION } from "../shared/version";
 import { coalesce } from "./coalesce";
 import { heldBefore, keepHeld } from "./held";
 import { type Emitted, hookEvents, sessionRef, snapshotEvents } from "./observe";
+import { createPickers } from "./pickers";
 import { composeWaitingList, showWaitingList } from "./pinned-waiting-list";
 import { agentUpdatesPostsIt, originThread } from "./routing";
 import { tailLines } from "./tail";
@@ -68,6 +69,8 @@ async function push(kind: string, content: string, meta: Record<string, string> 
   if (kind === "user_message" && meta.workspace) lastActive = meta.workspace;
   if (kind === "user_message") scheduleWaitingList(WAITING_LIST_AFTER_USER_MS);
   if (kind === "user_message" || kind === "task_request") {
+    if (kind === "user_message" && (await pickers.answer(meta, content)))
+      return log("answer for a picker", meta.session || meta.awaiting);
     // A reply to an extension's question answers it, not the coordinator.
     if (kind === "user_message" && meta.session && host.answer(meta.session, content))
       return log("answer for an extension", meta.session);
@@ -128,6 +131,7 @@ async function request(name: Request, args: any): Promise<unknown> {
   await ready;
   if (name === "tools")
     return coordinatorTools(active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", "));
+  if (name === "picker") return pickers.relay(args);
   if (name === "call") return callTool(String(args?.name), (args?.arguments ?? {}) as Record<string, any>);
   throw new Error(`unknown request: ${name}`);
 }
@@ -231,6 +235,9 @@ function debounced(key: string, ms = 60_000) {
   return false;
 }
 
+/** How long someone at the session's terminal gets to answer there before Remy asks in chat. */
+const ATTENDED_GRACE_MS = 45_000;
+
 const NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitation_dialog"]);
 
 /** The session as extensions see it, from the last look at the sessions, else from what the hook event says. */
@@ -252,9 +259,32 @@ async function refOf(sessionId: string, cwd?: string): Promise<SessionRef> {
 
 const agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-updates" && !l.error);
 
+/** Tell the extensions and the coordinator that a session is blocked on the user. Once a minute per session. */
+async function pingNeedsInput(a: {
+  sessionId: string;
+  cwd?: string;
+  question: string;
+  type?: string;
+  session: string;
+}) {
+  if (debounced(`input:${a.sessionId}`)) return;
+  const reason = a.type === "permission_prompt" ? "permission_prompt" : "input";
+  void emit([
+    { name: "session.asks", payload: { session: await refOf(a.sessionId, a.cwd), question: a.question, reason } },
+  ]);
+  await push("agent_needs_input", a.question, {
+    workspace: workspaceOf(a.cwd),
+    session: a.session,
+    reason: a.type ?? "",
+    cwd: a.cwd ?? "",
+  });
+}
+
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
   scheduleWaitingList();
+  // A picker that ran, failed, or whose turn or session ended was settled in the terminal.
+  pickers.ended(e);
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
     // Give whoever sits at that terminal a chance first; ping only if it's still blocked.
@@ -263,21 +293,16 @@ async function onEvent(e: RemyEvent) {
       scheduleWaitingList();
       const s = await sessionInfo(e.session_id);
       if (s.status && s.status !== "waiting") return;
-      if (debounced(`input:${e.session_id}`)) return;
-      const reason = e.type === "permission_prompt" ? "permission_prompt" : "input";
-      void emit([
-        {
-          name: "session.asks",
-          payload: { session: await refOf(e.session_id, e.cwd), question: e.message ?? "waiting for input", reason },
-        },
-      ]);
-      await push("agent_needs_input", e.message ?? "waiting for input", {
-        workspace,
+      // A picker's prompt: Remy asks in chat itself (daemon/pickers.ts).
+      if (pickers.has(e.session_id)) return;
+      await pingNeedsInput({
+        sessionId: e.session_id,
+        cwd: e.cwd,
+        question: e.message ?? "waiting for input",
+        type: e.type,
         session: s.name,
-        reason: e.type ?? "",
-        cwd: e.cwd ?? "",
       });
-    }, 45_000);
+    }, ATTENDED_GRACE_MS);
     return;
   }
   if (e.event === "Stop" || e.event === "SessionEnd") {
@@ -306,6 +331,35 @@ function tailEvents() {
     } catch {}
   });
 }
+
+// ---------- Pickers ----------
+
+const pickers = createPickers({
+  route: async (a) => {
+    const where: { workspace?: string; session?: string; thread?: string } = {
+      workspace: workspaceOf(a.cwd),
+      session: a.session,
+    };
+    const bridge = await route(where);
+    return { bridge, thread: where.thread };
+  },
+  sessionInfo: async (sessionId) => {
+    agentsCache.at = 0;
+    return sessionInfo(sessionId);
+  },
+  asks: async ({ sessionId, cwd, question }) =>
+    emit([{ name: "session.asks", payload: { session: await refOf(sessionId, cwd), question, reason: "question" } }]),
+  unposted: async ({ sessionId, cwd, question }) => {
+    agentsCache.at = 0;
+    const s = await sessionInfo(sessionId);
+    // Answered in the terminal in the meantime: nobody is blocked.
+    if (s.status && s.status !== "waiting") return;
+    await pingNeedsInput({ sessionId, cwd, question, type: "agent_needs_input", session: s.name });
+  },
+  scheduleWaitingList: () => scheduleWaitingList(),
+  log,
+  graceMs: ATTENDED_GRACE_MS,
+});
 
 // ---------- Digest ----------
 
@@ -448,6 +502,7 @@ function newHost() {
         thread: where.thread,
         session: where.session,
         expect_reply: where.expect_reply,
+        markdown: where.markdown,
       });
     },
     spawn: (opts) => spawnAgent(opts),

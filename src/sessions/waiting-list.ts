@@ -71,6 +71,9 @@ export function questionOf(last: string | undefined): string | undefined {
 function itemOf(s: SessionView): Omit<WaitingItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
+  // A picker (AskUserQuestion): Remy relays it to the agent's thread, and a reply there answers it.
+  if (s.status === "waiting" && s.lastEvent?.event === "PermissionRequest")
+    return { rank: 0, why: `asks: "${short(s.lastEvent.text ?? "pick an option")}"`, action: "reply to its thread" };
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
     return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
   if (s.status === "busy") return undefined;

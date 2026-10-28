@@ -96,7 +96,7 @@ export class SlackBridge implements Messenger {
     const ref = opts.thread || (opts.session ? this.threadOf(opts.session) : undefined);
     const thread = ref ? parseRef(ref) : undefined;
     const channel = thread?.channel;
-    const ts = await this.slack.post(channel ?? (await this.ensureDm()), text, thread?.ts);
+    const ts = await this.slack.post(channel ?? (await this.ensureDm()), text, thread?.ts, opts.markdown);
     const root = thread?.ts ?? ts;
     const prev = this.state.threads[root];
     // A reply in a DM thread, such as an answer under the user's message, is a conversation the user may go on in.

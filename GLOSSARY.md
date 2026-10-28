@@ -16,6 +16,10 @@ _Avoid_: remy session, bot
 One place Remy talks to you about a set of repos: a Slack workspace, a Telegram chat, or both.
 _Avoid_: team, account
 
+**GitButler workspace**:
+GitButler's checkout, on `gitbutler/workspace`, with several branches applied at once, often one per agent. Not a Remy **Workspace**. Remy tells whose branch is whose from each session's own commands ([ADR-0010](docs/adr/0010-gitbutler-session-branch-from-its-commands.md)).
+_Avoid_: workspace, on its own
+
 **Session**:
 Any Claude Code session on the user's machine, whoever started it.
 
@@ -26,6 +30,10 @@ _Avoid_: worker, bot
 **Waiting list**:
 The one list of everything that needs the user now, most urgent first. `/queue` and `remy queue` show it; in code and docs it's the waiting list.
 _Avoid_: queue, inbox, notifications
+
+**Picker**:
+The multiple-choice dialog a session asks the user with (Claude Code's `AskUserQuestion`). Remy posts it in the agent's thread, and a reply there answers it; the terminal can answer it too, and the first answer wins.
+_Avoid_: menu, prompt, dialog
 
 **Judgment call**:
 A decision only a person should make, because a wrong call would be hard to take back: data lost, a security hole, money or access, others broken. Agents make every other call themselves and record it.

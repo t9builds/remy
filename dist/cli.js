@@ -621,12 +621,22 @@ function turnText(name, last, question) {
   const said = last?.trim();
   if (!said)
     return;
-  const cut = said.length > MAX_LAST ? `${said.slice(0, MAX_LAST)}\u2026
-_(cut; \`claude logs ${name}\` has all of it)_` : said;
+  let cut = said;
+  if (said.length > MAX_LAST) {
+    let kept = `${said.slice(0, MAX_LAST)}\u2026`;
+    if ((kept.match(/```/g)?.length ?? 0) % 2)
+      kept += "\n```";
+    cut = `${kept}
+
+_(cut; \`claude logs ${name}\` has all of it)_`;
+  }
   const body = defang(cut);
-  return question ? `\u2753 *${name}* asks:
+  return question ? `\u2753 **${name}** asks:
+
 ${body}
-_Reply here to answer._` : `*${name}* finished its turn:
+
+_Reply here to answer._` : `**${name}** finished its turn:
+
 ${body}`;
 }
 function agentUpdates(remy) {
@@ -637,7 +647,7 @@ function agentUpdates(remy) {
     if (!text)
       return;
     try {
-      await remy.post(text, { session: session.name, expectReply: !!question });
+      await remy.post(text, { session: session.name, expectReply: !!question, markdown: true });
     } catch (e) {
       if (!question)
         throw e;
@@ -1865,6 +1875,7 @@ function formBody(params) {
       form.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
   return form;
 }
+var MARKDOWN_MAX = 12000;
 
 class Slack {
   token;
@@ -1891,10 +1902,11 @@ class Slack {
     const r = await this.call("conversations.open", { users: userId });
     return r.channel.id;
   }
-  async post(channel, text, threadTs) {
+  async post(channel, text, threadTs, markdown) {
     const r = await this.call("chat.postMessage", {
       channel,
       text,
+      blocks: markdown && text.length <= MARKDOWN_MAX ? [{ type: "markdown", text }] : undefined,
       thread_ts: threadTs,
       unfurl_links: false,
       unfurl_media: false
@@ -2059,7 +2071,8 @@ function cleanText(text, names) {
   return text.replace(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g, (_, id) => `@${names.get(id) ?? id}`).replace(/<#[A-Z0-9]+\|([^>]*)>/g, "#$1").replace(/<!(here|channel|everyone)>/g, "@$1").replace(/<(https?:[^|>]+)\|([^>]+)>/g, "$2 ($1)").replace(/<(https?:[^>]+)>/g, "$1").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 function requestText(text, botUserId) {
-  return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "").replace(/\s+/g, " ").trim();
+  return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "").replace(/[^\S\n]+/g, " ").replace(/ ?\n\s*/g, `
+`).trim().replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 function clock(ts) {
   const d = new Date(Number(ts) * 1000);
@@ -2308,7 +2321,7 @@ class SlackBridge {
     const ref = opts.thread || (opts.session ? this.threadOf(opts.session) : undefined);
     const thread = ref ? parseRef(ref) : undefined;
     const channel = thread?.channel;
-    const ts = await this.slack.post(channel ?? await this.ensureDm(), text, thread?.ts);
+    const ts = await this.slack.post(channel ?? await this.ensureDm(), text, thread?.ts, opts.markdown);
     const root = thread?.ts ?? ts;
     const prev = this.state.threads[root];
     if (opts.session || opts.expect_reply || prev || thread && !channel) {
@@ -3383,6 +3396,223 @@ async function prInfo(cwd, branch) {
   };
 }
 
+// src/sessions/gitbutler.ts
+import { closeSync, openSync, readSync, statSync as statSync7 } from "fs";
+var GITBUTLER_WORKSPACE = "gitbutler/workspace";
+async function resolveBranch(gitBranch, cwd, transcriptPath) {
+  if (gitBranch !== GITBUTLER_WORKSPACE)
+    return gitBranch;
+  return await sessionBranch(cwd, transcriptPath) ?? gitBranch;
+}
+async function sessionBranch(cwd, transcriptPath) {
+  if (!transcriptPath)
+    return;
+  const named = [...new Set(transcriptBranches(transcriptPath).toReversed())];
+  if (!named.length)
+    return;
+  const out = await run2(["git", "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes/origin"], cwd);
+  if (!out)
+    return;
+  const refs = new Set(out.split(`
+`));
+  return named.find((b) => refs.has(`refs/heads/${b}`) || refs.has(`refs/remotes/origin/${b}`));
+}
+var scans = new Map;
+function transcriptBranches(path) {
+  let scan = scans.get(path) ?? { offset: 0, branches: [] };
+  let fd;
+  try {
+    const size = statSync7(path).size;
+    if (size < scan.offset)
+      scan = { offset: 0, branches: [] };
+    if (size === scan.offset)
+      return scan.branches;
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(size - scan.offset);
+    readSync(fd, buf, 0, buf.length, scan.offset);
+    const end = buf.lastIndexOf(10) + 1;
+    const branches = [...scan.branches];
+    for (const line of buf.subarray(0, end).toString("utf8").split(`
+`)) {
+      if (line.includes('"name":"Bash"'))
+        branches.push(...lineBranches(line));
+    }
+    scan = { offset: scan.offset + end, branches };
+    scans.set(path, scan);
+    return scan.branches;
+  } catch {
+    return scan.branches;
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
+  }
+}
+function lineBranches(line) {
+  try {
+    const content = JSON.parse(line)?.message?.content;
+    if (!Array.isArray(content))
+      return [];
+    return content.filter((c) => c?.type === "tool_use" && c.name === "Bash" && typeof c.input?.command === "string").flatMap((c) => branchesNamed(c.input.command));
+  } catch {
+    return [];
+  }
+}
+function branchesNamed(command) {
+  return simpleCommands(command).map(branchOf).filter((b) => !!b && !b.startsWith("gitbutler/"));
+}
+function branchOf(words) {
+  const at = words.findIndex((w) => !/^\w+=/.test(w));
+  const program = words[at]?.split("/").pop();
+  const args = words.slice(at + 1);
+  if (program === "gh") {
+    let g = 0;
+    while (args[g]?.startsWith("-"))
+      g += args[g] === "-R" || args[g] === "--repo" ? 2 : 1;
+    if (args[g] !== "pr" || args[g + 1] !== "create")
+      return;
+    return optionValue(args, "-H", "--head")?.replace(/^[^:]*:/, "");
+  }
+  if (program !== "but")
+    return;
+  const sub = args.findIndex((w, j) => !w.startsWith("-") && args[j - 1] !== "-C" && args[j - 1] !== "--current-dir");
+  if (sub < 0)
+    return;
+  const [cmd, ...rest] = args.slice(sub);
+  if (cmd === "commit")
+    return optionValue(rest, "-b", "--branch");
+  if (cmd === "push")
+    return positional(rest, []);
+  if (cmd === "branch" && rest[0] === "new")
+    return positional(rest.slice(1), ["-A", "--above", "-B", "--below"]);
+  if (cmd === "pr" && rest[0] === "new")
+    return positional(rest.slice(1), ["-m", "--message", "-F", "--file"]);
+  return;
+}
+function optionValue(args, short, long) {
+  for (let i = 0;i < args.length; i++) {
+    const a = args[i];
+    if (a === short || a === long)
+      return args[i + 1];
+    if (a.startsWith(`${long}=`))
+      return a.slice(long.length + 1);
+  }
+  return;
+}
+function positional(args, valued) {
+  for (let i = 0;i < args.length; i++) {
+    const a = args[i];
+    if (valued.includes(a))
+      i++;
+    else if (!a.startsWith("-"))
+      return a;
+  }
+  return;
+}
+function simpleCommands(line) {
+  const commands = [];
+  let words = [];
+  let word;
+  let target = false;
+  const endWord = () => {
+    if (word !== undefined && !target)
+      words.push(word);
+    if (word !== undefined)
+      target = false;
+    word = undefined;
+  };
+  const heredocs = [];
+  const endCommand = () => {
+    endWord();
+    if (words.length)
+      commands.push(words);
+    words = [];
+    target = false;
+  };
+  for (let i = 0;i < line.length; i++) {
+    const c = line[i];
+    if (c === "'") {
+      const close = line.indexOf("'", i + 1);
+      const to = close < 0 ? line.length : close;
+      word = (word ?? "") + line.slice(i + 1, to);
+      i = to;
+    } else if (c === '"') {
+      word ??= "";
+      for (i++;i < line.length && line[i] !== '"'; i++) {
+        if (line[i] === "\\" && i + 1 < line.length && '"\\$`'.includes(line[i + 1]))
+          i++;
+        word += line[i];
+      }
+    } else if (c === "\\") {
+      if (line[i + 1] === `
+`)
+        i++;
+      else
+        word = (word ?? "") + (line[++i] ?? "");
+    } else if (c === "<" && line[i + 1] === "<" && line[i + 2] !== "<") {
+      if (word !== undefined && /^\d+$/.test(word))
+        word = undefined;
+      endWord();
+      const tabs = line[i + 2] === "-";
+      i += tabs ? 2 : 1;
+      while (line[i + 1] === " " || line[i + 1] === "\t")
+        i++;
+      let delimiter = "";
+      for (i++;i < line.length && !` 	
+;&|()<>`.includes(line[i]); i++) {
+        if (line[i] === "'" || line[i] === '"') {
+          const close = line.indexOf(line[i], i + 1);
+          const to = close < 0 ? line.length : close;
+          delimiter += line.slice(i + 1, to);
+          i = to;
+        } else
+          delimiter += line[i];
+      }
+      i--;
+      heredocs.push({ delimiter, tabs });
+    } else if (c === "#" && word === undefined) {
+      const eol = line.indexOf(`
+`, i);
+      i = eol < 0 ? line.length : eol - 1;
+    } else if (c === "<" || c === ">") {
+      if (word !== undefined && /^\d+$/.test(word))
+        word = undefined;
+      endWord();
+      while (line[i + 1] === "<" || line[i + 1] === ">")
+        i++;
+      if (line[i + 1] === "&")
+        while (/[&\d-]/.test(line[i + 1] ?? ""))
+          i++;
+      else
+        target = true;
+    } else if (c === " " || c === "\t")
+      endWord();
+    else if (`;&|()
+`.includes(c)) {
+      endCommand();
+      if (c === `
+`)
+        for (const h of heredocs.splice(0))
+          i = endOfHeredoc(line, i + 1, h.delimiter, h.tabs);
+    } else
+      word = (word ?? "") + c;
+  }
+  endCommand();
+  return commands;
+}
+function endOfHeredoc(text, from, delimiter, tabs) {
+  let start = from;
+  while (start < text.length) {
+    const eol = text.indexOf(`
+`, start);
+    const end = eol < 0 ? text.length : eol;
+    const row = text.slice(start, end);
+    if ((tabs ? row.replace(/^\t+/, "") : row) === delimiter)
+      return end;
+    start = end + 1;
+  }
+  return text.length;
+}
+
 // src/sessions/spawned.ts
 function spawnedEntry(spawned, name, sessionId) {
   const byId = Object.values(spawned).find((s) => s.id && sessionId.startsWith(s.id));
@@ -3393,20 +3623,19 @@ function spawnedEntry(spawned, name, sessionId) {
 }
 
 // src/sessions/snapshot.ts
-var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
+var NO_PR_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk", GITBUTLER_WORKSPACE]);
 async function takeSnapshot() {
   const config = loadConfig();
   const spawned = readJson(PATHS.spawned, {});
   const nicknames = readJson(PATHS.nicknames, {});
   const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName && !spawnedEntry(spawned, a.name, a.sessionId)?.merged);
-  const latest = new Map;
-  for (const e of readEvents())
-    latest.set(e.session_id, e);
+  const latest = latestEvents(readEvents());
   const sessions = await Promise.all(agents.map(async (a) => {
     const ev = latest.get(a.sessionId);
     const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
-    const { branch, repo } = await gitInfo(cwd);
-    const pr = branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
+    const git = await gitInfo(cwd);
+    const branch = await resolveBranch(git.branch, cwd, ev?.transcript_path);
+    const pr = branch && !NO_PR_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
     const spawn = spawnedEntry(spawned, a.name, a.sessionId);
     return {
       sessionId: a.sessionId,
@@ -3418,13 +3647,22 @@ async function takeSnapshot() {
       spawned: !!spawn,
       role: spawn?.role,
       about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
-      repo,
+      repo: git.repo,
       branch,
       pr,
       lastEvent: ev && { event: ev.event, type: ev.type, ts: ev.ts, text: ev.message ?? ev.last }
     };
   }));
   return { takenAt: Date.now(), sessions };
+}
+function latestEvents(events) {
+  const latest = new Map;
+  for (const e of events) {
+    const open = latest.get(e.session_id)?.event === "PermissionRequest";
+    if (!(open && e.event === "Notification" && e.type === "permission_prompt"))
+      latest.set(e.session_id, e);
+  }
+  return latest;
 }
 function findSession(sessions, name) {
   const exact = sessions.find((x) => x.name === name);
@@ -3585,6 +3823,8 @@ function questionOf(last) {
 function itemOf(s) {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
+  if (s.status === "waiting" && s.lastEvent?.event === "PermissionRequest")
+    return { rank: 0, why: `asks: "${short(s.lastEvent.text ?? "pick an option")}"`, action: "reply to its thread" };
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
     return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
   if (s.status === "busy")
@@ -3742,6 +3982,146 @@ function hookEvents(e, session) {
   return [];
 }
 
+// src/daemon/picker.ts
+function pickerText(name, questions) {
+  const many = questions.length > 1;
+  const blocks = questions.map((q, i) => {
+    const head = `${many ? `${i + 1}. ` : ""}${q.header ? `*${defang(q.header)}* \xB7 ` : ""}${defang(q.question)}`;
+    const options = q.options.map((o, j) => `   ${j + 1}. ${defang(o.label)}${o.description && o.description !== o.label ? ` \u2014 _${defang(o.description)}_` : ""}`);
+    return [head + (q.multiSelect ? " _(pick any)_" : ""), ...options].join(`
+`);
+  });
+  const how = many ? "Reply here with one line per question, in order: a number, or your own words." : "Reply here with a number, or in your own words.";
+  return `\u2753 *${name}* asks:
+${blocks.join(`
+
+`)}
+_${how}_`;
+}
+function picked(q, reply) {
+  const tokens = reply.split(/[\s,]+/).filter(Boolean);
+  const byNumber = tokens.every((t) => /^\d+$/.test(t) && Number(t) >= 1 && Number(t) <= q.options.length);
+  if (tokens.length && byNumber && (q.multiSelect || tokens.length === 1))
+    return [...new Set(tokens)].map((t) => q.options[Number(t) - 1].label).join(", ");
+  return q.options.find((o) => o.label.toLowerCase() === reply.toLowerCase())?.label;
+}
+function readAnswers(questions, reply) {
+  const text = reply.trim();
+  const lines = questions.length === 1 ? [text] : text.split(`
+`).map((l) => l.trim()).filter(Boolean);
+  if (!text || lines.length !== questions.length)
+    return { problem: `Answer each of the ${questions.length} questions on its own line, in order.` };
+  const answers = {};
+  for (const [i, q] of questions.entries()) {
+    const line = lines[i];
+    if (/^[\d\s,]+$/.test(line) && !picked(q, line))
+      return {
+        problem: `${q.header ?? q.question}: pick ${q.multiSelect ? "numbers" : "one number"} from 1 to ${q.options.length}, or answer in your own words.`
+      };
+    answers[q.question] = picked(q, line) ?? line;
+  }
+  return { answers };
+}
+function readPick(questions, message) {
+  const q = questions.length === 1 ? questions[0] : undefined;
+  const label = q && picked(q, message.trim());
+  return q && label ? { [q.question]: label } : undefined;
+}
+var answersLine = (answers) => Object.values(answers).map((a) => defang(a.replace(/\s+/g, " "))).join(" \xB7 ");
+
+// src/daemon/pickers.ts
+function createPickers(deps) {
+  const { log } = deps;
+  const pickers = new Map;
+  async function relay(a) {
+    if (!a?.sessionId || !Array.isArray(a.questions) || !a.questions.length)
+      return {};
+    const since = Date.now();
+    settle(a.sessionId);
+    const s = await deps.sessionInfo(a.sessionId);
+    return new Promise((resolve) => {
+      const p = { sessionId: a.sessionId, name: s.name, cwd: a.cwd, questions: a.questions, since, resolve };
+      pickers.set(a.sessionId, p);
+      p.timer = setTimeout(() => void post(p), s.unattended ? 0 : deps.graceMs);
+    });
+  }
+  async function post(p) {
+    if (pickers.get(p.sessionId) !== p)
+      return;
+    try {
+      const { bridge, thread } = await deps.route({ cwd: p.cwd, session: p.name });
+      const text = pickerText(p.name, p.questions);
+      const id = await bridge.post(text, { thread, session: p.name, expect_reply: true });
+      p.posted = { bridge, id, thread, text };
+    } catch (e) {
+      log("picker: posting failed", p.name, e?.message ?? e);
+      if (pickers.get(p.sessionId) === p) {
+        settle(p.sessionId);
+        deps.unposted({
+          sessionId: p.sessionId,
+          cwd: p.cwd,
+          question: p.questions.map((q) => q.question).join(`
+`)
+        });
+      }
+      return;
+    }
+    if (p.outcome)
+      return close(p);
+    deps.scheduleWaitingList();
+    deps.asks({ sessionId: p.sessionId, cwd: p.cwd, question: p.questions.map((q) => q.question).join(`
+`) });
+  }
+  function settle(sessionId, answers, outcome = "_Closed_") {
+    const p = pickers.get(sessionId);
+    if (!p)
+      return;
+    pickers.delete(sessionId);
+    clearTimeout(p.timer);
+    p.resolve({ answers });
+    p.outcome = outcome;
+    close(p);
+  }
+  async function close(p) {
+    if (!p.posted || !p.outcome)
+      return;
+    const { bridge, id, text } = p.posted;
+    bridge.answered(p.name);
+    deps.scheduleWaitingList();
+    await bridge.update(id, `${text.slice(0, text.lastIndexOf(`
+`))}
+${p.outcome}`).catch((e) => log("picker: update failed", p.name, e?.message ?? e));
+  }
+  function ended(e) {
+    const p = pickers.get(e.session_id);
+    if (!p || e.ts < p.since)
+      return;
+    if (e.event === "PostToolUse")
+      settle(e.session_id, undefined, `\u2705 _Answered in the terminal${e.message ? `: ${defang(e.message.replace(/\s*\n\s*/g, " \xB7 "))}` : ""}_`);
+    else if (e.event === "PostToolUseFailure" || e.event === "Stop" || e.event === "SessionEnd")
+      settle(e.session_id, undefined, "_Closed in the terminal_");
+  }
+  async function answer(meta, text) {
+    const name = meta.session || meta.awaiting;
+    const p = name ? [...pickers.values()].find((x) => x.posted && x.name === name) : undefined;
+    if (!p?.posted)
+      return false;
+    if (!meta.session) {
+      const answers = readPick(p.questions, text);
+      if (answers)
+        settle(p.sessionId, answers, `\u2705 _${answersLine(answers)}_`);
+      return !!answers;
+    }
+    const read = readAnswers(p.questions, text);
+    if ("answers" in read)
+      settle(p.sessionId, read.answers, `\u2705 _${answersLine(read.answers)}_`);
+    else
+      await p.posted.bridge.post(read.problem, { thread: p.posted.thread, session: p.name, expect_reply: true }).catch((e) => log("picker: posting failed", p.name, e?.message ?? e));
+    return true;
+  }
+  return { relay, ended, answer, has: (sessionId) => pickers.has(sessionId) };
+}
+
 // src/daemon/pinned-waiting-list.ts
 async function showWaitingList(m, prev, text, log) {
   if (prev?.text === text)
@@ -3798,17 +4178,17 @@ var originThread = (bridge, origin) => origin && bridge.workspace === origin.wor
 var agentUpdatesPostsIt = (e, s, agentUpdatesOn) => e.event === "Stop" && !!s.spawned && !s.role && agentUpdatesOn;
 
 // src/daemon/tail.ts
-import { closeSync, openSync, readSync, statSync as statSync7 } from "fs";
+import { closeSync as closeSync2, openSync as openSync2, readSync as readSync2, statSync as statSync8 } from "fs";
 function tailLines(path, onLine, everyMs = 2000) {
   let offset = 0;
   try {
-    offset = statSync7(path).size;
+    offset = statSync8(path).size;
   } catch {}
   let partial = "";
   return setInterval(() => {
     let size = 0;
     try {
-      size = statSync7(path).size;
+      size = statSync8(path).size;
     } catch {
       return;
     }
@@ -3816,10 +4196,10 @@ function tailLines(path, onLine, everyMs = 2000) {
       offset = 0;
     if (size === offset)
       return;
-    const fd = openSync(path, "r");
+    const fd = openSync2(path, "r");
     const buf = Buffer.alloc(size - offset);
-    readSync(fd, buf, 0, buf.length, offset);
-    closeSync(fd);
+    readSync2(fd, buf, 0, buf.length, offset);
+    closeSync2(fd);
     offset = size;
     const lines = (partial + buf.toString("utf8")).split(`
 `);
@@ -3850,6 +4230,8 @@ async function push(kind, content, meta = {}) {
   if (kind === "user_message")
     scheduleWaitingList(WAITING_LIST_AFTER_USER_MS);
   if (kind === "user_message" || kind === "task_request") {
+    if (kind === "user_message" && await pickers.answer(meta, content))
+      return log("answer for a picker", meta.session || meta.awaiting);
     if (kind === "user_message" && meta.session && host.answer(meta.session, content))
       return log("answer for an extension", meta.session);
     host.emit("message", {
@@ -3899,6 +4281,8 @@ async function request(name, args) {
   await ready;
   if (name === "tools")
     return coordinatorTools(active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", "));
+  if (name === "picker")
+    return pickers.relay(args);
   if (name === "call")
     return callTool(String(args?.name), args?.arguments ?? {});
   throw new Error(`unknown request: ${name}`);
@@ -3987,6 +4371,7 @@ function debounced(key, ms = 60000) {
   lastPushed.set(key, Date.now());
   return false;
 }
+var ATTENDED_GRACE_MS = 45000;
 var NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitation_dialog"]);
 async function refOf(sessionId, cwd) {
   const seen = lastSnapshot?.sessions.find((s) => s.sessionId === sessionId);
@@ -4004,10 +4389,25 @@ async function refOf(sessionId, cwd) {
   };
 }
 var agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-updates" && !l.error);
+async function pingNeedsInput(a) {
+  if (debounced(`input:${a.sessionId}`))
+    return;
+  const reason = a.type === "permission_prompt" ? "permission_prompt" : "input";
+  emit([
+    { name: "session.asks", payload: { session: await refOf(a.sessionId, a.cwd), question: a.question, reason } }
+  ]);
+  await push("agent_needs_input", a.question, {
+    workspace: workspaceOf(a.cwd),
+    session: a.session,
+    reason: a.type ?? "",
+    cwd: a.cwd ?? ""
+  });
+}
 async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
   scheduleWaitingList();
+  pickers.ended(e);
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
     setTimeout(async () => {
@@ -4016,22 +4416,16 @@ async function onEvent(e) {
       const s = await sessionInfo(e.session_id);
       if (s.status && s.status !== "waiting")
         return;
-      if (debounced(`input:${e.session_id}`))
+      if (pickers.has(e.session_id))
         return;
-      const reason = e.type === "permission_prompt" ? "permission_prompt" : "input";
-      emit([
-        {
-          name: "session.asks",
-          payload: { session: await refOf(e.session_id, e.cwd), question: e.message ?? "waiting for input", reason }
-        }
-      ]);
-      await push("agent_needs_input", e.message ?? "waiting for input", {
-        workspace,
-        session: s.name,
-        reason: e.type ?? "",
-        cwd: e.cwd ?? ""
+      await pingNeedsInput({
+        sessionId: e.session_id,
+        cwd: e.cwd,
+        question: e.message ?? "waiting for input",
+        type: e.type,
+        session: s.name
       });
-    }, 45000);
+    }, ATTENDED_GRACE_MS);
     return;
   }
   if (e.event === "Stop" || e.event === "SessionEnd") {
@@ -4063,6 +4457,31 @@ function tailEvents() {
     } catch {}
   });
 }
+var pickers = createPickers({
+  route: async (a) => {
+    const where = {
+      workspace: workspaceOf(a.cwd),
+      session: a.session
+    };
+    const bridge = await route(where);
+    return { bridge, thread: where.thread };
+  },
+  sessionInfo: async (sessionId) => {
+    agentsCache.at = 0;
+    return sessionInfo(sessionId);
+  },
+  asks: async ({ sessionId, cwd, question }) => emit([{ name: "session.asks", payload: { session: await refOf(sessionId, cwd), question, reason: "question" } }]),
+  unposted: async ({ sessionId, cwd, question }) => {
+    agentsCache.at = 0;
+    const s = await sessionInfo(sessionId);
+    if (s.status && s.status !== "waiting")
+      return;
+    await pingNeedsInput({ sessionId, cwd, question, type: "agent_needs_input", session: s.name });
+  },
+  scheduleWaitingList: () => scheduleWaitingList(),
+  log,
+  graceMs: ATTENDED_GRACE_MS
+});
 async function digest() {
   try {
     const { snapshot, changes: diffed, first } = await snapshotDiff();
@@ -4168,7 +4587,8 @@ function newHost() {
       return (await route(where)).post(text, {
         thread: where.thread,
         session: where.session,
-        expect_reply: where.expect_reply
+        expect_reply: where.expect_reply,
+        markdown: where.markdown
       });
     },
     spawn: (opts) => spawnAgent(opts),
@@ -4489,7 +4909,7 @@ async function spawn(args) {
 
 // src/cli/commands/start.ts
 import { spawn as spawn2 } from "child_process";
-import { openSync as openSync2 } from "fs";
+import { openSync as openSync3 } from "fs";
 import { homedir as homedir3 } from "os";
 import { join as join12 } from "path";
 
@@ -4650,7 +5070,7 @@ async function ensureDaemon(cwd) {
     for (const until = Date.now() + 5000;Date.now() < until && await daemonStatus(); )
       await Bun.sleep(100);
   }
-  const out = openSync2(PATHS.log, "a");
+  const out = openSync3(PATHS.log, "a");
   const env = { ...process.env, REMY_DAEMON_SERVICE: "0" };
   spawn2(process.execPath, [join12(PLUGIN_ROOT, "dist", "cli.js"), "daemon"], {
     cwd,
@@ -4693,6 +5113,7 @@ async function changes() {
 }
 
 // src/cli/hook.ts
+var PICKER_WAIT_MS = 24 * 60 * 60000;
 async function runHook() {
   if (process.env.REMY_ROLE === "coordinator")
     return;
@@ -4711,13 +5132,15 @@ async function runHook() {
       console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", sessionTitle: name } }));
     return;
   }
+  if (input.hook_event_name === "PermissionRequest")
+    return relayPicker(input);
   const ev = {
     ts: Date.now(),
     event: input.hook_event_name,
-    type: input.notification_type ?? input.reason,
+    type: input.notification_type ?? input.reason ?? input.tool_name,
     session_id: input.session_id,
     cwd: input.cwd,
-    message: trim(input.message, 500),
+    message: trim(input.message ?? answered(input), 500),
     last: trim(input.last_assistant_message, 1500),
     transcript_path: input.transcript_path,
     permission_mode: input.permission_mode
@@ -4725,6 +5148,39 @@ async function runHook() {
   if (process.env.REMY_HOOK_DEBUG)
     ev.message = trim(JSON.stringify(Object.keys(input)), 500);
   appendEvent(ev);
+}
+async function relayPicker(input) {
+  const questions = input.tool_input?.questions;
+  if (input.tool_name !== "AskUserQuestion" || !Array.isArray(questions))
+    return;
+  appendEvent({
+    ts: Date.now(),
+    event: "PermissionRequest",
+    type: input.tool_name,
+    session_id: input.session_id,
+    cwd: input.cwd,
+    message: trim(questions.map((q) => q?.question).join(" \xB7 "), 500),
+    transcript_path: input.transcript_path,
+    permission_mode: input.permission_mode
+  });
+  const reply = await askDaemon(PATHS.socket, "picker", { sessionId: input.session_id, cwd: input.cwd, questions }, PICKER_WAIT_MS).catch(() => {
+    return;
+  });
+  if (!reply?.answers)
+    return;
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PermissionRequest",
+      decision: { behavior: "allow", updatedInput: { ...input.tool_input, answers: reply.answers } }
+    }
+  }));
+}
+function answered(input) {
+  const answers = input.tool_response?.answers ?? input.tool_input?.answers;
+  if (!answers || typeof answers !== "object")
+    return;
+  return Object.entries(answers).map(([q, a]) => `${q} \u2192 ${a}`).join(`
+`);
 }
 function trim(s, n) {
   if (typeof s !== "string" || !s)
