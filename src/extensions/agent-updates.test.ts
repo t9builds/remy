@@ -81,7 +81,7 @@ test("a long turn is cut, and an empty one isn't posted", () => {
 
 test("a cut inside a code block closes the fence before the footer", () => {
   const text = turnText("flan", `Here:\n\`\`\`ts\n${"x".repeat(5000)}\n\`\`\``, undefined)!;
-  expect(text).toContain("\n```…\n\n_(cut;");
+  expect(text).toContain("…\n```\n\n_(cut;");
   expect(text.match(/```/g)).toHaveLength(2);
 });
 

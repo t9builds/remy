@@ -623,10 +623,10 @@ function turnText(name, last, question) {
     return;
   let cut = said;
   if (said.length > MAX_LAST) {
-    let kept = said.slice(0, MAX_LAST);
+    let kept = `${said.slice(0, MAX_LAST)}\u2026`;
     if ((kept.match(/```/g)?.length ?? 0) % 2)
       kept += "\n```";
-    cut = `${kept}\u2026
+    cut = `${kept}
 
 _(cut; \`claude logs ${name}\` has all of it)_`;
   }
