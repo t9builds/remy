@@ -19,10 +19,10 @@ export function turnText(name: string, last: string | undefined, question: strin
   if (!said) return undefined;
   let cut = said;
   if (said.length > MAX_LAST) {
-    let kept = said.slice(0, MAX_LAST);
-    // A cut inside a code block would put the footer in the code; close the fence first.
+    let kept = `${said.slice(0, MAX_LAST)}…`;
+    // A cut inside a code block would put the footer in the code; close the fence first, on a line of its own.
     if ((kept.match(/```/g)?.length ?? 0) % 2) kept += "\n```";
-    cut = `${kept}…\n\n_(cut; \`claude logs ${name}\` has all of it)_`;
+    cut = `${kept}\n\n_(cut; \`claude logs ${name}\` has all of it)_`;
   }
   const body = defang(cut);
   return question
