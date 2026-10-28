@@ -104,7 +104,7 @@ export const createFactory =
       deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
       canStartAgent: () =>
         Date.now() >= backoffUntil &&
-        Object.values(runs).filter((r) => r.stage === "agent").length < (remy.config.maxFactoryAgents ?? 2),
+        Object.values(runs).filter((r) => r.stage === "agent").length < (remy.config.maxFactoryAgents ?? 5),
       spawn: async (run, step, prompt) => {
         try {
           const r = await remy.spawn({

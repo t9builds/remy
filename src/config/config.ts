@@ -34,7 +34,7 @@ export const DEFAULTS: Config = {
   triggerEmoji: "mouse",
   tickSeconds: 60,
   autonomy: "notify",
-  maxFactoryAgents: 2,
+  maxFactoryAgents: 5,
 };
 
 /** `coordinatorCompactPct` as a whole percentage from 1 to 100, else undefined: Claude Code's default. */
