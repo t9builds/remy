@@ -254,6 +254,43 @@ describe("the ADR-0004 pipeline", () => {
     expect(w.asked).toEqual(["Start an agent on a fix for #7? Reply yes."]);
   });
 
+  test("a failing step holds the run and says so in the author's thread", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 4, mergeSha: "mmm" });
+    await go(run, env);
+    w.report("fail", "login is broken");
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("verify-dev: login is broken");
+    expect(w.notices).toEqual([
+      `🛑 verify-dev failed; the factory holds it on *#7 Fix login*: login is broken\n${URL}`,
+    ]);
+  });
+
+  test("a failure that asks or alerts posts only its own message", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 5, mergeSha: "mmm" });
+    await go(run, env);
+    w.report("fail", "touches billing");
+    await go(run, env);
+    expect(run.stage).toBe("asking");
+    expect(w.notices).toEqual([]);
+  });
+
+  test("a verdict post that fails doesn't re-run the step", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 4, mergeSha: "mmm" });
+    await go(run, { ...env, notify: async () => Promise.reject(new Error("slack is down")) });
+    w.report("pass", "works on dev");
+    await go(run, { ...env, notify: async () => Promise.reject(new Error("slack is down")) });
+    expect(at(run)).toBe("agent:agent release-check");
+    expect(run.reports).toHaveLength(1);
+    expect(w.spawned.map((s) => s.step)).toEqual(["verify-dev", "release-check"]);
+  });
+
   test("an agent that stops without reporting holds the run until a retry", async () => {
     const { w, env } = world();
     const run = newRun();

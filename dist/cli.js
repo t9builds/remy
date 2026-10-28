@@ -590,12 +590,14 @@ import { join as join7 } from "path";
 // src/extensions/agent-updates.ts
 var MAX_LAST = 3000;
 var reportsInThread = (s) => s.spawned && !s.role;
+var defang = (text) => text.replace(/<(?=[!@])/g, "<\u200B");
 function turnText(name, last, question) {
   const said = last?.trim();
   if (!said)
     return;
-  const body = said.length > MAX_LAST ? `${said.slice(0, MAX_LAST)}\u2026
+  const cut = said.length > MAX_LAST ? `${said.slice(0, MAX_LAST)}\u2026
 _(cut; \`claude logs ${name}\` has all of it)_` : said;
+  const body = defang(cut);
   return question ? `\u2753 *${name}* asks:
 ${body}
 _Reply here to answer._` : `*${name}* finished its turn:
@@ -606,8 +608,24 @@ function agentUpdates(remy) {
     if (!reportsInThread(session))
       return;
     const text = turnText(session.name, last, question);
-    if (text)
+    if (!text)
+      return;
+    try {
       await remy.post(text, { session: session.name, expectReply: !!question });
+    } catch (e) {
+      if (!question)
+        throw e;
+      remy.log("agent-updates: posting the question failed, telling the coordinator", e);
+      remy.coordinator.tell(`${session.name} finished its turn.
+
+Last message:
+${last}`, {
+        kind: "agent_finished",
+        workspace: session.workspace,
+        session: session.name,
+        cwd: session.cwd
+      });
+    }
   });
   remy.on("pr.opened", async ({ session, pr }) => {
     if (!reportsInThread(session))
@@ -1821,10 +1839,6 @@ class Fanout {
   }
 }
 
-// src/messengers/slack/bridge.ts
-import { mkdirSync as mkdirSync3 } from "fs";
-import { join as join8 } from "path";
-
 // src/messengers/messenger.ts
 var blocking = (checks) => checks.filter((c) => !c.ok && !c.optional);
 var AWAIT_ANSWER_MS = 30 * 60000;
@@ -1838,6 +1852,10 @@ function permissionText(p) {
   return `\uD83D\uDD12 *remy wants to run ${p.tool_name}*: ${p.description}
 \`\`\`${preview}\`\`\``;
 }
+
+// src/messengers/slack/bridge.ts
+import { mkdirSync as mkdirSync3 } from "fs";
+import { join as join8 } from "path";
 
 // src/messengers/slack/client.ts
 function formBody(params) {
@@ -3775,6 +3793,10 @@ function composeWaitingList(snap, workspace, entries, workspaceOf) {
   return formatWaitingList(items, sessions);
 }
 
+// src/daemon/routing.ts
+var originThread = (bridge, origin) => origin && bridge.workspace === origin.workspace ? slackThreadFor(bridge, threadRef(origin.channel, origin.threadTs)) : undefined;
+var agentUpdatesPostsIt = (e, s, agentUpdatesOn) => e.event === "Stop" && !!s.spawned && !s.role && agentUpdatesOn;
+
 // src/daemon/tail.ts
 import { closeSync, openSync, readSync, statSync as statSync7 } from "fs";
 function tailLines(path, onLine, everyMs = 2000) {
@@ -3899,8 +3921,7 @@ async function route(a) {
   if (origin)
     a.workspace = origin.workspace;
   const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
-  if (origin && bridge.workspace === origin.workspace)
-    a.thread = slackThreadFor(bridge, threadRef(origin.channel, origin.threadTs));
+  a.thread = originThread(bridge, origin) ?? a.thread;
   return bridge;
 }
 async function callTool(name, a) {
@@ -4020,7 +4041,7 @@ async function onEvent(e) {
       return;
     if (!questionOf(e.last))
       return;
-    if (e.event === "Stop" && s.spawned && !s.role && agentUpdatesOn())
+    if (agentUpdatesPostsIt(e, s, agentUpdatesOn()))
       return;
     if (debounced(`done:${e.session_id}`, 30000))
       return;

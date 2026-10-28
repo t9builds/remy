@@ -15,17 +15,22 @@ const ref = (over: Partial<SessionRef> = {}): SessionRef => ({
 /** The extension against a Remy that records posts and lets the test raise events. */
 function setup() {
   const posts: { text: string; opts?: PostOptions }[] = [];
+  const told: { text: string; meta?: Record<string, string> }[] = [];
+  const fail = { post: false };
   const handlers = new Map<string, (p: any) => unknown>();
   const remy = {
     on: (event: string, fn: (p: any) => unknown) => void handlers.set(event, fn),
+    log: () => {},
+    coordinator: { tell: (text: string, meta?: Record<string, string>) => void told.push({ text, meta }) },
     post: async (text: string, opts?: PostOptions) => {
+      if (fail.post) throw new Error("rate limited");
       posts.push({ text, opts });
       return "id";
     },
   } as unknown as Remy;
   agentUpdates(remy);
   const raise = <E extends keyof Events>(e: E, p: Events[E]) => handlers.get(e)!(p);
-  return { posts, raise };
+  return { posts, told, fail, raise };
 }
 
 test("an agent's turn goes to its thread; a question expects a reply", async () => {
@@ -59,4 +64,30 @@ test("a long turn is cut, and an empty one isn't posted", () => {
   const text = turnText("flan", "x".repeat(5000), undefined)!;
   expect(text.length).toBeLessThan(3100);
   expect(text).toEndWith("_(cut; `claude logs flan` has all of it)_");
+});
+
+test("a question whose post fails goes to the coordinator instead", async () => {
+  const { posts, told, fail, raise } = setup();
+  fail.post = true;
+  await raise("session.stopped", { session: ref(), last: "Use Ráda?", question: "Use Ráda?" });
+  expect(posts).toEqual([]);
+  expect(told).toEqual([
+    {
+      text: "flan finished its turn.\n\nLast message:\nUse Ráda?",
+      meta: { kind: "agent_finished", workspace: "work", session: "flan", cwd: "/r" },
+    },
+  ]);
+});
+
+test("a plain turn whose post fails is not handed to the coordinator", async () => {
+  const { told, fail, raise } = setup();
+  fail.post = true;
+  await Promise.resolve(raise("session.stopped", { session: ref(), last: "done" })).catch(() => {});
+  expect(told).toEqual([]);
+});
+
+test("an agent's text can't mention people or the channel", () => {
+  const text = turnText("flan", "cc <!channel> <!here> <!everyone> <@U123> <https://x.y|link>", undefined)!;
+  expect(text).not.toMatch(/<[!@]/);
+  expect(text).toContain("<https://x.y|link>");
 });

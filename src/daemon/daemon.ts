@@ -22,9 +22,7 @@ import { loadExtensions } from "../extension-host/load";
 import { coordinatorTools } from "../link/coordinator-tools";
 import { type DaemonStatus, type LinkEvent, RESTART_EXIT, type Request } from "../link/protocol";
 import { LinkServer } from "../link/server";
-import { slackThreadFor } from "../messengers/fanout";
 import type { Messenger, Sink } from "../messengers/messenger";
-import { threadRef } from "../messengers/slack/bridge";
 import { describeMessengers, type Off, openWorkspaces } from "../messengers/workspaces";
 import type { Config } from "../sdk/config";
 import type { EventName, Events, PostOptions, SessionRef } from "../sdk/extension";
@@ -45,6 +43,7 @@ import { coalesce } from "./coalesce";
 import { heldBefore, keepHeld } from "./held";
 import { type Emitted, hookEvents, sessionRef, snapshotEvents } from "./observe";
 import { composeWaitingList, showWaitingList } from "./pinned-waiting-list";
+import { agentUpdatesPostsIt, originThread } from "./routing";
 import { tailLines } from "./tail";
 
 const log = (...a: unknown[]) => {
@@ -152,9 +151,7 @@ async function route(a: { workspace?: string; session?: string; thread?: string 
   const origin = a.session && !a.thread ? await spawnOrigin(a.session) : undefined;
   if (origin) a.workspace = origin.workspace;
   const bridge = bridgeFor(a.workspace, a.session ? await cwdOfSession(a.session) : undefined);
-  // A workspace that is off falls back to another one, where that channel's thread doesn't exist.
-  if (origin && bridge.workspace === origin.workspace)
-    a.thread = slackThreadFor(bridge, threadRef(origin.channel, origin.threadTs));
+  a.thread = originThread(bridge, origin) ?? a.thread;
   return bridge;
 }
 
@@ -291,7 +288,7 @@ async function onEvent(e: RemyEvent) {
     // Only a question needs the coordinator. Otherwise the pinned list shows the turn's end, and the notice an exit.
     if (!questionOf(e.last)) return;
     // Remy's own agents post the question in their thread themselves (extensions/agent-updates.ts).
-    if (e.event === "Stop" && s.spawned && !s.role && agentUpdatesOn()) return;
+    if (agentUpdatesPostsIt(e, s, agentUpdatesOn())) return;
     if (debounced(`done:${e.session_id}`, 30_000)) return;
     const what = e.event === "Stop" ? "finished its turn" : `ended (${e.type ?? "exit"})`;
     await push("agent_finished", `${s.name} ${what}.\n\nLast message:\n${e.last ?? "(none)"}`, {
