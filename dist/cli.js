@@ -749,6 +749,8 @@ function validate(f) {
         errors.push(`${at}: another agent step is called "${s.name}"`);
       if (s.name === FIXER && f.fixer !== false)
         errors.push(`${at}: "${FIXER}" is the fixer's name`);
+      if (s.onFail !== undefined && !["fix", "hold", "ask-human", "notify-author"].includes(s.onFail))
+        errors.push(`${at}: onFail is "fix", "hold", "ask-human" or "notify-author"`);
       names.add(s.name);
     }
     if (s.kind === "wait" && !["ci", "deploy"].includes(s.name))
@@ -1277,7 +1279,7 @@ async function agentStep(run, step, f, env) {
 ${run.pr}`);
     return ask(run, env, "fix", `Start an agent on a fix for #${run.number}? Reply yes.`);
   }
-  if (!holds)
+  if (onFail === "fix" && !holds)
     return fix(run, f, env, `${step.name} failed`, summary);
   return hold(run, now, `${step.name}: ${summary}`);
 }

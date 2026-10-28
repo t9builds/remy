@@ -511,6 +511,65 @@ describe("the fixer (ADR-0010)", () => {
     expect(validate({ fixer: false, steps: [agent("fix", { skill: "/x" })] })).toEqual([]);
   });
 
+  test("an agent step's onFail must be one of the known values", () => {
+    const bad = (onFail: unknown) => validate({ steps: [agent("review", { skill: "/x", onFail } as never)] });
+    expect(bad("ask")).toEqual(['step 1 (agent review): onFail is "fix", "hold", "ask-human" or "notify-author"']);
+    expect(bad("Hold")).toHaveLength(1);
+    for (const ok of ["fix", "hold", "ask-human", "notify-author", undefined]) expect(bad(ok)).toEqual([]);
+  });
+
+  test("a fixer that works past its timeout holds the run", async () => {
+    const { w, env } = world();
+    const f = defineFactory({ ...PRE, fixer: { timeoutMinutes: 10 } });
+    const run = newRun();
+    await pre(run, env, f);
+    w.report("fail", "broken");
+    await pre(run, env, f);
+    expect(run.stage).toBe("fixing");
+    w.t += 9 * 60_000;
+    await pre(run, env, f);
+    expect(run.stage).toBe("fixing");
+    w.t += 2 * 60_000;
+    await pre(run, env, f);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("fix (agent2) has worked for over 10 min without reporting");
+  });
+
+  test("a fixer that stops without reporting holds the run after the grace period", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("fail", "broken");
+    await pre(run, env);
+    expect(run.stage).toBe("fixing");
+    w.status.set("agent2", "idle");
+    w.t += 2 * 60_000;
+    await pre(run, env);
+    expect(run.stage).toBe("fixing");
+    w.t += 2 * 60_000;
+    await pre(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("fix (agent2) stopped without reporting");
+  });
+
+  test("a fixer that says it pushed, but the PR didn't change, holds the run after a wait", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("fail", "broken");
+    await pre(run, env);
+    w.report("fixed", "changed it");
+    await pre(run, env);
+    expect(run.stage).toBe("awaiting-fix");
+    w.t += 29 * 60_000;
+    await pre(run, env);
+    expect(run.stage).toBe("awaiting-fix");
+    w.t += 2 * 60_000;
+    await pre(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("the fixer said it pushed fixes, but the PR didn't change");
+  });
+
   test("the fixer's config is checked", () => {
     const steps = [agent("review", { skill: "/x" })];
     const errors = (fixer: unknown) => validate({ fixer, steps } as Factory);

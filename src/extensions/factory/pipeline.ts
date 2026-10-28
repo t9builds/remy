@@ -470,7 +470,7 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
     );
     return ask(run, env, "fix", `Start an agent on a fix for #${run.number}? Reply yes.`);
   }
-  if (!holds) return fix(run, f, env, `${step.name} failed`, summary);
+  if (onFail === "fix" && !holds) return fix(run, f, env, `${step.name} failed`, summary);
   return hold(run, now, `${step.name}: ${summary}`);
 }
 

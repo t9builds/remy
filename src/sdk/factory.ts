@@ -199,6 +199,8 @@ export function validate(f: Factory): string[] {
       if (!s.skill) errors.push(`${at}: needs a skill`);
       if (names.has(s.name)) errors.push(`${at}: another agent step is called "${s.name}"`);
       if (s.name === FIXER && f.fixer !== false) errors.push(`${at}: "${FIXER}" is the fixer's name`);
+      if (s.onFail !== undefined && !["fix", "hold", "ask-human", "notify-author"].includes(s.onFail))
+        errors.push(`${at}: onFail is "fix", "hold", "ask-human" or "notify-author"`);
       names.add(s.name);
     }
     if (s.kind === "wait" && !["ci", "deploy"].includes(s.name)) errors.push(`${at}: wait is "ci" or "deploy"`);
