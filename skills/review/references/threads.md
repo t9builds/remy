@@ -36,7 +36,7 @@ query($owner: String!, $repo: String!, $n: Int!) {
 }'
 ```
 
-Match an open marked thread to a finding by `path`, `originalLine` and what the problem is, not the exact title: titles get reworded between rounds, and `line` is null once a push outdates the thread. A marked thread for this round already present means this step ran before: reply there, don't open another. A thread whose comments (`totalCount` above 1) already hold your reply for this round only needs resolving. Open threads only for findings that have none yet.
+Match an open marked thread to a finding by `path`, `originalLine` and what the problem is, not the exact title: titles get reworded between rounds, and `line` is null once a push outdates the thread. A marked thread for this round already present means this step ran before: reply there, don't open another. A thread opened this round whose `totalCount` is above 1 was already replied to: it only needs resolving. Open threads only for findings that have none yet.
 
 ## Open the threads
 
