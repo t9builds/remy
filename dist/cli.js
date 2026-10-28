@@ -4786,6 +4786,7 @@ function summarize(main, subagents = []) {
     tools: {},
     subagentTools: {},
     errors: {},
+    subagentErrors: {},
     skills: [],
     subagents: [],
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -4814,7 +4815,8 @@ function summarize(main, subagents = []) {
             const call = toolOf.get(c.tool_use_id);
             if (call) {
               call.error = true;
-              s.errors[call.tool] = (s.errors[call.tool] ?? 0) + 1;
+              const errors = agent ? s.subagentErrors : s.errors;
+              errors[call.tool] = (errors[call.tool] ?? 0) + 1;
             }
           }
       }
@@ -4894,7 +4896,9 @@ ${hits.join(`
 }
 function buildTrace(want, w) {
   const pr = resolvePr(want, w);
-  const entries = Object.entries(w.spawned).filter(([name, s]) => pr ? s.pr === pr : name === want || !!s.id && (want.startsWith(s.id) || s.id.startsWith(want)));
+  if (!pr && /^#?\d+$/.test(want))
+    throw new Error(`no PR ${want.startsWith("#") ? want : `#${want}`} that Remy knows; \`remy factory\` lists them`);
+  const entries = Object.entries(w.spawned).filter(([name, s]) => pr ? s.pr === pr : name === want || !!s.id && (want.startsWith(s.id) || want.length >= 4 && s.id.startsWith(want)));
   if (!pr && !entries.length)
     throw new Error(`no PR or agent "${want}" that Remy knows; \`remy factory\` and \`remy status\` list them`);
   const one = !pr && entries.length === 1 ? entries[0] : undefined;
@@ -4994,7 +4998,7 @@ function formatTrace(t, opts = {}) {
       if (s.subagents.length)
         out.push(`  subagents ${s.subagents.map((x) => `${x.description}${x.type ? import_picocolors.default.dim(` (${x.type})`) : ""}`).join(" \xB7 ")}`);
       if (Object.keys(s.subagentTools).length)
-        out.push(`  subagent tools ${counts(s.subagentTools)}`);
+        out.push(`  subagent tools ${counts(s.subagentTools, s.subagentErrors)}`);
       if (opts.calls)
         for (const c of s.calls)
           out.push(import_picocolors.default.dim(`    ${c.at?.slice(11, 19) ?? ""} `) + `${c.agent ? import_picocolors.default.dim(`[${c.agent}] `) : ""}${c.error ? import_picocolors.default.red(c.tool) : c.tool} ${import_picocolors.default.dim(c.input)}`);

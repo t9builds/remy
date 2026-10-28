@@ -47,7 +47,7 @@ module.exports = {
       name: "extensions-are-private",
       severity: "error",
       comment:
-        "The core reaches built-in extensions only through the list in extensions/index.ts; the CLI commands that read the factory's files (factory, report, trace) are the one exception.",
+        "The core reaches built-in extensions only through the list in extensions/index.ts; the CLI commands that read the factory's files (factory, report, trace) are the exceptions.",
       from: { path: "^src/", pathNot: ["^src/extensions/", "^src/cli/commands/(factory|trace)\\.ts$"] },
       to: { path: "^src/extensions/", pathNot: "^src/extensions/index\\.ts$" },
     },

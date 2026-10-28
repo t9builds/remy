@@ -22,8 +22,9 @@ export type TranscriptSummary = {
   /** Calls per tool, the session's own; `subagentTools` has its subagents'. */
   tools: Record<string, number>;
   subagentTools: Record<string, number>;
-  /** Failed calls per tool, the session's and its subagents'. */
+  /** Failed calls per tool, the session's own; `subagentErrors` has its subagents'. */
   errors: Record<string, number>;
+  subagentErrors: Record<string, number>;
   skills: string[];
   subagents: { description: string; type?: string }[];
   tokens: Tokens;
@@ -139,6 +140,7 @@ export function summarize(main: Entry[], subagents: { name: string; entries: Ent
     tools: {},
     subagentTools: {},
     errors: {},
+    subagentErrors: {},
     skills: [],
     subagents: [],
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -164,7 +166,8 @@ export function summarize(main: Entry[], subagents: { name: string; entries: Ent
             const call = toolOf.get(c.tool_use_id);
             if (call) {
               call.error = true;
-              s.errors[call.tool] = (s.errors[call.tool] ?? 0) + 1;
+              const errors = agent ? s.subagentErrors : s.errors;
+              errors[call.tool] = (errors[call.tool] ?? 0) + 1;
             }
           }
       if (e.type !== "assistant" || !e.message) continue;

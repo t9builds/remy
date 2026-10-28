@@ -50,7 +50,8 @@ test("a transcript sums tools, failures, skills, subagents and tokens once per m
   expect(s.models).toEqual(["claude-opus-5-5", "claude-sonnet-5-5"]);
   expect(s.tools).toEqual({ Bash: 1, Skill: 1, Agent: 1 });
   expect(s.subagentTools).toEqual({ Read: 1 });
-  expect(s.errors).toEqual({ Bash: 1, Read: 1 });
+  expect(s.errors).toEqual({ Bash: 1 });
+  expect(s.subagentErrors).toEqual({ Read: 1 });
   expect(s.skills).toEqual(["verify", "remy:review"]);
   expect(s.subagents).toEqual([{ description: "Proof review", type: "general-purpose" }]);
   expect(s.tokens).toEqual({ input: 40, output: 20, cacheRead: 400, cacheWrite: 200 });

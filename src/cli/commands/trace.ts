@@ -65,8 +65,13 @@ function resolvePr(want: string, w: TraceWorld): string | undefined {
 
 export function buildTrace(want: string, w: TraceWorld): Trace {
   const pr = resolvePr(want, w);
+  // A target written as a PR that no PR matches is an error, not an agent id prefix.
+  if (!pr && /^#?\d+$/.test(want))
+    throw new Error(`no PR ${want.startsWith("#") ? want : `#${want}`} that Remy knows; \`remy factory\` lists them`);
   const entries = Object.entries(w.spawned).filter(([name, s]) =>
-    pr ? s.pr === pr : name === want || (!!s.id && (want.startsWith(s.id) || s.id.startsWith(want))),
+    pr
+      ? s.pr === pr
+      : name === want || (!!s.id && (want.startsWith(s.id) || (want.length >= 4 && s.id.startsWith(want)))),
   );
   if (!pr && !entries.length)
     throw new Error(`no PR or agent "${want}" that Remy knows; \`remy factory\` and \`remy status\` list them`);
@@ -197,7 +202,8 @@ export function formatTrace(t: Trace, opts: { calls?: boolean } = {}) {
         out.push(
           `  subagents ${s.subagents.map((x) => `${x.description}${x.type ? pc.dim(` (${x.type})`) : ""}`).join(" · ")}`,
         );
-      if (Object.keys(s.subagentTools).length) out.push(`  subagent tools ${counts(s.subagentTools)}`);
+      if (Object.keys(s.subagentTools).length)
+        out.push(`  subagent tools ${counts(s.subagentTools, s.subagentErrors)}`);
       if (opts.calls)
         for (const c of s.calls)
           out.push(
