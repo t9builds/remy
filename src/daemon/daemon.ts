@@ -36,13 +36,13 @@ import { spawnAgent } from "../sessions/spawn";
 import { type Spawned, spawnedEntry } from "../sessions/spawned";
 import { questionOf } from "../sessions/waiting-list";
 import { ensureDir, readJson, writeJson } from "../shared/json-file";
-import { defang, formatNotice } from "../shared/notices";
+import { formatNotice } from "../shared/notices";
 import { PATHS, REMY_DIR } from "../shared/paths";
 import { VERSION } from "../shared/version";
 import { coalesce } from "./coalesce";
 import { heldBefore, keepHeld } from "./held";
 import { type Emitted, hookEvents, sessionRef, snapshotEvents } from "./observe";
-import { type Answers, answersLine, type PickerQuestion, pickerText, readAnswers, readPick } from "./picker";
+import { createPickers } from "./pickers";
 import { composeWaitingList, showWaitingList } from "./pinned-waiting-list";
 import { agentUpdatesPostsIt, originThread } from "./routing";
 import { tailLines } from "./tail";
@@ -69,7 +69,7 @@ async function push(kind: string, content: string, meta: Record<string, string> 
   if (kind === "user_message" && meta.workspace) lastActive = meta.workspace;
   if (kind === "user_message") scheduleWaitingList(WAITING_LIST_AFTER_USER_MS);
   if (kind === "user_message" || kind === "task_request") {
-    if (kind === "user_message" && (await answerPicker(meta, content)))
+    if (kind === "user_message" && (await pickers.answer(meta, content)))
       return log("answer for a picker", meta.session || meta.awaiting);
     // A reply to an extension's question answers it, not the coordinator.
     if (kind === "user_message" && meta.session && host.answer(meta.session, content))
@@ -131,7 +131,7 @@ async function request(name: Request, args: any): Promise<unknown> {
   await ready;
   if (name === "tools")
     return coordinatorTools(active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", "));
-  if (name === "picker") return relayPicker(args);
+  if (name === "picker") return pickers.relay(args);
   if (name === "call") return callTool(String(args?.name), (args?.arguments ?? {}) as Record<string, any>);
   throw new Error(`unknown request: ${name}`);
 }
@@ -262,14 +262,8 @@ const agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-u
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
   scheduleWaitingList();
-  // A picker that ran, or a turn or session that ended, settled it in the terminal.
-  if (e.event === "PostToolUse")
-    settlePicker(
-      e.session_id,
-      undefined,
-      `✅ _Answered in the terminal${e.message ? `: ${defang(e.message.replace(/\s*\n\s*/g, " · "))}` : ""}_`,
-    );
-  if (e.event === "Stop" || e.event === "SessionEnd") settlePicker(e.session_id, undefined, "_Closed in the terminal_");
+  // A picker that ran, failed, or whose turn or session ended was settled in the terminal.
+  pickers.ended(e);
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
     // Give whoever sits at that terminal a chance first; ping only if it's still blocked.
@@ -278,7 +272,7 @@ async function onEvent(e: RemyEvent) {
       scheduleWaitingList();
       const s = await sessionInfo(e.session_id);
       if (s.status && s.status !== "waiting") return;
-      // A picker's prompt: Remy asks in chat itself (relayPicker).
+      // A picker's prompt: Remy asks in chat itself (daemon/pickers.ts).
       if (pickers.has(e.session_id)) return;
       if (debounced(`input:${e.session_id}`)) return;
       const reason = e.type === "permission_prompt" ? "permission_prompt" : "input";
@@ -326,101 +320,25 @@ function tailEvents() {
 
 // ---------- Pickers ----------
 
-/** A session's picker (AskUserQuestion) waiting for an answer, here and in its terminal at once (daemon/picker.ts). */
-type Picker = {
-  sessionId: string;
-  name: string;
-  cwd?: string;
-  questions: PickerQuestion[];
-  /** Hands the answers to the waiting hook; none leaves the terminal's picker to the terminal. */
-  resolve: (r: { answers?: Answers }) => void;
-  timer?: ReturnType<typeof setTimeout>;
-  posted?: { bridge: Messenger; id: string; thread?: string; text: string };
-  /** How it ended, said under the question. */
-  outcome?: string;
-};
-const pickers = new Map<string, Picker>();
-
-/** Ask the user in chat; resolves with their answers, or with none once the terminal settled it. */
-async function relayPicker(a: { sessionId: string; cwd?: string; questions: PickerQuestion[] }) {
-  if (!a?.sessionId || !Array.isArray(a.questions) || !a.questions.length) return {};
-  settlePicker(a.sessionId);
-  agentsCache.at = 0;
-  const s = await sessionInfo(a.sessionId);
-  return new Promise<{ answers?: Answers }>((resolve) => {
-    const p: Picker = { sessionId: a.sessionId, name: s.name, cwd: a.cwd, questions: a.questions, resolve };
-    pickers.set(a.sessionId, p);
-    // Nobody sits at a background agent's terminal, so its picker goes to chat at once.
-    p.timer = setTimeout(() => void postPicker(p), s.unattended ? 0 : ATTENDED_GRACE_MS);
-  });
-}
-
-async function postPicker(p: Picker) {
-  if (pickers.get(p.sessionId) !== p) return;
-  const where: { workspace?: string; session?: string; thread?: string } = {
-    workspace: workspaceOf(p.cwd),
-    session: p.name,
-  };
-  try {
+const pickers = createPickers({
+  route: async (a) => {
+    const where: { workspace?: string; session?: string; thread?: string } = {
+      workspace: workspaceOf(a.cwd),
+      session: a.session,
+    };
     const bridge = await route(where);
-    const text = pickerText(p.name, p.questions);
-    const id = await bridge.post(text, { thread: where.thread, session: p.name, expect_reply: true });
-    p.posted = { bridge, id, thread: where.thread, text };
-  } catch (e: any) {
-    return log("picker: posting failed", p.name, e?.message ?? e);
-  }
-  // Answered in the terminal while it was being posted.
-  if (p.outcome) return closePicker(p);
-  scheduleWaitingList();
-  const question = p.questions.map((q) => q.question).join("\n");
-  void emit([
-    { name: "session.asks", payload: { session: await refOf(p.sessionId, p.cwd), question, reason: "question" } },
-  ]);
-}
-
-/** End `sessionId`'s picker: hand its hook `answers` (none when the terminal settled it) and say `outcome` in chat. */
-function settlePicker(sessionId: string, answers?: Answers, outcome = "_Closed_") {
-  const p = pickers.get(sessionId);
-  if (!p) return;
-  pickers.delete(sessionId);
-  clearTimeout(p.timer);
-  p.resolve({ answers });
-  p.outcome = outcome;
-  void closePicker(p);
-}
-
-/** Put how the picker ended in place of how to answer it, and stop treating its thread as waiting for a reply. */
-async function closePicker(p: Picker) {
-  if (!p.posted || !p.outcome) return;
-  const { bridge, id, text } = p.posted;
-  bridge.answered(p.name);
-  scheduleWaitingList();
-  await bridge
-    .update(id, `${text.slice(0, text.lastIndexOf("\n"))}\n${p.outcome}`)
-    .catch((e: any) => log("picker: update failed", p.name, e?.message ?? e));
-}
-
-/**
- * Whether the user's message answers a posted picker: any reply in the agent's thread (one that doesn't fit gets
- * told why), or a plain message that picks an option right after the agent asked.
- */
-async function answerPicker(meta: Record<string, string>, text: string) {
-  const name = meta.session || meta.awaiting;
-  const p = name ? [...pickers.values()].find((x) => x.posted && x.name === name) : undefined;
-  if (!p?.posted) return false;
-  if (!meta.session) {
-    const answers = readPick(p.questions, text);
-    if (answers) settlePicker(p.sessionId, answers, `✅ _${answersLine(answers)}_`);
-    return !!answers;
-  }
-  const read = readAnswers(p.questions, text);
-  if ("answers" in read) settlePicker(p.sessionId, read.answers, `✅ _${answersLine(read.answers)}_`);
-  else
-    await p.posted.bridge
-      .post(read.problem, { thread: p.posted.thread, session: p.name, expect_reply: true })
-      .catch((e: any) => log("picker: posting failed", p.name, e?.message ?? e));
-  return true;
-}
+    return { bridge, thread: where.thread };
+  },
+  sessionInfo: async (sessionId) => {
+    agentsCache.at = 0;
+    return sessionInfo(sessionId);
+  },
+  asks: async ({ sessionId, cwd, question }) =>
+    emit([{ name: "session.asks", payload: { session: await refOf(sessionId, cwd), question, reason: "question" } }]),
+  scheduleWaitingList: () => scheduleWaitingList(),
+  log,
+  graceMs: ATTENDED_GRACE_MS,
+});
 
 // ---------- Digest ----------
 

@@ -7,6 +7,7 @@ One message in the DM lists everything that waits on the user, most urgent first
 - `post`: the daemon posts the list when the workspace has none.
 - `edit`: a change in what waits edits the same message; no new one.
 - `question`: an agent that ended its turn on a question shows as `🔴 *<name>* · asks: "<question>" → reply to its thread`.
+- `picker`: an agent whose picker is open shows the same row with the picker's question(s), and the row goes once it is answered or closed ([pickers](./pickers.md)).
 
 ## How to get to it (user POV)
 

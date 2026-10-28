@@ -10,6 +10,9 @@ test("latestEvents keeps a picker's event over the permission prompt about it", 
   const picker = ev("PermissionRequest", "AskUserQuestion");
   expect(latestEvents([picker, ev("Notification", "permission_prompt")]).get("s")).toBe(picker);
   expect(latestEvents([picker, ev("PostToolUse", "AskUserQuestion")]).get("s")?.event).toBe("PostToolUse");
+  expect(latestEvents([picker, ev("PostToolUseFailure", "AskUserQuestion")]).get("s")?.event).toBe(
+    "PostToolUseFailure",
+  );
   expect(latestEvents([ev("Stop"), ev("Notification", "permission_prompt")]).get("s")?.event).toBe("Notification");
 });
 

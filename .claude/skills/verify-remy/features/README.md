@@ -20,6 +20,7 @@ What a user does with Remy, one file per feature, each with how to drive it thro
 - [Commands](./commands.md): `/queue` and `/factory`, answered by the daemon without the coordinator.
 - [Waiting list](./waiting-list.md): the one message that lists what waits on the user, edited in place.
 - [Agents](./agents.md): the user asks for work, the coordinator starts an agent, and the agent's question comes back to the user and the answer goes to it.
+- [Pickers](./pickers.md): an agent's multiple-choice picker is posted in its thread and answered from chat, or in the terminal.
 - [Channel tasks](./channel-tasks.md): a mention of the bot in a channel thread becomes a task, answered in that thread.
 
-Not mapped yet: the factory (it needs a GitHub repo with PRs), the change digest, Telegram, and permission prompts.
+Not mapped yet: the factory (it needs a GitHub repo with PRs), the change digest, Telegram, and permission prompts (pickers are mapped).

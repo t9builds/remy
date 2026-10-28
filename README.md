@@ -69,7 +69,7 @@ you:  1
 remy: ✅ Stream it
 ```
 
-Reply with a number, a label, several numbers for a pick-any question, or your own words; with several questions, one line each. Right after the picker is posted, a plain message that picks an option works too. A background agent's picker comes at once; one in a terminal you may be sitting at comes after 45 seconds, and answering it there first marks the message answered.
+Reply with a number, a label, several numbers for a pick-any question, or your own words; with several questions, one line each. Right after the picker is posted, a plain message that picks an option works too. A background agent's picker comes at once; one in a terminal you may be sitting at comes after 45 seconds, and answering it there first marks the message answered (rejecting it there closes it).
 
 Instead of a message per finished agent, Remy keeps one pinned message that lists what waits on you, most urgent first, and edits it in place as things change. Read the top line and do that:
 

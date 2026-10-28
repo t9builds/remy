@@ -56,7 +56,10 @@ export function requestText(text: string, botUserId: string) {
     .replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "")
     .replace(/[^\S\n]+/g, " ")
     .replace(/ ?\n\s*/g, "\n")
-    .trim();
+    .trim()
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
 }
 
 function clock(ts: string) {

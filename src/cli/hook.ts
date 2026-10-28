@@ -1,8 +1,8 @@
 /**
  * `remy hook`: what the plugin's hooks run in every session. Stop, Notification and SessionEnd become one line of
  * ~/.remy/events.jsonl each (sessions/events.ts); UserPromptSubmit names a session that has no name yet. A picker
- * (AskUserQuestion) is relayed to chat: PermissionRequest waits for the user's answer there, and PostToolUse records
- * that it was answered, wherever that was.
+ * (AskUserQuestion) is relayed to chat: PermissionRequest waits for the user's answer there, and PostToolUse or
+ * PostToolUseFailure record that it was answered, or rejected or interrupted, in the terminal.
  */
 import { askDaemon } from "../link/client";
 import { listAgents } from "../sessions/agents";

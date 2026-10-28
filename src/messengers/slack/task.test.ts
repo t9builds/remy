@@ -16,6 +16,7 @@ test("cleanText turns Slack markup into plain text", () => {
 test("requestText drops the bot mention", () => {
   expect(requestText("<@UBOT>  fix this, it's in api", "UBOT")).toBe("fix this, it's in api");
   expect(requestText("1 \n\n  2  3\n", "UBOT")).toBe("1\n2 3");
+  expect(requestText("<@UBOT> Fix &amp; ship &lt;now&gt; &amp;lt;", "UBOT")).toBe("Fix & ship <now> &lt;");
 });
 
 test("transcript names people, lists attachments and marks the trigger", () => {

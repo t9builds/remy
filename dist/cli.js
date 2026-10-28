@@ -2072,7 +2072,7 @@ function cleanText(text, names) {
 }
 function requestText(text, botUserId) {
   return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "").replace(/[^\S\n]+/g, " ").replace(/ ?\n\s*/g, `
-`).trim();
+`).trim().replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 function clock(ts) {
   const d = new Date(Number(ts) * 1000);
@@ -3975,6 +3975,92 @@ function readPick(questions, message) {
 }
 var answersLine = (answers) => Object.values(answers).map((a) => defang(a.replace(/\s+/g, " "))).join(" \xB7 ");
 
+// src/daemon/pickers.ts
+function createPickers(deps) {
+  const { log } = deps;
+  const pickers = new Map;
+  async function relay(a) {
+    if (!a?.sessionId || !Array.isArray(a.questions) || !a.questions.length)
+      return {};
+    const since = Date.now();
+    settle(a.sessionId);
+    const s = await deps.sessionInfo(a.sessionId);
+    return new Promise((resolve) => {
+      const p = { sessionId: a.sessionId, name: s.name, cwd: a.cwd, questions: a.questions, since, resolve };
+      pickers.set(a.sessionId, p);
+      p.timer = setTimeout(() => void post(p), s.unattended ? 0 : deps.graceMs);
+    });
+  }
+  async function post(p) {
+    if (pickers.get(p.sessionId) !== p)
+      return;
+    try {
+      const { bridge, thread } = await deps.route({ cwd: p.cwd, session: p.name });
+      const text = pickerText(p.name, p.questions);
+      const id = await bridge.post(text, { thread, session: p.name, expect_reply: true });
+      p.posted = { bridge, id, thread, text };
+    } catch (e) {
+      log("picker: posting failed", p.name, e?.message ?? e);
+      if (pickers.get(p.sessionId) === p)
+        settle(p.sessionId);
+      return;
+    }
+    if (p.outcome)
+      return close(p);
+    deps.scheduleWaitingList();
+    deps.asks({ sessionId: p.sessionId, cwd: p.cwd, question: p.questions.map((q) => q.question).join(`
+`) });
+  }
+  function settle(sessionId, answers, outcome = "_Closed_") {
+    const p = pickers.get(sessionId);
+    if (!p)
+      return;
+    pickers.delete(sessionId);
+    clearTimeout(p.timer);
+    p.resolve({ answers });
+    p.outcome = outcome;
+    close(p);
+  }
+  async function close(p) {
+    if (!p.posted || !p.outcome)
+      return;
+    const { bridge, id, text } = p.posted;
+    bridge.answered(p.name);
+    deps.scheduleWaitingList();
+    await bridge.update(id, `${text.slice(0, text.lastIndexOf(`
+`))}
+${p.outcome}`).catch((e) => log("picker: update failed", p.name, e?.message ?? e));
+  }
+  function ended(e) {
+    const p = pickers.get(e.session_id);
+    if (!p || e.ts < p.since)
+      return;
+    if (e.event === "PostToolUse")
+      settle(e.session_id, undefined, `\u2705 _Answered in the terminal${e.message ? `: ${defang(e.message.replace(/\s*\n\s*/g, " \xB7 "))}` : ""}_`);
+    else if (e.event === "PostToolUseFailure" || e.event === "Stop" || e.event === "SessionEnd")
+      settle(e.session_id, undefined, "_Closed in the terminal_");
+  }
+  async function answer(meta, text) {
+    const name = meta.session || meta.awaiting;
+    const p = name ? [...pickers.values()].find((x) => x.posted && x.name === name) : undefined;
+    if (!p?.posted)
+      return false;
+    if (!meta.session) {
+      const answers = readPick(p.questions, text);
+      if (answers)
+        settle(p.sessionId, answers, `\u2705 _${answersLine(answers)}_`);
+      return !!answers;
+    }
+    const read = readAnswers(p.questions, text);
+    if ("answers" in read)
+      settle(p.sessionId, read.answers, `\u2705 _${answersLine(read.answers)}_`);
+    else
+      await p.posted.bridge.post(read.problem, { thread: p.posted.thread, session: p.name, expect_reply: true }).catch((e) => log("picker: posting failed", p.name, e?.message ?? e));
+    return true;
+  }
+  return { relay, ended, answer, has: (sessionId) => pickers.has(sessionId) };
+}
+
 // src/daemon/pinned-waiting-list.ts
 async function showWaitingList(m, prev, text, log) {
   if (prev?.text === text)
@@ -4083,7 +4169,7 @@ async function push(kind, content, meta = {}) {
   if (kind === "user_message")
     scheduleWaitingList(WAITING_LIST_AFTER_USER_MS);
   if (kind === "user_message" || kind === "task_request") {
-    if (kind === "user_message" && await answerPicker(meta, content))
+    if (kind === "user_message" && await pickers.answer(meta, content))
       return log("answer for a picker", meta.session || meta.awaiting);
     if (kind === "user_message" && meta.session && host.answer(meta.session, content))
       return log("answer for an extension", meta.session);
@@ -4135,7 +4221,7 @@ async function request(name, args) {
   if (name === "tools")
     return coordinatorTools(active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", "));
   if (name === "picker")
-    return relayPicker(args);
+    return pickers.relay(args);
   if (name === "call")
     return callTool(String(args?.name), args?.arguments ?? {});
   throw new Error(`unknown request: ${name}`);
@@ -4246,10 +4332,7 @@ async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
   scheduleWaitingList();
-  if (e.event === "PostToolUse")
-    settlePicker(e.session_id, undefined, `\u2705 _Answered in the terminal${e.message ? `: ${defang(e.message.replace(/\s*\n\s*/g, " \xB7 "))}` : ""}_`);
-  if (e.event === "Stop" || e.event === "SessionEnd")
-    settlePicker(e.session_id, undefined, "_Closed in the terminal_");
+  pickers.ended(e);
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
     setTimeout(async () => {
@@ -4307,81 +4390,24 @@ function tailEvents() {
     } catch {}
   });
 }
-var pickers = new Map;
-async function relayPicker(a) {
-  if (!a?.sessionId || !Array.isArray(a.questions) || !a.questions.length)
-    return {};
-  settlePicker(a.sessionId);
-  agentsCache.at = 0;
-  const s = await sessionInfo(a.sessionId);
-  return new Promise((resolve) => {
-    const p = { sessionId: a.sessionId, name: s.name, cwd: a.cwd, questions: a.questions, resolve };
-    pickers.set(a.sessionId, p);
-    p.timer = setTimeout(() => void postPicker(p), s.unattended ? 0 : ATTENDED_GRACE_MS);
-  });
-}
-async function postPicker(p) {
-  if (pickers.get(p.sessionId) !== p)
-    return;
-  const where = {
-    workspace: workspaceOf(p.cwd),
-    session: p.name
-  };
-  try {
+var pickers = createPickers({
+  route: async (a) => {
+    const where = {
+      workspace: workspaceOf(a.cwd),
+      session: a.session
+    };
     const bridge = await route(where);
-    const text = pickerText(p.name, p.questions);
-    const id = await bridge.post(text, { thread: where.thread, session: p.name, expect_reply: true });
-    p.posted = { bridge, id, thread: where.thread, text };
-  } catch (e) {
-    return log("picker: posting failed", p.name, e?.message ?? e);
-  }
-  if (p.outcome)
-    return closePicker(p);
-  scheduleWaitingList();
-  const question = p.questions.map((q) => q.question).join(`
-`);
-  emit([
-    { name: "session.asks", payload: { session: await refOf(p.sessionId, p.cwd), question, reason: "question" } }
-  ]);
-}
-function settlePicker(sessionId, answers, outcome = "_Closed_") {
-  const p = pickers.get(sessionId);
-  if (!p)
-    return;
-  pickers.delete(sessionId);
-  clearTimeout(p.timer);
-  p.resolve({ answers });
-  p.outcome = outcome;
-  closePicker(p);
-}
-async function closePicker(p) {
-  if (!p.posted || !p.outcome)
-    return;
-  const { bridge, id, text } = p.posted;
-  bridge.answered(p.name);
-  scheduleWaitingList();
-  await bridge.update(id, `${text.slice(0, text.lastIndexOf(`
-`))}
-${p.outcome}`).catch((e) => log("picker: update failed", p.name, e?.message ?? e));
-}
-async function answerPicker(meta, text) {
-  const name = meta.session || meta.awaiting;
-  const p = name ? [...pickers.values()].find((x) => x.posted && x.name === name) : undefined;
-  if (!p?.posted)
-    return false;
-  if (!meta.session) {
-    const answers = readPick(p.questions, text);
-    if (answers)
-      settlePicker(p.sessionId, answers, `\u2705 _${answersLine(answers)}_`);
-    return !!answers;
-  }
-  const read = readAnswers(p.questions, text);
-  if ("answers" in read)
-    settlePicker(p.sessionId, read.answers, `\u2705 _${answersLine(read.answers)}_`);
-  else
-    await p.posted.bridge.post(read.problem, { thread: p.posted.thread, session: p.name, expect_reply: true }).catch((e) => log("picker: posting failed", p.name, e?.message ?? e));
-  return true;
-}
+    return { bridge, thread: where.thread };
+  },
+  sessionInfo: async (sessionId) => {
+    agentsCache.at = 0;
+    return sessionInfo(sessionId);
+  },
+  asks: async ({ sessionId, cwd, question }) => emit([{ name: "session.asks", payload: { session: await refOf(sessionId, cwd), question, reason: "question" } }]),
+  scheduleWaitingList: () => scheduleWaitingList(),
+  log,
+  graceMs: ATTENDED_GRACE_MS
+});
 async function digest() {
   try {
     const { snapshot, changes: diffed, first } = await snapshotDiff();
@@ -5033,7 +5059,7 @@ async function runHook() {
     return;
   }
   if (input.hook_event_name === "PermissionRequest")
-    return relayPicker2(input);
+    return relayPicker(input);
   const ev = {
     ts: Date.now(),
     event: input.hook_event_name,
@@ -5049,7 +5075,7 @@ async function runHook() {
     ev.message = trim(JSON.stringify(Object.keys(input)), 500);
   appendEvent(ev);
 }
-async function relayPicker2(input) {
+async function relayPicker(input) {
   const questions = input.tool_input?.questions;
   if (input.tool_name !== "AskUserQuestion" || !Array.isArray(questions))
     return;
