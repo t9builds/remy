@@ -20,5 +20,5 @@ Remy now answers the picker itself. The plugin's `PermissionRequest` hook, match
 - A picker no longer shows as a permission on the waiting list; it shows its question and "reply to its thread".
 - The hook can run for up to a day (its timeout); when it ends without an answer, or the daemon isn't running, the terminal dialog is untouched.
 - A daemon restart while a picker waits drops the chat side of it: the hook gets no answer and the picker stays in the terminal.
-- Claude Code still sends a `permission_prompt` notification for the picker, worded differently from one picker to the next. Remy doesn't read the wording: while a picker is open, the snapshot keeps the picker's event over that notification, and the daemon doesn't ping the coordinator about it.
+- Claude Code still sends a `permission_prompt` notification for the picker, worded differently from one picker to the next. Remy doesn't read the wording: while a picker is open, the snapshot keeps the picker's event over that notification, and the daemon doesn't ping the coordinator about it. If posting the picker fails, the daemon pings the coordinator itself (the same ping, debounced per session), since the notification's own check may have passed while the post was in flight.
 - It depends on Claude Code racing `PermissionRequest` hooks against the dialog (checked on 2.1.312).
