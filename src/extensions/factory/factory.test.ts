@@ -49,6 +49,8 @@ test("Remy's own .remy/factory.ts loads", async () => {
     "action notify",
   ]);
   expect(l.factory?.autonomy).toBe("merge");
+  // Failures before the merge go to the fixer, which knows how this repo's checks and verify run (ADR-0010).
+  expect(l.factory?.fixer).toMatchObject({ instructions: expect.stringContaining("bun run check") });
   const review = l.factory?.steps.find((s) => s.kind === "agent" && s.name === "review");
   expect(review?.kind === "agent" && review.repeat).toBe("until-clean");
   const verify = l.factory?.steps.find((s) => s.kind === "agent" && s.name === "verify");
@@ -60,6 +62,7 @@ test("Remy's own .remy/factory.ts loads", async () => {
     draft: false,
     review: "",
     ci: "pass",
+    failing: [],
     head: "aaa",
     lines: 10,
     files: [file],

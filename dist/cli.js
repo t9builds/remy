@@ -670,6 +670,7 @@ import { join as join6 } from "path";
 // src/sdk/factory.ts
 var exports_factory = {};
 __export(exports_factory, {
+  FIXER: () => FIXER,
   LEVELS: () => LEVELS,
   action: () => action,
   agent: () => agent,
@@ -684,6 +685,7 @@ __export(exports_factory, {
 var LEVELS = ["notify", "verify", "merge", "deploy-dev", "deploy-prod"];
 var lowerLevel = (a, b) => LEVELS.indexOf(a) <= LEVELS.indexOf(b) ? a : b;
 var atLeast = (have, need) => LEVELS.indexOf(have) >= LEVELS.indexOf(need);
+var FIXER = "fix";
 var defineFactory = (f) => f;
 var agent = (name, opts) => ({
   kind: "agent",
@@ -730,6 +732,8 @@ function validate(f) {
         errors.push(`${at}: needs a skill`);
       if (names.has(s.name))
         errors.push(`${at}: another agent step is called "${s.name}"`);
+      if (s.name === FIXER && f.fixer !== false)
+        errors.push(`${at}: "${FIXER}" is the fixer's name`);
       names.add(s.name);
     }
     if (s.kind === "wait" && !["ci", "deploy"].includes(s.name))
@@ -759,6 +763,7 @@ var STAGE = {
   running: "next",
   agent: "agent at work",
   "awaiting-fix": "waiting for CI after fixes",
+  fixing: "fixer at work",
   asking: "asking you",
   held: "waits for you",
   done: "done"
@@ -817,11 +822,13 @@ async function prDetail(url) {
     return;
   const j = JSON.parse(r.out);
   const files = (j.files ?? []).map((f) => f.path);
+  const { ci, failing } = ciOf(j.statusCheckRollup);
   return {
     state: j.state,
     draft: !!j.isDraft,
     review: j.reviewDecision ?? "",
-    ci: ciOf(j.statusCheckRollup).ci,
+    ci,
+    failing,
     head: j.headRefOid,
     lines: (j.additions ?? 0) + (j.deletions ?? 0),
     files,
@@ -997,6 +1004,36 @@ function agentPrompt(run, step, f) {
   ].join(`
 `);
 }
+var fixerOf = (f) => f.fixer || {};
+var maxFixes = (f) => fixerOf(f).maxRounds ?? 3;
+var fixerStep = (f) => {
+  const c = fixerOf(f);
+  return {
+    kind: "agent",
+    name: FIXER,
+    skill: c.skill ?? "/remy:fix",
+    instructions: c.instructions,
+    timeoutMinutes: c.timeoutMinutes
+  };
+};
+function fixPrompt(run, step, f) {
+  const n = run.number;
+  const report = (verdict, summary) => `  remy report ${FIXER} ${verdict} --pr ${run.pr} --summary "<one line: ${summary}>"`;
+  return [
+    `${step.skill}${step.instructions ? ` ${step.instructions}` : ""}`,
+    "",
+    `You are the fixer in Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}, fix ${run.fixes} of at most ${maxFixes(f)}. You didn't write this change. What failed: ${run.reason}.`,
+    ...run.about ? [`What it is for: ${run.about}`] : [],
+    `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). Fix the cause, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. Once you push, the pipeline runs again from its first step.`,
+    "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
+    "",
+    "As the very last step, report with exactly one of:",
+    report("fixed", "what was wrong and what you changed"),
+    report("pass", "why nothing needed changing, e.g. a flaky check you re-ran"),
+    report("fail", "the call a person has to make, or why you couldn't fix it")
+  ].join(`
+`);
+}
 function enter(run, stage, now, reason) {
   Object.assign(run, { stage, since: now, reason });
 }
@@ -1024,6 +1061,26 @@ function ask(run, env, purpose, question) {
   env.ask(run, question);
   return false;
 }
+var fixable = (run, f) => f.fixer !== false && !run.mergeSha;
+async function fix(run, f, env, what, detail) {
+  const now = env.now();
+  const most = maxFixes(f);
+  const round = (run.fixes ?? 0) + 1;
+  const cause = `${what}${detail ? `: ${detail}` : ""}`;
+  const on = `${what} on *#${run.number} ${defang(run.title)}*${detail ? `: ${defang(detail)}` : ""}`;
+  if (round > most) {
+    await env.notify(run, `\uD83D\uDED1 ${on}; the factory holds it after ${most} fixes
+${run.pr}`).catch(() => {});
+    return hold(run, now, `${cause} (after ${most} fixes)`);
+  }
+  run.fixes = round;
+  run.agent = undefined;
+  enter(run, "fixing", now, cause);
+  await env.notify(run, `\uD83D\uDEE0\uFE0F ${on}; a fixer is on it (${round} of ${most})
+${run.pr}`).catch(() => {});
+  return true;
+}
+var ciFails = (run, f, env, d, what = "CI fails") => fixable(run, f) ? fix(run, f, env, what, d.failing.join(", ") || undefined) : hold(run, env.now(), what);
 var lastPass = (run, name) => run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
 async function advance(run, f, autonomy, env) {
   for (let i = 0;i < 50 && await stepOnce(run, f, autonomy, env); i++)
@@ -1037,6 +1094,7 @@ async function stepOnce(run, f, autonomy, env) {
     const retry = env.reports().findLast((r) => r.pr === run.pr && r.kind === "retry");
     if (retry && retry.at > run.since) {
       run.urgent = false;
+      run.fixes = 0;
       return next(run, now, run.step);
     }
     return mergedByHand(run, f, env);
@@ -1062,10 +1120,28 @@ async function stepOnce(run, f, autonomy, env) {
     enter(run, "done", now, yes ? "a fix was started" : "no fix wanted");
     return false;
   }
+  if (run.stage === "fixing")
+    return fixing(run, f, env);
   const step = f.steps[run.step];
   if (!step) {
     enter(run, "done", now, "through the pipeline");
     return false;
+  }
+  if (run.stage === "awaiting-fix") {
+    const d = await env.pr(run.pr);
+    if (!d)
+      return false;
+    if (d.state !== "OPEN")
+      return closed(run, d, f, env);
+    const by = run.reports.at(-1)?.step === FIXER ? "the fixer" : run.reports.at(-1)?.step ?? "an agent";
+    if (d.head === run.head)
+      return now - run.since > PUSH_WAIT_MS ? hold(run, now, `${by} said it pushed fixes, but the PR didn't change`) : false;
+    if (d.ci === "pending")
+      return false;
+    run.head = d.head;
+    if (d.ci === "fail")
+      return ciFails(run, f, env, d, `CI fails after ${by}'s fixes`);
+    enter(run, "running", now);
   }
   if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(approval(run))) {
     const said = run.reports.findLast((r) => r.verdict === "pass" || r.verdict === "fixed")?.summary;
@@ -1095,23 +1171,54 @@ function verdictText(run, step, r) {
   return `${what} on *#${run.number} ${defang(run.title)}*${r.summary ? `: ${defang(r.summary)}` : ""}
 ${run.pr}`;
 }
-async function agentStep(run, step, f, env) {
+async function reportOf(run, step, env) {
   const now = env.now();
-  if (run.stage === "awaiting-fix") {
+  const agent = run.agent;
+  const report = env.reports().findLast((r) => r.pr === run.pr && r.step === step.name && !r.kind && r.at >= agent.startedAt);
+  if (!report) {
+    const status = await env.agentStatus(agent);
+    const minutes = step.timeoutMinutes ?? 60;
+    if (status === "busy" || status === "waiting") {
+      if (now - agent.startedAt > minutes * 60000)
+        hold(run, now, `${step.name} (${agent.name}) has worked for over ${minutes} min without reporting`);
+    } else if (now - agent.startedAt > GRACE_MS)
+      hold(run, now, `${step.name} (${agent.name}) stopped without reporting`);
+    return;
+  }
+  await env.close(agent);
+  run.agent = undefined;
+  run.reports.push(report);
+  return report;
+}
+async function fixing(run, f, env) {
+  const step = fixerStep(f);
+  if (!run.agent) {
+    if (!env.canStartAgent())
+      return false;
     const d = await env.pr(run.pr);
     if (!d)
       return false;
     if (d.state !== "OPEN")
       return closed(run, d, f, env);
-    if (d.head === run.head)
-      return now - run.since > PUSH_WAIT_MS ? hold(run, now, `${step.name} said it pushed fixes, but the PR didn't change`) : false;
-    if (d.ci === "fail")
-      return hold(run, now, `CI fails after ${step.name}'s fixes`);
-    if (d.ci === "pending")
-      return false;
     run.head = d.head;
-    enter(run, "running", now);
+    const agent = await env.spawn(run, step, fixPrompt(run, step, f));
+    run.agent = { ...agent, startedAt: env.now() };
+    return false;
   }
+  const report = await reportOf(run, step, env);
+  if (!report)
+    return false;
+  const now = env.now();
+  await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
+  if (report.verdict === "fail")
+    return hold(run, now, `${step.name}: ${report.summary ?? ""}`);
+  next(run, now, 0);
+  if (report.verdict === "fixed")
+    enter(run, "awaiting-fix", now);
+  return report.verdict === "pass";
+}
+async function agentStep(run, step, f, env) {
+  const now = env.now();
   if (!run.agent) {
     if (!env.canStartAgent())
       return false;
@@ -1128,20 +1235,13 @@ async function agentStep(run, step, f, env) {
     enter(run, "agent", env.now());
     return false;
   }
-  const report = env.reports().findLast((r) => r.pr === run.pr && r.step === step.name && !r.kind && r.at >= run.agent.startedAt);
-  if (!report) {
-    const status = await env.agentStatus(run.agent);
-    const minutes = step.timeoutMinutes ?? 60;
-    if (status === "busy" || status === "waiting")
-      return now - run.agent.startedAt > minutes * 60000 ? hold(run, now, `${step.name} (${run.agent.name}) has worked for over ${minutes} min without reporting`) : false;
-    return now - run.agent.startedAt > GRACE_MS ? hold(run, now, `${step.name} (${run.agent.name}) stopped without reporting`) : false;
-  }
-  await env.close(run.agent);
-  run.agent = undefined;
-  run.reports.push(report);
+  const report = await reportOf(run, step, env);
+  if (!report)
+    return false;
   const summary = report.summary ?? "";
-  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "hold");
-  if (report.verdict !== "fail" || onFail === "hold")
+  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "fix");
+  const holds = onFail === "hold" || onFail === "fix" && !fixable(run, f);
+  if (report.verdict !== "fail" || holds)
     await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "pass")
     return next(run, now);
@@ -1162,6 +1262,8 @@ async function agentStep(run, step, f, env) {
 ${run.pr}`);
     return ask(run, env, "fix", `Start an agent on a fix for #${run.number}? Reply yes.`);
   }
+  if (!holds)
+    return fix(run, f, env, `${step.name} failed`, summary);
   return hold(run, now, `${step.name}: ${summary}`);
 }
 async function waitStep(run, step, f, env) {
@@ -1177,7 +1279,7 @@ async function waitStep(run, step, f, env) {
     if (d.ci === "pass" || d.ci === "none")
       return next(run, now);
     if (d.ci === "fail")
-      return hold(run, now, "CI fails");
+      return ciFails(run, f, env, d);
     return late ? hold(run, now, `CI still running after ${minutes} min`) : false;
   }
   if (!run.mergeSha)
@@ -1216,6 +1318,8 @@ async function gateStep(run, step, f, env) {
   if (d.ci === "pending" && step.ci !== false)
     return false;
   const blockers = gateBlockers(d, step);
+  if (blockers.length === 1 && d.ci === "fail" && step.ci !== false && fixable(run, f))
+    return ciFails(run, f, env, d);
   if (blockers.length)
     return hold(run, now, `gate ${step.name}: ${blockers.join("; ")}`);
   run.head = d.head;
@@ -1334,7 +1438,7 @@ var createFactory = (world = {}) => (remy) => {
     merge: mergePr,
     deployed: (sha, e, run) => deployed(sha, e, run.repoDir),
     deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
-    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => r.stage === "agent").length < (remy.config.maxFactoryAgents ?? 2),
+    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing") && r.agent).length < (remy.config.maxFactoryAgents ?? 2),
     spawn: async (run, step, prompt) => {
       try {
         const r = await remy.spawn({
@@ -1435,7 +1539,8 @@ var createFactory = (world = {}) => (remy) => {
       return;
     backoffUntil = Date.now() + BACKOFF_MS;
     run.agent = undefined;
-    run.stage = "running";
+    if (run.stage === "agent")
+      run.stage = "running";
     save();
     remy.log("usage limit; factory agents paused until", new Date(backoffUntil).toISOString());
   });

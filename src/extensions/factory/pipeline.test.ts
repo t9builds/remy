@@ -41,6 +41,7 @@ const detail = (over: Partial<PrDetail> = {}): PrDetail => ({
   draft: false,
   review: "",
   ci: "pass",
+  failing: [],
   head: "aaa",
   lines: 40,
   files: ["src/a.ts"],
@@ -263,7 +264,7 @@ describe("the ADR-0004 pipeline", () => {
     expect(w.asked).toEqual(["Start an agent on a fix for #7? Reply yes."]);
   });
 
-  test("a failing step holds the run and says so in the author's thread", async () => {
+  test("a step that fails after the merge holds the run (no branch to fix) and says so in the author's thread", async () => {
     const { w, env } = world();
     const run = newRun();
     Object.assign(run, { step: 4, mergeSha: "mmm" });
@@ -332,6 +333,182 @@ describe("the ADR-0004 pipeline", () => {
     w.builds.set("mmm:cloudbuild", { status: "failed", id: "b9", detail: "failure" });
     await go(run, env);
     expect(run.reason).toBe("the dev deploy of mmm failed (b9): failure");
+  });
+});
+
+/** Remy's own shape: everything is checked before the merge. */
+const PRE: Factory = defineFactory({
+  autonomy: "merge",
+  steps: [
+    agent("review", { skill: "/review", repeat: "until-clean", maxRounds: 3 }),
+    agent("verify", { skill: "/verify" }),
+    gate("merge"),
+    action("merge"),
+  ],
+});
+
+describe("the fixer (ADR-0010)", () => {
+  const pre = (run: Run, env: Env, f: Factory = PRE) => advance(run, f, "merge", env);
+
+  test("a failed verify goes to the fixer, and its fix goes through the pipeline again from the review", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("pass", "nothing wrong");
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("agent:agent verify");
+    w.report("fail", "login returns 500");
+    await pre(run, env);
+    expect(run.stage).toBe("fixing");
+    expect(run.reason).toBe("verify failed: login returns 500");
+    expect(w.spawned.map((s) => s.step)).toEqual(["review", "verify", "fix"]);
+    const prompt = w.spawned[2]!.prompt;
+    expect(prompt).toStartWith("/remy:fix");
+    expect(prompt).toContain("fix 1 of at most 3");
+    expect(prompt).toContain("What failed: verify failed: login returns 500.");
+    expect(prompt).toContain("git push origin HEAD:fix-login");
+    expect(prompt).toContain(`remy report fix fixed --pr ${URL}`);
+    expect(w.notices.at(-1)).toBe(
+      `🛠️ verify failed on *#7 Fix login*: login returns 500; a fixer is on it (1 of 3)\n${URL}`,
+    );
+
+    w.report("fixed", "the session cookie was read before it was set; added a test");
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("awaiting-fix:agent review");
+    w.pr = detail({ head: "bbb" });
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("agent:agent review");
+    expect(run.head).toBe("bbb");
+    w.report("pass");
+    await pre(run, env);
+    w.report("pass", "login works");
+    await pre(run, env);
+    expect(w.merges).toEqual(["bbb squash"]);
+    expect(w.asked).toEqual([]);
+  });
+
+  test("red CI goes to the fixer with the failing checks, and holds once fixes keep failing", async () => {
+    const { w, env } = world();
+    const f = defineFactory({ ...PRE, fixer: { maxRounds: 2 } });
+    const run = newRun();
+    await pre(run, env, f);
+    w.report("pass");
+    await pre(run, env, f);
+    w.report("pass");
+    w.pr = detail({ ci: "fail", failing: ["unit-tests", "lint"] });
+    await pre(run, env, f);
+    expect(run.stage).toBe("fixing");
+    expect(run.reason).toBe("CI fails: unit-tests, lint");
+    expect(w.spawned.at(-1)!.prompt).toContain("fix 1 of at most 2");
+
+    w.report("fixed", "a test relied on the clock");
+    await pre(run, env, f);
+    w.pr = detail({ head: "bbb", ci: "fail", failing: ["unit-tests"] });
+    await pre(run, env, f);
+    expect(run.stage).toBe("fixing");
+    expect(run.reason).toBe("CI fails after the fixer's fixes: unit-tests");
+    w.report("fixed", "another clock");
+    await pre(run, env, f);
+    w.pr = detail({ head: "ccc", ci: "fail", failing: ["unit-tests"] });
+    await pre(run, env, f);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("CI fails after the fixer's fixes: unit-tests (after 2 fixes)");
+    expect(w.notices.at(-1)).toBe(
+      `🛑 CI fails after the fixer's fixes on *#7 Fix login*: unit-tests; the factory holds it after 2 fixes\n${URL}`,
+    );
+    // A retry gives the fixer its rounds back.
+    w.t += 1000;
+    w.reports.push({ pr: URL, at: w.t, step: "", kind: "retry" });
+    await pre(run, env, f);
+    expect(run.fixes).toBe(0);
+  });
+
+  test("CI that fails after a review's fixes goes to the fixer", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("fixed", "null check");
+    await pre(run, env);
+    w.pr = detail({ head: "bbb", ci: "fail", failing: ["typecheck"] });
+    await pre(run, env);
+    expect(run.stage).toBe("fixing");
+    expect(run.reason).toBe("CI fails after review's fixes: typecheck");
+  });
+
+  test("a fix that needs a judgment call holds the run for a person", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("fail", "drops the users table");
+    await pre(run, env);
+    expect(run.reason).toBe("review failed: drops the users table");
+    w.report("fail", "the migration can't be rolled back; which data to keep is a product call");
+    await pre(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("fix: the migration can't be rolled back; which data to keep is a product call");
+    expect(w.notices.at(-1)).toBe(
+      `🛑 fix failed; the factory holds it on *#7 Fix login*: the migration can't be rolled back; which data to keep is a product call\n${URL}`,
+    );
+  });
+
+  test("a fixer that finds nothing to change sends the run back without waiting for a new head", async () => {
+    const { w, env } = world();
+    const f = defineFactory({ steps: [wait("ci"), agent("review", { skill: "/review" }), action("merge")] });
+    const run = newRun();
+    w.pr = detail({ ci: "fail", failing: ["e2e"] });
+    await pre(run, env, f);
+    expect(run.stage).toBe("fixing");
+    w.pr = detail({ ci: "pending" });
+    w.report("pass", "e2e timed out on the runner; re-ran it");
+    await pre(run, env, f);
+    expect(at(run, f)).toBe("running:wait ci");
+    w.pr = detail();
+    await pre(run, env, f);
+    expect(at(run, f)).toBe("agent:agent review");
+  });
+
+  test("with the fixer off, or a step on hold, a failure waits for a person", async () => {
+    for (const f of [
+      defineFactory({ ...PRE, fixer: false }),
+      defineFactory({ ...PRE, steps: [agent("review", { skill: "/review", onFail: "hold" }), ...PRE.steps.slice(1)] }),
+    ]) {
+      const { w, env } = world();
+      const run = newRun();
+      await pre(run, env, f);
+      w.report("fail", "broken");
+      await pre(run, env, f);
+      expect(run.stage).toBe("held");
+      expect(run.reason).toBe("review: broken");
+      expect(w.spawned).toHaveLength(1);
+    }
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail({ ci: "fail" });
+    const f = defineFactory({ fixer: false, steps: [wait("ci"), action("merge")] });
+    await pre(run, env, f);
+    expect(run.reason).toBe("CI fails");
+    expect(w.spawned).toEqual([]);
+  });
+
+  test("no fixer starts while the limit on agents at once is reached", async () => {
+    const { w, env } = world();
+    const f = defineFactory({ steps: [wait("ci"), action("merge")] });
+    const run = newRun();
+    w.slots = false;
+    w.pr = detail({ ci: "fail" });
+    await pre(run, env, f);
+    expect(run.stage).toBe("fixing");
+    expect(w.spawned).toEqual([]);
+    w.slots = true;
+    await pre(run, env, f);
+    expect(w.spawned.map((s) => s.step)).toEqual(["fix"]);
+  });
+
+  test("a pipeline can't name a step after the fixer", () => {
+    expect(validate({ steps: [agent("fix", { skill: "/x" })] })).toEqual([
+      'step 1 (agent fix): "fix" is the fixer\'s name',
+    ]);
+    expect(validate({ fixer: false, steps: [agent("fix", { skill: "/x" })] })).toEqual([]);
   });
 });
 

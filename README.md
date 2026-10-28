@@ -398,7 +398,7 @@ export default defineFactory({
 
 | Step | Done by | What it does |
 |---|---|---|
-| `agent(name, { skill })` | a fresh agent running the skill | Works on the PR in its own worktree and finishes with `remy report <name> pass\|fail\|fixed --pr <url> --summary "…"`. `fixed` with `repeat: "until-clean"` hands the step to another fresh agent once CI is green on the fixes. `fail` waits for you (`onFail: "hold"`), asks you whether to go on (`"ask-human"`, or `onHold`), or tells you at once and offers a fix (`"notify-author"`) |
+| `agent(name, { skill })` | a fresh agent running the skill | Works on the PR in its own worktree and finishes with `remy report <name> pass\|fail\|fixed --pr <url> --summary "…"`. `fixed` with `repeat: "until-clean"` hands the step to another fresh agent once CI is green on the fixes. `fail` goes to the fixer before the merge (`onFail: "fix"`, the default; after the merge it waits for you), waits for you (`"hold"`), asks you whether to go on (`"ask-human"`, or `onHold`), or tells you at once and offers a fix (`"notify-author"`) |
 | `wait("ci")`, `wait("deploy", { env })` | Remy | CI green on the PR's head; the merge commit deployed, seen by Cloud Build (`detector: "cloudbuild"`) or a `check` command that exits 0 |
 | `gate(name, { maxLines, protect })` | Remy | Changed lines, protected paths, CI, and that each verdict covers the PR's current head; new commits send the PR back to the step that hasn't seen them |
 | `action("merge" \| "deploy" \| "notify")` | Remy | Merges with `gh pr merge --match-head-commit`, runs the environment's `deploy` command, tells you the change is through |
@@ -409,8 +409,11 @@ Any skill can be an agent step: Remy adds the PR, the rules and the `remy report
 |---|---|
 | `/remy:review` | Three reviewers in parallel, each through one lens: correctness (the claim, edge cases, security, what it breaks beyond the diff), design (the repo's own rules, root causes, structure, complexity) and proof (tests, and the app run for real). The verifier checks each finding against the code, hands the real ones to a fixer agent, pushes, and records the review on the PR. With `repeat: "until-clean"`, a fresh round reviews every fix |
 | `/remy:verify` | Runs the change: on an environment after a deploy, or from the PR's checkout before the merge (an agent step without `env`) |
+| `/remy:fix` | The fixer, not a step: reproduces red CI or a step's failure, fixes the root cause with a test, runs every check, pushes, and records the fix on the PR |
 | `/remy:release-check` | Decides whether a verified change can go to production on its own |
 | `/remy:create-verification-skill` | Not a step: run it once in a repo to write the repo's own `verify-<app>` skill, which launches the app, drives it like a user and captures evidence. `/remy:review` and `/remy:verify` follow it when it's there |
+
+Before the merge, a failure doesn't wait for you. Red CI (at `wait("ci")`, a gate, or after an agent's fixes) and a step's `fail` go to a fixer agent, which fixes the cause, pushes, and the pipeline runs again from its first step, so a fresh review checks the fix. You're asked only when the fixer says the fix needs your call, or the run has used `maxRounds` fixes and still fails. Set it with `fixer` next to `steps`: `fixer: { skill: "/our-fix", instructions: "…", maxRounds: 3, timeoutMinutes: 60 }` (all optional), or `fixer: false` to hold every failure for you. An agent step can't be called `fix`: that is the name the fixer reports as.
 
 The defaults judge a change by the repo's own written rules (`AGENTS.md` or `CLAUDE.md`, ADRs, lint and dependency rules), so most teams shape them by writing those down. To steer one step, add `instructions` (`agent("review", { skill: "/remy:review", instructions: "Migrations need a rollback." })`). To replace one, name your own skill or a skill pack's: `agent("review", { skill: "/our-review" })`.
 
@@ -424,7 +427,7 @@ How far Remy goes on its own is the lower of the repo's `autonomy` and yours in 
 | `deploy-dev` | deploys verified changes to dev |
 | `deploy-prod` | promotes to production after dev verification |
 
-A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a `fail`, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
+A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a failure the fixer couldn't fix, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
 
 The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Step agents count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
 

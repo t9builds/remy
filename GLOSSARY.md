@@ -64,7 +64,7 @@ A problem a reviewer reports, with where it is and the evidence; the verifier so
 _Avoid_: issue, comment
 
 **Fixer**:
-The agent a verifier hands its confirmed findings to; it fixes them and commits, and the verifier pushes.
+An agent that fixes what was found in a change it didn't write. Inside a review, the verifier hands it the confirmed findings; it commits and the verifier pushes. In the factory, it takes red CI or a failed step before the merge, pushes, and the pipeline runs again from its first step.
 _Avoid_: author
 
 **Verification skill**:
