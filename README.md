@@ -265,7 +265,7 @@ From a terminal: `remy status` (`remy status <name>` for one session in detail, 
 
 ### Tracing what agents did
 
-`remy trace <pr>` shows every agent Remy started for a PR, in order, from Claude Code's own transcripts: how long each ran, its model requests, tokens and cost, the tools it called (and how many failed), the skills it used, its subagents and their tools, and the verdict it reported. `remy trace <agent>` shows one agent; a PR is its URL, or `#123` when the number is unambiguous. `--calls` lists every tool call in order, with its command, path or URL; `--json` gives all of it to a script.
+`remy trace <pr>` shows every agent Remy started for a PR, in order, from Claude Code's own transcripts: how long each ran, its model requests, tokens and cost, the tools it called (and how many failed), the skills it used, its subagents and their tools, and the verdict it reported. `remy trace <agent>` shows one agent; a PR is its URL, or its number when that is unambiguous (`123`; quote it as `'#123'` in a shell). `--calls` lists every tool call in order, with its command, path or URL; `--json` gives all of it to a script.
 
 Remy keeps each agent's session id and transcript path in `~/.remy/spawned.json` from its first hook event, and `remy report` records the session that reported, so a verdict leads to its transcript. Claude Code deletes transcripts after `cleanupPeriodDays` (30 by default); raise it in Claude Code's settings to trace older runs.
 

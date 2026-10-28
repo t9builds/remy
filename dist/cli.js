@@ -4760,7 +4760,7 @@ function readTranscript(path) {
   try {
     subagents = readdirSync2(dir).filter((f) => f.endsWith(".jsonl")).map((f) => {
       const meta = readJsonOr(join13(dir, f.replace(/\.jsonl$/, ".meta.json")));
-      return { name: meta?.description ?? f.replace(/\.jsonl$/, ""), entries: readLines2(join13(dir, f)) };
+      return { name: meta?.description || f.replace(/\.jsonl$/, ""), entries: readLines2(join13(dir, f)) };
     });
   } catch {}
   return summarize(readLines2(path), subagents);
@@ -4884,8 +4884,10 @@ function resolvePr(want, w) {
   ]);
   if (urls.has(want))
     return want;
+  if (!/^#?\d+$/.test(want))
+    return;
   const n = Number(want.replace(/^#/, ""));
-  if (!Number.isInteger(n) || n <= 0)
+  if (n <= 0)
     return;
   const hits = [...urls].filter((u) => prNumber(u) === n);
   if (hits.length > 1)
@@ -4896,9 +4898,9 @@ ${hits.join(`
 }
 function buildTrace(want, w) {
   const pr = resolvePr(want, w);
-  if (!pr && /^#?\d+$/.test(want))
-    throw new Error(`no PR ${want.startsWith("#") ? want : `#${want}`} that Remy knows; \`remy factory\` lists them`);
   const entries = Object.entries(w.spawned).filter(([name, s]) => pr ? s.pr === pr : name === want || !!s.id && (want.startsWith(s.id) || want.length >= 4 && s.id.startsWith(want)));
+  if (!pr && !entries.length && /^#?\d+$/.test(want))
+    throw new Error(`no PR ${want.startsWith("#") ? want : `#${want}`} that Remy knows; \`remy factory\` lists them`);
   if (!pr && !entries.length)
     throw new Error(`no PR or agent "${want}" that Remy knows; \`remy factory\` and \`remy status\` list them`);
   const one = !pr && entries.length === 1 ? entries[0] : undefined;
@@ -4938,6 +4940,11 @@ function buildTrace(want, w) {
     if (!pr)
       a.reports = w.reports.filter((r) => a.sessionId && r.session?.startsWith(a.sessionId));
   const run = pr ? w.runs[pr] : undefined;
+  if (run?.stage === "agent") {
+    const newest = agents.at(-1);
+    if (newest)
+      newest.working = true;
+  }
   return {
     pr,
     run: run && {
@@ -4969,7 +4976,12 @@ function duration(ms) {
   const m = Math.floor(s / 60);
   return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
-var time = (ms) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+var pad = (x) => String(x).padStart(2, "0");
+var clock2 = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+var time = (ms) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock2(d).slice(0, 5)}`;
+};
 var counts = (c, errors = {}) => Object.entries(c).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}${errors[k] ? import_picocolors.default.red(` (${errors[k]} failed)`) : ""}`).join(" \xB7 ");
 function verdictLine(r) {
   const v = r.verdict === "fail" ? import_picocolors.default.red(r.verdict) : r.verdict === "pass" ? import_picocolors.default.green(r.verdict) : import_picocolors.default.yellow(r.verdict ?? "");
@@ -5001,12 +5013,12 @@ function formatTrace(t, opts = {}) {
         out.push(`  subagent tools ${counts(s.subagentTools, s.subagentErrors)}`);
       if (opts.calls)
         for (const c of s.calls)
-          out.push(import_picocolors.default.dim(`    ${c.at?.slice(11, 19) ?? ""} `) + `${c.agent ? import_picocolors.default.dim(`[${c.agent}] `) : ""}${c.error ? import_picocolors.default.red(c.tool) : c.tool} ${import_picocolors.default.dim(c.input)}`);
+          out.push(import_picocolors.default.dim(`    ${c.at ? clock2(new Date(c.at)) : ""} `) + `${c.agent ? import_picocolors.default.dim(`[${c.agent}] `) : ""}${c.error ? import_picocolors.default.red(c.tool) : c.tool} ${import_picocolors.default.dim(c.input)}`);
     }
     for (const r of a.reports)
       out.push(`  ${verdictLine(r)}`);
     if (!a.reports.length && a.role === "factory")
-      out.push(import_picocolors.default.yellow("  no report"));
+      out.push(a.working ? import_picocolors.default.dim("  no report yet") : import_picocolors.default.yellow("  no report"));
     out.push("");
   }
   for (const r of t.reports)

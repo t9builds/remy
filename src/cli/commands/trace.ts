@@ -24,6 +24,8 @@ type TraceAgent = {
   transcript?: string;
   cwd: string;
   merged?: boolean;
+  /** The PR's factory run is waiting on this agent's step: it has no report yet because it is still working. */
+  working?: boolean;
   /** What it reported with `remy report`. */
   reports: Report[];
   summary?: TranscriptSummary;
@@ -56,8 +58,9 @@ function resolvePr(want: string, w: TraceWorld): string | undefined {
     ...Object.values(w.spawned).flatMap((s) => (s.pr ? [s.pr] : [])),
   ]);
   if (urls.has(want)) return want;
+  if (!/^#?\d+$/.test(want)) return undefined;
   const n = Number(want.replace(/^#/, ""));
-  if (!Number.isInteger(n) || n <= 0) return undefined;
+  if (n <= 0) return undefined;
   const hits = [...urls].filter((u) => prNumber(u) === n);
   if (hits.length > 1) throw new Error(`#${n} is more than one PR; give its URL:\n${hits.join("\n")}`);
   return hits[0];
@@ -65,14 +68,14 @@ function resolvePr(want: string, w: TraceWorld): string | undefined {
 
 export function buildTrace(want: string, w: TraceWorld): Trace {
   const pr = resolvePr(want, w);
-  // A target written as a PR that no PR matches is an error, not an agent id prefix.
-  if (!pr && /^#?\d+$/.test(want))
-    throw new Error(`no PR ${want.startsWith("#") ? want : `#${want}`} that Remy knows; \`remy factory\` lists them`);
   const entries = Object.entries(w.spawned).filter(([name, s]) =>
     pr
       ? s.pr === pr
       : name === want || (!!s.id && (want.startsWith(s.id) || (want.length >= 4 && s.id.startsWith(want)))),
   );
+  // Digits alone are a PR number first, an agent id (8 hex characters, which can be all digits) second.
+  if (!pr && !entries.length && /^#?\d+$/.test(want))
+    throw new Error(`no PR ${want.startsWith("#") ? want : `#${want}`} that Remy knows; \`remy factory\` lists them`);
   if (!pr && !entries.length)
     throw new Error(`no PR or agent "${want}" that Remy knows; \`remy factory\` and \`remy status\` list them`);
   // One agent on a PR: trace the PR, so its reports are matched among all the PR's agents, and keep only that one.
@@ -113,6 +116,10 @@ export function buildTrace(want: string, w: TraceWorld): Trace {
     if (!pr) a.reports = w.reports.filter((r) => a.sessionId && r.session?.startsWith(a.sessionId));
 
   const run = pr ? w.runs[pr] : undefined;
+  if (run?.stage === "agent") {
+    const newest = agents.at(-1);
+    if (newest) newest.working = true;
+  }
   return {
     pr,
     run: run && {
@@ -152,7 +159,14 @@ function duration(ms: number) {
   return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
-const time = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+const pad = (x: number) => String(x).padStart(2, "0");
+
+/** Local time, as Slack and daemon.log show it. */
+const clock = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+const time = (ms: number) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(d).slice(0, 5)}`;
+};
 
 const counts = (c: Record<string, number>, errors: Record<string, number> = {}) =>
   Object.entries(c)
@@ -207,12 +221,13 @@ export function formatTrace(t: Trace, opts: { calls?: boolean } = {}) {
       if (opts.calls)
         for (const c of s.calls)
           out.push(
-            pc.dim(`    ${c.at?.slice(11, 19) ?? ""} `) +
+            pc.dim(`    ${c.at ? clock(new Date(c.at)) : ""} `) +
               `${c.agent ? pc.dim(`[${c.agent}] `) : ""}${c.error ? pc.red(c.tool) : c.tool} ${pc.dim(c.input)}`,
           );
     }
     for (const r of a.reports) out.push(`  ${verdictLine(r)}`);
-    if (!a.reports.length && a.role === "factory") out.push(pc.yellow("  no report"));
+    if (!a.reports.length && a.role === "factory")
+      out.push(a.working ? pc.dim("  no report yet") : pc.yellow("  no report"));
     out.push("");
   }
   for (const r of t.reports)

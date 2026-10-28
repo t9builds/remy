@@ -159,3 +159,46 @@ test("a number no PR has is an error, not an agent id prefix; an id prefix needs
   expect(buildTrace("bbbb", world()).agents.map((a) => a.name)).toEqual(["thyme"]);
   expect(() => buildTrace("bb", world())).toThrow(/no PR or agent "bb"/);
 });
+
+test("an agent id of only digits traces that agent; `1e1` and `0x10` are not PR numbers", () => {
+  const digits: Spawned = { ...spawned, fern: { id: "09506192", repo: "/r", task: "fix it", startedAt: 60 } };
+  expect(buildTrace("09506192", world({ spawned: digits })).agents.map((a) => a.name)).toEqual(["fern"]);
+  const tens = { ...run, pr: "https://github.com/o/r/pull/10", number: 10 } as Run;
+  const w = world({ runs: { [tens.pr]: tens }, reports: [] });
+  expect(buildTrace("10", w).pr).toBe(tens.pr);
+  expect(() => buildTrace("1e1", w)).toThrow(/no PR or agent "1e1"/);
+  expect(() => buildTrace("0x10", w)).toThrow(/no PR or agent "0x10"/);
+});
+
+test("the step agent being worked on shows `no report yet`, the others without a report `no report`", () => {
+  expect(plain(formatTrace(buildTrace(PR, world())))).toContain("no report yet");
+  const rest = plain(formatTrace(buildTrace(PR, world({ reports: [] }))));
+  // basil and thyme are done with the step; only the newest, sage, is still working.
+  expect(rest.match(/no report yet/g)).toHaveLength(1);
+  expect(rest.match(/no report\n/g)).toHaveLength(2);
+  const held = plain(formatTrace(buildTrace(PR, world({ runs: { [PR]: { ...run, stage: "running" } as Run } }))));
+  expect(held).not.toContain("no report yet");
+  expect(held).toMatch(/verify for o\/r#7 {2}sage[\s\S]*no report\n/);
+});
+
+test("times are local, in the trace and in --calls", () => {
+  const at = "2026-10-28T10:05:07.000Z";
+  const d = new Date(at);
+  const p = (x: number) => String(x).padStart(2, "0");
+  const local = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  const summary = summarize([
+    {
+      type: "assistant",
+      timestamp: at,
+      message: { id: "m1", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }] },
+    },
+  ]);
+  const text = plain(
+    formatTrace(buildTrace("thyme", world({ transcript: () => ({ path: "/t/x.jsonl", summary }) })), { calls: true }),
+  );
+  expect(text).toContain(`    ${local} Bash ls`);
+  const s = new Date(100);
+  expect(plain(formatTrace(buildTrace(PR, world())))).toContain(
+    `${s.getFullYear()}-${p(s.getMonth() + 1)}-${p(s.getDate())} ${p(s.getHours())}:${p(s.getMinutes())}`,
+  );
+});

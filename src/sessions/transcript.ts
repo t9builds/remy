@@ -95,7 +95,7 @@ export function readTranscript(path: string): TranscriptSummary | undefined {
       .filter((f) => f.endsWith(".jsonl"))
       .map((f) => {
         const meta = readJsonOr(join(dir, f.replace(/\.jsonl$/, ".meta.json")));
-        return { name: meta?.description ?? f.replace(/\.jsonl$/, ""), entries: readLines(join(dir, f)) };
+        return { name: meta?.description || f.replace(/\.jsonl$/, ""), entries: readLines(join(dir, f)) };
       });
   } catch {}
   return summarize(readLines(path), subagents);

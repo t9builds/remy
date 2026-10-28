@@ -83,3 +83,21 @@ test("a transcript is found in its worktree's folder, else in any project folder
   expect(s.calls.find((c) => c.tool === "Read")?.agent).toBe("Proof review");
   expect(readTranscript(join(dir, "missing.jsonl"))).toBeUndefined();
 });
+
+test("a subagent with an empty description is named by its file, not counted as the main agent", () => {
+  const claude = mkdtempSync(join(tmpdir(), "remy-claude-"));
+  const dir = projectDirOf("/r", claude);
+  const id = "dd7d4336-1f91-4c1e-9a1b-0123456789ab";
+  mkdirSync(join(dir, id, "subagents"), { recursive: true });
+  writeFileSync(join(dir, `${id}.jsonl`), "");
+  const call = {
+    type: "assistant",
+    message: { id: "s1", content: [{ type: "tool_use", id: "u1", name: "Read", input: { file_path: "/r/a.ts" } }] },
+  };
+  writeFileSync(join(dir, id, "subagents", "agent-a2.jsonl"), JSON.stringify(call));
+  writeFileSync(join(dir, id, "subagents", "agent-a2.meta.json"), JSON.stringify({ description: "" }));
+  const s = readTranscript(join(dir, `${id}.jsonl`))!;
+  expect(s.tools).toEqual({});
+  expect(s.subagentTools).toEqual({ Read: 1 });
+  expect(s.calls[0]?.agent).toBe("agent-a2");
+});
