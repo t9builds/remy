@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { branchesNamed, sessionBranch, simpleCommands, transcriptBranches } from "./gitbutler";
+import { branchesNamed, resolveBranch, sessionBranch, simpleCommands, transcriptBranches } from "./gitbutler";
 
 const dir = mkdtempSync(join(tmpdir(), "remy-gitbutler-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -42,6 +42,29 @@ test("branchesNamed finds the branch in each but and gh pr create command", () =
   expect(branchesNamed("but commit -b one -m x && but push two")).toEqual(["one", "two"]);
 });
 
+test("branchesNamed skips heredoc bodies and comments, and reads what follows them", () => {
+  // Text written to a file isn't the session's command.
+  expect(branchesNamed("cat > n.md <<'EOF'\nbut push tomas/other\nEOF")).toEqual([]);
+  expect(branchesNamed("cat <<-EOF\n\tbut push tomas/other\n\tEOF\nbut push tomas/mine")).toEqual(["tomas/mine"]);
+  // An apostrophe in a body doesn't open a quote over the command after it.
+  expect(branchesNamed("git commit -F - <<'EOF'\nfix: don't crash\nEOF\nbut push feat/x")).toEqual(["feat/x"]);
+  expect(branchesNamed("cat > body.md <<'EOF'\nit doesn't\nEOF\ngh pr create --head feat/y")).toEqual(["feat/y"]);
+  // The rest of the line with the heredoc is still a command, and `<<<` is a here-string.
+  expect(branchesNamed('cat <<EOF | but push feat/z\nx "\nEOF')).toEqual(["feat/z"]);
+  expect(branchesNamed("cat <<< 'x' && but push feat/w")).toEqual(["feat/w"]);
+  expect(branchesNamed("# Commit what's staged\nbut commit -b feat/x -m msg")).toEqual(["feat/x"]);
+  expect(branchesNamed("but push feat/a # but push other\nbut push feat/b")).toEqual(["feat/a", "feat/b"]);
+  expect(branchesNamed("echo $# && but push feat/c#d")).toEqual(["feat/c#d"]);
+});
+
+test("branchesNamed reads gh pr create with a repo option or a fork head", () => {
+  expect(branchesNamed("gh pr create --head owner:feat/x")).toEqual(["feat/x"]);
+  expect(branchesNamed("gh -R o/r pr create --head x")).toEqual(["x"]);
+  expect(branchesNamed("gh --repo o/r pr create --head x")).toEqual(["x"]);
+  expect(branchesNamed("gh --repo=o/r pr create --head=owner:x")).toEqual(["x"]);
+  expect(branchesNamed("gh -R o/r pr view x")).toEqual([]);
+});
+
 test("branchesNamed ignores commands that name no branch of the session's", () => {
   expect(branchesNamed("but status -fv")).toEqual([]);
   expect(branchesNamed("but commit -m 'no branch'")).toEqual([]);
@@ -69,12 +92,18 @@ test("transcriptBranches reads only Bash commands, and only what was added since
   expect(transcriptBranches(join(dir, "missing.jsonl"))).toEqual([]);
 });
 
-test("sessionBranch is the newest named branch that exists in the checkout", async () => {
-  const repo = join(dir, "repo");
+function repoWith(name: string, ...branches: string[]): string {
+  const repo = join(dir, name);
   const git = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: repo, stderr: "ignore" });
   Bun.spawnSync(["git", "init", "-q", repo]);
   git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init");
-  git("branch", "tomas/mine");
+  git("branch", "-m", "base");
+  for (const b of branches) git("branch", b);
+  return repo;
+}
+
+test("sessionBranch is the newest named branch that exists in the checkout", async () => {
+  const repo = repoWith("repo", "tomas/mine");
 
   const path = join(dir, "s.jsonl");
   writeFileSync(path, bash("but commit -b tomas/mine -m x") + bash("but push to"));
@@ -82,4 +111,36 @@ test("sessionBranch is the newest named branch that exists in the checkout", asy
   expect(await sessionBranch(repo, path)).toBe("tomas/mine");
   expect(await sessionBranch(repo, join(dir, "none.jsonl"))).toBeUndefined();
   expect(await sessionBranch(repo, undefined)).toBeUndefined();
+});
+
+test("sessionBranch matches exact refs, not a prefix or a glob", async () => {
+  const repo = repoWith("exact", "tomas/mine");
+  const path = join(dir, "exact.jsonl");
+  // `tomas` is only a prefix of tomas/mine, `*` a glob over every branch, `main` no branch here.
+  writeFileSync(
+    path,
+    bash("but push tomas/mine") + bash("but push tomas") + bash("but push '*'") + bash("but push main"),
+  );
+  expect(await sessionBranch(repo, path)).toBe("tomas/mine");
+});
+
+test("sessionBranch counts a branch that exists only on origin", async () => {
+  const repo = repoWith("origin-only", "tomas/mine");
+  Bun.spawnSync(["git", "update-ref", "refs/remotes/origin/tomas/remote", "HEAD"], { cwd: repo });
+  const path = join(dir, "origin.jsonl");
+  writeFileSync(path, bash("but push tomas/mine") + bash("gh pr create --head tomas/remote"));
+  expect(await sessionBranch(repo, path)).toBe("tomas/remote");
+});
+
+test("resolveBranch resolves only gitbutler/workspace, from the transcript", async () => {
+  const repo = repoWith("resolve", "tomas/mine");
+  const path = join(dir, "resolve.jsonl");
+  writeFileSync(path, bash("but push tomas/mine"));
+  // A plain checkout keeps its branch, whatever the transcript names.
+  expect(await resolveBranch("feat/plain", repo, path)).toBe("feat/plain");
+  expect(await resolveBranch(undefined, repo, path)).toBeUndefined();
+  expect(await resolveBranch("gitbutler/workspace", repo, path)).toBe("tomas/mine");
+  // A session that named no branch of its own stays on the workspace.
+  expect(await resolveBranch("gitbutler/workspace", repo, join(dir, "none.jsonl"))).toBe("gitbutler/workspace");
+  expect(await resolveBranch("gitbutler/workspace", repo, undefined)).toBe("gitbutler/workspace");
 });

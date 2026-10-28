@@ -3399,17 +3399,23 @@ async function prInfo(cwd, branch) {
 // src/sessions/gitbutler.ts
 import { closeSync, openSync, readSync, statSync as statSync7 } from "fs";
 var GITBUTLER_WORKSPACE = "gitbutler/workspace";
-var MAX_LOOKUPS = 5;
+async function resolveBranch(gitBranch, cwd, transcriptPath) {
+  if (gitBranch !== GITBUTLER_WORKSPACE)
+    return gitBranch;
+  return await sessionBranch(cwd, transcriptPath) ?? gitBranch;
+}
 async function sessionBranch(cwd, transcriptPath) {
   if (!transcriptPath)
     return;
-  const newestFirst = [...new Set(transcriptBranches(transcriptPath).toReversed())].slice(0, MAX_LOOKUPS);
-  for (const branch of newestFirst) {
-    const refs = await run2(["git", "for-each-ref", "--format=%(refname)", `refs/heads/${branch}`, `refs/remotes/origin/${branch}`], cwd);
-    if (refs)
-      return branch;
-  }
-  return;
+  const named = [...new Set(transcriptBranches(transcriptPath).toReversed())];
+  if (!named.length)
+    return;
+  const out = await run2(["git", "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes/origin"], cwd);
+  if (!out)
+    return;
+  const refs = new Set(out.split(`
+`));
+  return named.find((b) => refs.has(`refs/heads/${b}`) || refs.has(`refs/remotes/origin/${b}`));
 }
 var scans = new Map;
 function transcriptBranches(path) {
@@ -3459,7 +3465,12 @@ function branchOf(words) {
   const program = words[at]?.split("/").pop();
   const args = words.slice(at + 1);
   if (program === "gh") {
-    return args[0] === "pr" && args[1] === "create" ? optionValue(args, "-H", "--head") : undefined;
+    let g = 0;
+    while (args[g]?.startsWith("-"))
+      g += args[g] === "-R" || args[g] === "--repo" ? 2 : 1;
+    if (args[g] !== "pr" || args[g + 1] !== "create")
+      return;
+    return optionValue(args, "-H", "--head")?.replace(/^[^:]*:/, "");
   }
   if (program !== "but")
     return;
@@ -3509,6 +3520,7 @@ function simpleCommands(line) {
       target = false;
     word = undefined;
   };
+  const heredocs = [];
   const endCommand = () => {
     endWord();
     if (words.length)
@@ -3536,6 +3548,31 @@ function simpleCommands(line) {
         i++;
       else
         word = (word ?? "") + (line[++i] ?? "");
+    } else if (c === "<" && line[i + 1] === "<" && line[i + 2] !== "<") {
+      if (word !== undefined && /^\d+$/.test(word))
+        word = undefined;
+      endWord();
+      const tabs = line[i + 2] === "-";
+      i += tabs ? 2 : 1;
+      while (line[i + 1] === " " || line[i + 1] === "\t")
+        i++;
+      let delimiter = "";
+      for (i++;i < line.length && !` 	
+;&|()<>`.includes(line[i]); i++) {
+        if (line[i] === "'" || line[i] === '"') {
+          const close = line.indexOf(line[i], i + 1);
+          const to = close < 0 ? line.length : close;
+          delimiter += line.slice(i + 1, to);
+          i = to;
+        } else
+          delimiter += line[i];
+      }
+      i--;
+      heredocs.push({ delimiter, tabs });
+    } else if (c === "#" && word === undefined) {
+      const eol = line.indexOf(`
+`, i);
+      i = eol < 0 ? line.length : eol - 1;
     } else if (c === "<" || c === ">") {
       if (word !== undefined && /^\d+$/.test(word))
         word = undefined;
@@ -3550,13 +3587,30 @@ function simpleCommands(line) {
     } else if (c === " " || c === "\t")
       endWord();
     else if (`;&|()
-`.includes(c))
+`.includes(c)) {
       endCommand();
-    else
+      if (c === `
+`)
+        for (const h of heredocs.splice(0))
+          i = endOfHeredoc(line, i + 1, h.delimiter, h.tabs);
+    } else
       word = (word ?? "") + c;
   }
   endCommand();
   return commands;
+}
+function endOfHeredoc(text, from, delimiter, tabs) {
+  let start = from;
+  while (start < text.length) {
+    const eol = text.indexOf(`
+`, start);
+    const end = eol < 0 ? text.length : eol;
+    const row = text.slice(start, end);
+    if ((tabs ? row.replace(/^\t+/, "") : row) === delimiter)
+      return end;
+    start = end + 1;
+  }
+  return text.length;
 }
 
 // src/sessions/spawned.ts
@@ -3580,7 +3634,7 @@ async function takeSnapshot() {
     const ev = latest.get(a.sessionId);
     const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
     const git = await gitInfo(cwd);
-    const branch = git.branch === GITBUTLER_WORKSPACE ? await sessionBranch(cwd, ev?.transcript_path) ?? git.branch : git.branch;
+    const branch = await resolveBranch(git.branch, cwd, ev?.transcript_path);
     const pr = branch && !NO_PR_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
     const spawn = spawnedEntry(spawned, a.name, a.sessionId);
     return {

@@ -6,7 +6,7 @@ import { PATHS } from "../shared/paths";
 import { listAgents } from "./agents";
 import { type RemyEvent, readEvents } from "./events";
 import { gitInfo, prInfo } from "./git";
-import { GITBUTLER_WORKSPACE, sessionBranch } from "./gitbutler";
+import { GITBUTLER_WORKSPACE, resolveBranch } from "./gitbutler";
 import { aboutOf, type Nicknames } from "./nicknames";
 import { type Spawned, spawnedEntry } from "./spawned";
 
@@ -49,10 +49,7 @@ export async function takeSnapshot(): Promise<Snapshot> {
       const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
       const git = await gitInfo(cwd);
       // A GitButler workspace has every session on one branch; the session's own commands say which is its.
-      const branch =
-        git.branch === GITBUTLER_WORKSPACE
-          ? ((await sessionBranch(cwd, ev?.transcript_path)) ?? git.branch)
-          : git.branch;
+      const branch = await resolveBranch(git.branch, cwd, ev?.transcript_path);
       const pr = branch && !NO_PR_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
       const spawn = spawnedEntry(spawned, a.name, a.sessionId);
       return {
