@@ -33,13 +33,19 @@ function setup() {
   return { posts, told, fail, raise };
 }
 
-test("an agent's turn goes to its thread; a question expects a reply", async () => {
+test("an agent's turn goes to its thread as Markdown; a question expects a reply", async () => {
   const { posts, raise } = setup();
   await raise("session.stopped", { session: ref(), last: "PR #357 is open." });
-  await raise("session.stopped", { session: ref(), last: "Use Ráda?", question: "Use Ráda?" });
+  await raise("session.stopped", { session: ref(), last: "Use **Ráda**?", question: "Use **Ráda**?" });
   expect(posts).toEqual([
-    { text: "*flan* finished its turn:\nPR #357 is open.", opts: { session: "flan", expectReply: false } },
-    { text: "❓ *flan* asks:\nUse Ráda?\n_Reply here to answer._", opts: { session: "flan", expectReply: true } },
+    {
+      text: "**flan** finished its turn:\n\nPR #357 is open.",
+      opts: { session: "flan", expectReply: false, markdown: true },
+    },
+    {
+      text: "❓ **flan** asks:\n\nUse **Ráda**?\n\n_Reply here to answer._",
+      opts: { session: "flan", expectReply: true, markdown: true },
+    },
   ]);
 });
 
@@ -76,11 +82,11 @@ test("a long turn is cut, and an empty one isn't posted", () => {
 test("a question whose post fails goes to the coordinator instead", async () => {
   const { posts, told, fail, raise } = setup();
   fail.post = true;
-  await raise("session.stopped", { session: ref(), last: "Use Ráda?", question: "Use Ráda?" });
+  await raise("session.stopped", { session: ref(), last: "Use **Ráda**?", question: "Use **Ráda**?" });
   expect(posts).toEqual([]);
   expect(told).toEqual([
     {
-      text: "flan finished its turn.\n\nLast message:\nUse Ráda?",
+      text: "flan finished its turn.\n\nLast message:\nUse **Ráda**?",
       meta: { kind: "agent_finished", workspace: "work", session: "flan", cwd: "/r" },
     },
   ]);

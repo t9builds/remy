@@ -324,7 +324,7 @@ A path covers the folder and everything inside it, not sibling folders that shar
 
 ## Extensions
 
-Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `agent-updates` posts in each agent's thread what it said at the end of every turn and the PR it opened, `queue` answers `/queue`, and `factory` runs [pipelines](#factory). Turn one off with `extensions.disabled` and write your own instead.
+Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `agent-updates` posts in each agent's thread what it said at the end of every turn, rendered as Markdown, and the PR it opened, `queue` answers `/queue`, and `factory` runs [pipelines](#factory). Turn one off with `extensions.disabled` and write your own instead.
 
 ```ts
 // ~/.remy/extensions/red-ci.ts
@@ -347,7 +347,7 @@ export default (remy: Remy) => {
 
 | Actions | |
 |---|---|
-| `post(text, { workspace, session, thread, expectReply })` | Post to you; with `session`, in that agent's thread (the Slack thread its task came from, else its DM thread) |
+| `post(text, { workspace, session, thread, expectReply, markdown })` | Post to you; with `session`, in that agent's thread (the Slack thread its task came from, else its DM thread). Text is Slack mrkdwn; with `markdown`, standard Markdown, which Slack renders as rich text (headings, lists, tables, code) |
 | `ask(question, { session })` | Ask you and wait: it's on the waiting list until you reply in its thread, and the reply goes to the extension, not the coordinator |
 | `spawn({ repo, task })`, `close(session)` | Start an agent, close a session |
 | `waitingList.add(entry)`, `waitingList.remove(key)`, `waitingList.text(workspace)` | Put something on the waiting list, take it off, read the list |
