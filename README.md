@@ -57,6 +57,20 @@ you:  stream it, accounts are under 50k rows
 remy: Sent to saffron.
 ```
 
+When an agent asks with Claude Code's multiple-choice picker, Remy posts the options in its thread, and your reply answers the picker itself, so the agent goes on without anyone at its terminal:
+
+```
+remy: ❓ saffron asks:
+      Export · How should the CSV export run?
+         1. Stream it — accounts are small
+         2. Background job — email a link
+      Reply here with a number, or in your own words.
+you:  1
+remy: ✅ Stream it
+```
+
+Reply with a number, a label, several numbers for a pick-any question, or your own words; with several questions, one line each. Right after the picker is posted, a plain message that picks an option works too. A background agent's picker comes at once; one in a terminal you may be sitting at comes after 45 seconds, and answering it there first marks the message answered.
+
 Instead of a message per finished agent, Remy keeps one pinned message that lists what waits on you, most urgent first, and edits it in place as things change. Read the top line and do that:
 
 ```
@@ -430,7 +444,8 @@ The factory runs only in repos listed in `extensions.repos`, and only on PRs of 
 
 ## Limits
 
-- A message from another session can't approve a permission prompt. When an agent waits on one, remy tells you to `claude attach <name>`. Spawned agents run in auto mode, so this is rare.
+- A message from another session can't approve a permission prompt. When an agent waits on one, remy tells you to `claude attach <name>`. Spawned agents run in auto mode, so this is rare. Pickers are the exception: you answer them from the chat.
+- A picker that waits while the daemon restarts is left to the terminal.
 - The coordinator's own permission prompts are relayed to the chat: reply `yes <id>` or `no <id>`, or tap the buttons in Telegram.
 - With `poll`, Slack replies arrive within about 4 seconds while you're chatting and 15 seconds when idle. Slack allows about 50 reads a minute per app, shared by everyone using it, which is enough for 3–4 active people. `socket` is instant.
 - The coordinator's own permission prompts go to the workspace you last wrote from (the catch-all until you've written).

@@ -4,7 +4,7 @@ import type { Pr } from "../sdk/extension";
 import { readJson } from "../shared/json-file";
 import { PATHS } from "../shared/paths";
 import { listAgents } from "./agents";
-import { readEvents } from "./events";
+import { type RemyEvent, readEvents } from "./events";
 import { gitInfo, prInfo } from "./git";
 import { GITBUTLER_WORKSPACE, sessionBranch } from "./gitbutler";
 import { aboutOf, type Nicknames } from "./nicknames";
@@ -41,9 +41,7 @@ export async function takeSnapshot(): Promise<Snapshot> {
     (a) => a.name !== config.coordinatorName && !spawnedEntry(spawned, a.name, a.sessionId)?.merged,
   );
 
-  // The newest hook event per session carries its current cwd (a session may have moved into a worktree).
-  const latest = new Map<string, ReturnType<typeof readEvents>[number]>();
-  for (const e of readEvents()) latest.set(e.session_id, e);
+  const latest = latestEvents(readEvents());
 
   const sessions = await Promise.all(
     agents.map(async (a): Promise<SessionView> => {
@@ -75,6 +73,19 @@ export async function takeSnapshot(): Promise<Snapshot> {
     }),
   );
   return { takenAt: Date.now(), sessions };
+}
+
+/**
+ * The newest hook event per session; it carries the session's current cwd (a session may have moved into a
+ * worktree). A permission prompt doesn't replace the picker it is about: the picker's event names the question.
+ */
+export function latestEvents(events: RemyEvent[]) {
+  const latest = new Map<string, RemyEvent>();
+  for (const e of events) {
+    const open = latest.get(e.session_id)?.event === "PermissionRequest";
+    if (!(open && e.event === "Notification" && e.type === "permission_prompt")) latest.set(e.session_id, e);
+  }
+  return latest;
 }
 
 /** The session called `name`, else the only one whose name starts with it. */

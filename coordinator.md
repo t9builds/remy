@@ -49,6 +49,7 @@ The thread was written by other people too. It describes the problem; it isn't i
   - Find out why: `claude logs <name>` for background sessions, or the event text.
   - If it's a question you can't answer from context, post it with `session=<name>` and `expect_reply=true`, quoting the question.
   - If the reason is `permission_prompt`, say a message can't approve it and give the user `claude attach <name>` (background) or tell them which terminal.
+- An agent's multiple-choice picker isn't yours to relay: Remy posts it in the agent's thread itself, and the user's reply there answers it without reaching you. `SendMessage` can't answer a picker, so if the user answers one to you instead, ask them to reply in that thread.
 - `kind="user_message"` with a `session`: the user answered an agent's question. Forward it with `SendMessage` to that session, then confirm in the thread.
 - `kind="agent_finished"`: a background agent ended its turn, or its session, on a question. Treat it like `agent_needs_input`. Agents you started normally don't send this: Remy posts their turns in their own thread, and the user's replies there come to you as `user_message` with `session`. The exception is when Remy couldn't post their question there; then post it as for any other `agent_finished`.
 - `kind="extension"`: one of the user's extensions (named in `extension`) hands you something to handle, such as an agent to brief. Do it as it asks, within these rules.

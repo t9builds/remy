@@ -2071,7 +2071,8 @@ function cleanText(text, names) {
   return text.replace(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g, (_, id) => `@${names.get(id) ?? id}`).replace(/<#[A-Z0-9]+\|([^>]*)>/g, "#$1").replace(/<!(here|channel|everyone)>/g, "@$1").replace(/<(https?:[^|>]+)\|([^>]+)>/g, "$2 ($1)").replace(/<(https?:[^>]+)>/g, "$1").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 function requestText(text, botUserId) {
-  return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "").replace(/\s+/g, " ").trim();
+  return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "").replace(/[^\S\n]+/g, " ").replace(/ ?\n\s*/g, `
+`).trim();
 }
 function clock(ts) {
   const d = new Date(Number(ts) * 1000);
@@ -3574,9 +3575,7 @@ async function takeSnapshot() {
   const spawned = readJson(PATHS.spawned, {});
   const nicknames = readJson(PATHS.nicknames, {});
   const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName && !spawnedEntry(spawned, a.name, a.sessionId)?.merged);
-  const latest = new Map;
-  for (const e of readEvents())
-    latest.set(e.session_id, e);
+  const latest = latestEvents(readEvents());
   const sessions = await Promise.all(agents.map(async (a) => {
     const ev = latest.get(a.sessionId);
     const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
@@ -3601,6 +3600,15 @@ async function takeSnapshot() {
     };
   }));
   return { takenAt: Date.now(), sessions };
+}
+function latestEvents(events) {
+  const latest = new Map;
+  for (const e of events) {
+    const open = latest.get(e.session_id)?.event === "PermissionRequest";
+    if (!(open && e.event === "Notification" && e.type === "permission_prompt"))
+      latest.set(e.session_id, e);
+  }
+  return latest;
 }
 function findSession(sessions, name) {
   const exact = sessions.find((x) => x.name === name);
@@ -3761,6 +3769,8 @@ function questionOf(last) {
 function itemOf(s) {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
+  if (s.status === "waiting" && s.lastEvent?.event === "PermissionRequest")
+    return { rank: 0, why: `asks: "${short(s.lastEvent.text ?? "pick an option")}"`, action: "reply to its thread" };
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
     return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
   if (s.status === "busy")
@@ -3918,6 +3928,53 @@ function hookEvents(e, session) {
   return [];
 }
 
+// src/daemon/picker.ts
+function pickerText(name, questions) {
+  const many = questions.length > 1;
+  const blocks = questions.map((q, i) => {
+    const head = `${many ? `${i + 1}. ` : ""}${q.header ? `*${defang(q.header)}* \xB7 ` : ""}${defang(q.question)}`;
+    const options = q.options.map((o, j) => `   ${j + 1}. ${defang(o.label)}${o.description && o.description !== o.label ? ` \u2014 _${defang(o.description)}_` : ""}`);
+    return [head + (q.multiSelect ? " _(pick any)_" : ""), ...options].join(`
+`);
+  });
+  const how = many ? "Reply here with one line per question, in order: a number, or your own words." : "Reply here with a number, or in your own words.";
+  return `\u2753 *${name}* asks:
+${blocks.join(`
+
+`)}
+_${how}_`;
+}
+function picked(q, reply) {
+  const tokens = reply.split(/[\s,]+/).filter(Boolean);
+  const byNumber = tokens.every((t) => /^\d+$/.test(t) && Number(t) >= 1 && Number(t) <= q.options.length);
+  if (tokens.length && byNumber && (q.multiSelect || tokens.length === 1))
+    return [...new Set(tokens)].map((t) => q.options[Number(t) - 1].label).join(", ");
+  return q.options.find((o) => o.label.toLowerCase() === reply.toLowerCase())?.label;
+}
+function readAnswers(questions, reply) {
+  const text = reply.trim();
+  const lines = questions.length === 1 ? [text] : text.split(`
+`).map((l) => l.trim()).filter(Boolean);
+  if (!text || lines.length !== questions.length)
+    return { problem: `Answer each of the ${questions.length} questions on its own line, in order.` };
+  const answers = {};
+  for (const [i, q] of questions.entries()) {
+    const line = lines[i];
+    if (/^[\d\s,]+$/.test(line) && !picked(q, line))
+      return {
+        problem: `${q.header ?? q.question}: pick ${q.multiSelect ? "numbers" : "one number"} from 1 to ${q.options.length}, or answer in your own words.`
+      };
+    answers[q.question] = picked(q, line) ?? line;
+  }
+  return { answers };
+}
+function readPick(questions, message) {
+  const q = questions.length === 1 ? questions[0] : undefined;
+  const label = q && picked(q, message.trim());
+  return q && label ? { [q.question]: label } : undefined;
+}
+var answersLine = (answers) => Object.values(answers).map((a) => defang(a.replace(/\s+/g, " "))).join(" \xB7 ");
+
 // src/daemon/pinned-waiting-list.ts
 async function showWaitingList(m, prev, text, log) {
   if (prev?.text === text)
@@ -4026,6 +4083,8 @@ async function push(kind, content, meta = {}) {
   if (kind === "user_message")
     scheduleWaitingList(WAITING_LIST_AFTER_USER_MS);
   if (kind === "user_message" || kind === "task_request") {
+    if (kind === "user_message" && await answerPicker(meta, content))
+      return log("answer for a picker", meta.session || meta.awaiting);
     if (kind === "user_message" && meta.session && host.answer(meta.session, content))
       return log("answer for an extension", meta.session);
     host.emit("message", {
@@ -4075,6 +4134,8 @@ async function request(name, args) {
   await ready;
   if (name === "tools")
     return coordinatorTools(active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", "));
+  if (name === "picker")
+    return relayPicker(args);
   if (name === "call")
     return callTool(String(args?.name), args?.arguments ?? {});
   throw new Error(`unknown request: ${name}`);
@@ -4163,6 +4224,7 @@ function debounced(key, ms = 60000) {
   lastPushed.set(key, Date.now());
   return false;
 }
+var ATTENDED_GRACE_MS = 45000;
 var NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitation_dialog"]);
 async function refOf(sessionId, cwd) {
   const seen = lastSnapshot?.sessions.find((s) => s.sessionId === sessionId);
@@ -4184,6 +4246,10 @@ async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
   scheduleWaitingList();
+  if (e.event === "PostToolUse")
+    settlePicker(e.session_id, undefined, `\u2705 _Answered in the terminal${e.message ? `: ${defang(e.message.replace(/\s*\n\s*/g, " \xB7 "))}` : ""}_`);
+  if (e.event === "Stop" || e.event === "SessionEnd")
+    settlePicker(e.session_id, undefined, "_Closed in the terminal_");
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
     setTimeout(async () => {
@@ -4191,6 +4257,8 @@ async function onEvent(e) {
       scheduleWaitingList();
       const s = await sessionInfo(e.session_id);
       if (s.status && s.status !== "waiting")
+        return;
+      if (pickers.has(e.session_id))
         return;
       if (debounced(`input:${e.session_id}`))
         return;
@@ -4207,7 +4275,7 @@ async function onEvent(e) {
         reason: e.type ?? "",
         cwd: e.cwd ?? ""
       });
-    }, 45000);
+    }, ATTENDED_GRACE_MS);
     return;
   }
   if (e.event === "Stop" || e.event === "SessionEnd") {
@@ -4238,6 +4306,81 @@ function tailEvents() {
       onEvent(JSON.parse(l)).catch((err) => log("event error", err));
     } catch {}
   });
+}
+var pickers = new Map;
+async function relayPicker(a) {
+  if (!a?.sessionId || !Array.isArray(a.questions) || !a.questions.length)
+    return {};
+  settlePicker(a.sessionId);
+  agentsCache.at = 0;
+  const s = await sessionInfo(a.sessionId);
+  return new Promise((resolve) => {
+    const p = { sessionId: a.sessionId, name: s.name, cwd: a.cwd, questions: a.questions, resolve };
+    pickers.set(a.sessionId, p);
+    p.timer = setTimeout(() => void postPicker(p), s.unattended ? 0 : ATTENDED_GRACE_MS);
+  });
+}
+async function postPicker(p) {
+  if (pickers.get(p.sessionId) !== p)
+    return;
+  const where = {
+    workspace: workspaceOf(p.cwd),
+    session: p.name
+  };
+  try {
+    const bridge = await route(where);
+    const text = pickerText(p.name, p.questions);
+    const id = await bridge.post(text, { thread: where.thread, session: p.name, expect_reply: true });
+    p.posted = { bridge, id, thread: where.thread, text };
+  } catch (e) {
+    return log("picker: posting failed", p.name, e?.message ?? e);
+  }
+  if (p.outcome)
+    return closePicker(p);
+  scheduleWaitingList();
+  const question = p.questions.map((q) => q.question).join(`
+`);
+  emit([
+    { name: "session.asks", payload: { session: await refOf(p.sessionId, p.cwd), question, reason: "question" } }
+  ]);
+}
+function settlePicker(sessionId, answers, outcome = "_Closed_") {
+  const p = pickers.get(sessionId);
+  if (!p)
+    return;
+  pickers.delete(sessionId);
+  clearTimeout(p.timer);
+  p.resolve({ answers });
+  p.outcome = outcome;
+  closePicker(p);
+}
+async function closePicker(p) {
+  if (!p.posted || !p.outcome)
+    return;
+  const { bridge, id, text } = p.posted;
+  bridge.answered(p.name);
+  scheduleWaitingList();
+  await bridge.update(id, `${text.slice(0, text.lastIndexOf(`
+`))}
+${p.outcome}`).catch((e) => log("picker: update failed", p.name, e?.message ?? e));
+}
+async function answerPicker(meta, text) {
+  const name = meta.session || meta.awaiting;
+  const p = name ? [...pickers.values()].find((x) => x.posted && x.name === name) : undefined;
+  if (!p?.posted)
+    return false;
+  if (!meta.session) {
+    const answers = readPick(p.questions, text);
+    if (answers)
+      settlePicker(p.sessionId, answers, `\u2705 _${answersLine(answers)}_`);
+    return !!answers;
+  }
+  const read = readAnswers(p.questions, text);
+  if ("answers" in read)
+    settlePicker(p.sessionId, read.answers, `\u2705 _${answersLine(read.answers)}_`);
+  else
+    await p.posted.bridge.post(read.problem, { thread: p.posted.thread, session: p.name, expect_reply: true }).catch((e) => log("picker: posting failed", p.name, e?.message ?? e));
+  return true;
 }
 async function digest() {
   try {
@@ -4870,6 +5013,7 @@ async function changes() {
 }
 
 // src/cli/hook.ts
+var PICKER_WAIT_MS = 24 * 60 * 60000;
 async function runHook() {
   if (process.env.REMY_ROLE === "coordinator")
     return;
@@ -4888,13 +5032,15 @@ async function runHook() {
       console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", sessionTitle: name } }));
     return;
   }
+  if (input.hook_event_name === "PermissionRequest")
+    return relayPicker2(input);
   const ev = {
     ts: Date.now(),
     event: input.hook_event_name,
-    type: input.notification_type ?? input.reason,
+    type: input.notification_type ?? input.reason ?? input.tool_name,
     session_id: input.session_id,
     cwd: input.cwd,
-    message: trim(input.message, 500),
+    message: trim(input.message ?? answered(input), 500),
     last: trim(input.last_assistant_message, 1500),
     transcript_path: input.transcript_path,
     permission_mode: input.permission_mode
@@ -4902,6 +5048,39 @@ async function runHook() {
   if (process.env.REMY_HOOK_DEBUG)
     ev.message = trim(JSON.stringify(Object.keys(input)), 500);
   appendEvent(ev);
+}
+async function relayPicker2(input) {
+  const questions = input.tool_input?.questions;
+  if (input.tool_name !== "AskUserQuestion" || !Array.isArray(questions))
+    return;
+  appendEvent({
+    ts: Date.now(),
+    event: "PermissionRequest",
+    type: input.tool_name,
+    session_id: input.session_id,
+    cwd: input.cwd,
+    message: trim(questions.map((q) => q?.question).join(" \xB7 "), 500),
+    transcript_path: input.transcript_path,
+    permission_mode: input.permission_mode
+  });
+  const reply = await askDaemon(PATHS.socket, "picker", { sessionId: input.session_id, cwd: input.cwd, questions }, PICKER_WAIT_MS).catch(() => {
+    return;
+  });
+  if (!reply?.answers)
+    return;
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PermissionRequest",
+      decision: { behavior: "allow", updatedInput: { ...input.tool_input, answers: reply.answers } }
+    }
+  }));
+}
+function answered(input) {
+  const answers = input.tool_response?.answers ?? input.tool_input?.answers;
+  if (!answers || typeof answers !== "object")
+    return;
+  return Object.entries(answers).map(([q, a]) => `${q} \u2192 ${a}`).join(`
+`);
 }
 function trim(s, n) {
   if (typeof s !== "string" || !s)

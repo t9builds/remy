@@ -30,7 +30,8 @@ export type DaemonStatus = {
 /** `restart` exits with this code, so launchd or systemd start the daemon again; `stop` exits with 0, so they don't. */
 export const RESTART_EXIT = 75;
 
-export type Request = "tools" | "call" | "status" | "stop" | "restart";
+/** `picker`: relay a session's picker to chat and answer with what the user picks (daemon/picker.ts); it waits that long. */
+export type Request = "tools" | "call" | "status" | "stop" | "restart" | "picker";
 
 export type ToDaemon =
   | { type: "hello" }

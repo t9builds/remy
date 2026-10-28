@@ -27,6 +27,10 @@ _Avoid_: worker, bot
 The one list of everything that needs the user now, most urgent first. `/queue` and `remy queue` show it; in code and docs it's the waiting list.
 _Avoid_: queue, inbox, notifications
 
+**Picker**:
+The multiple-choice dialog a session asks the user with (Claude Code's `AskUserQuestion`). Remy posts it in the agent's thread, and a reply there answers it; the terminal can answer it too, and the first answer wins.
+_Avoid_: menu, prompt, dialog
+
 **Judgment call**:
 A decision only a person should make, because a wrong call would be hard to take back: data lost, a security hole, money or access, others broken. Agents make every other call themselves and record it.
 _Avoid_: approval, review

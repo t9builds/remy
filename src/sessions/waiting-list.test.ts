@@ -70,6 +70,19 @@ test("ranks questions, then red CI, then reviews, then ready PRs, then agents wi
   expect(q[1]!.action).toBe("`claude attach perm`");
 });
 
+test("a picker asks its question, answered in the agent's thread", () => {
+  const [it] = waitingListOf(
+    snap(
+      session({
+        name: "picks",
+        status: "waiting",
+        lastEvent: { event: "PermissionRequest", type: "AskUserQuestion", ts: 1, text: "Which framework?" },
+      }),
+    ),
+  );
+  expect(it).toMatchObject({ rank: 0, why: 'asks: "Which framework?"', action: "reply to its thread" });
+});
+
 test("leaves out busy sessions, pending CI, closed PRs and interactive sessions with nothing to show", () => {
   const q = waitingListOf(
     snap(
