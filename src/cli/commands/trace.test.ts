@@ -127,3 +127,32 @@ test("the text trace shows each agent's step, transcript and verdict, and flags 
   expect(text).toMatch(/verify for o\/r#7 {2}sage[\s\S]*not found[\s\S]*no report/);
   expect(text).toContain("retry asked");
 });
+
+test("a subagent's failed call shows on the subagent tools line, and --calls lists each call with its subagent", () => {
+  const call = (id: string, msg: string, name: string, input: unknown) => ({
+    type: "assistant",
+    timestamp: "2026-10-28T10:00:00.000Z",
+    message: { id: msg, content: [{ type: "tool_use", id, name, input }] },
+  });
+  const failed = (id: string) => ({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: id, is_error: true }] },
+  });
+  const summary = summarize(
+    [call("t1", "m1", "Bash", { command: "ls" })],
+    [{ name: "Proof review", entries: [call("u1", "s1", "Bash", { command: "false" }), failed("u1")] }],
+  );
+  const text = formatTrace(buildTrace("thyme", world({ transcript: () => ({ path: "/t/x.jsonl", summary }) })), {
+    calls: true,
+  });
+  expect(text).toMatch(/ {2}tools Bash 1\n/);
+  expect(text).toContain("subagent tools Bash 1 (1 failed)");
+  expect(text).toMatch(/\[Proof review\] .*Bash.* false/);
+});
+
+test("a number no PR has is an error, not an agent id prefix; an id prefix needs 4 characters", () => {
+  expect(() => buildTrace("5", world())).toThrow(/no PR #5/);
+  expect(() => buildTrace("#5", world())).toThrow(/no PR #5/);
+  expect(buildTrace("bbbb", world()).agents.map((a) => a.name)).toEqual(["thyme"]);
+  expect(() => buildTrace("bb", world())).toThrow(/no PR or agent "bb"/);
+});
