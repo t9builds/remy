@@ -64,7 +64,7 @@ export function snapshotEvents(
 export function hookEvents(e: RemyEvent, session: SessionRef): Emitted[] {
   if (e.event === "Stop") {
     const question = questionOf(e.last);
-    const stopped: Emitted = { name: "session.stopped", payload: { session, last: e.last } };
+    const stopped: Emitted = { name: "session.stopped", payload: { session, last: e.last, question } };
     return question
       ? [stopped, { name: "session.asks", payload: { session, question, reason: "question" } }]
       : [stopped];

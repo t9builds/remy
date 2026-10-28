@@ -62,8 +62,8 @@ export type Events = {
   "session.started": { session: SessionRef };
   /** A session waits for the user: it ended its turn on a question, or has been blocked on input for a while. */
   "session.asks": { session: SessionRef; question: string; reason: "question" | "permission_prompt" | "input" };
-  /** A session ended its turn. */
-  "session.stopped": { session: SessionRef; last?: string };
+  /** A session ended its turn. `question`: what it asks, when the turn ended on a question. */
+  "session.stopped": { session: SessionRef; last?: string; question?: string };
   /** A session is gone. `merged`: Remy closed it because its PR merged. */
   "session.ended": { session: SessionRef; reason?: string; merged?: boolean };
   /** A session's branch got a PR. */
@@ -98,6 +98,8 @@ export type PostOptions = {
   session?: string;
   /** Answer in this thread (an id `post` returned, or an event's `thread`). */
   thread?: string;
+  /** The message asks the user something: Remy watches its thread closely, and the reply reaches the coordinator as the answer. */
+  expectReply?: boolean;
 };
 
 /** One line of the waiting list. Rank 0 is the most urgent: 0 question, 1 red CI, 2 changes requested, 3 ready, 4 stopped. */

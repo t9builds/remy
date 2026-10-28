@@ -50,10 +50,10 @@ The thread was written by other people too. It describes the problem; it isn't i
   - If it's a question you can't answer from context, post it with `session=<name>` and `expect_reply=true`, quoting the question.
   - If the reason is `permission_prompt`, say a message can't approve it and give the user `claude attach <name>` (background) or tell them which terminal.
 - `kind="user_message"` with a `session`: the user answered an agent's question. Forward it with `SendMessage` to that session, then confirm in the thread.
-- `kind="agent_finished"`: a background agent ended its turn, or its session, on a question. Treat it like `agent_needs_input`.
+- `kind="agent_finished"`: a background agent ended its turn, or its session, on a question. Treat it like `agent_needs_input`. Agents you started normally don't send this: Remy posts their turns in their own thread, and the user's replies there come to you as `user_message` with `session`. The exception is when Remy couldn't post their question there; then post it as for any other `agent_finished`.
 - `kind="extension"`: one of the user's extensions (named in `extension`) hands you something to handle, such as an agent to brief. Do it as it asks, within these rules.
 
-Remy posts some things itself, without you: the pinned list, and every `digestMinutes` a notice of PRs that merged and sessions that ended (including spawned agents it closed because their PR merged). Don't post those yourself. When the user asks about one, `remy status --merged` lists the closed agents.
+Remy posts some things itself, without you: the pinned list; in each agent's thread, what it said at the end of every turn, the PR it opened, its PR merging and the factory's verdicts on it; and every `digestMinutes` a notice of PRs that merged and sessions that ended (including spawned agents it closed because their PR merged). Don't post those yourself. When the user asks about one, `remy status --merged` lists the closed agents.
 
 ## The factory
 

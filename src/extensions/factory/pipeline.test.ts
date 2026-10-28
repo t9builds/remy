@@ -160,8 +160,24 @@ describe("the ADR-0004 pipeline", () => {
     w.report("pass", "works on prod");
     await go(run, env);
     expect(run.stage).toBe("done");
-    expect(w.notices).toEqual([`✅ *#7 Fix login* is through the factory: works on prod\n${URL}`]);
+    // Each verdict goes to the author's thread as it comes.
+    expect(w.notices).toEqual([
+      `✅ review passed on *#7 Fix login*: tests pass, nothing wrong\n${URL}`,
+      `✅ verify-dev passed on *#7 Fix login*: login works on dev\n${URL}`,
+      `✅ release-check passed on *#7 Fix login*: small, well tested\n${URL}`,
+      `✅ verify-prod passed on *#7 Fix login*: works on prod\n${URL}`,
+      `✅ *#7 Fix login* is through the factory: works on prod\n${URL}`,
+    ]);
     expect(w.asked).toEqual([]);
+  });
+
+  test("a verdict summary can't ping a channel", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env);
+    w.report("pass", "ask <!channel> and <@U123>");
+    await go(run, env);
+    expect(w.notices[0]).toBe(`✅ review passed on *#7 Fix login*: ask <\u200b!channel> and <\u200b@U123>\n${URL}`);
   });
 
   test("fixes get a fresh agent once CI is green on the new head, up to maxRounds", async () => {
@@ -187,6 +203,7 @@ describe("the ADR-0004 pipeline", () => {
     await go(run, env);
     expect(run.stage).toBe("held");
     expect(run.reason).toBe("review still fixing after 3 rounds: and again");
+    expect(w.notices[0]).toBe(`🔧 review fixed what it found on *#7 Fix login*: added a missing null check\n${URL}`);
   });
 
   test("new commits after the review send the PR back to it", async () => {
@@ -244,6 +261,43 @@ describe("the ADR-0004 pipeline", () => {
     expect(run.urgent).toBeTrue();
     expect(w.notices).toEqual([`🔴 *#7 Fix login* failed verify-prod (live as mmm1234): 500 on /login\n${URL}`]);
     expect(w.asked).toEqual(["Start an agent on a fix for #7? Reply yes."]);
+  });
+
+  test("a failing step holds the run and says so in the author's thread", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 4, mergeSha: "mmm" });
+    await go(run, env);
+    w.report("fail", "login is broken");
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("verify-dev: login is broken");
+    expect(w.notices).toEqual([
+      `🛑 verify-dev failed; the factory holds it on *#7 Fix login*: login is broken\n${URL}`,
+    ]);
+  });
+
+  test("a failure that asks or alerts posts only its own message", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 5, mergeSha: "mmm" });
+    await go(run, env);
+    w.report("fail", "touches billing");
+    await go(run, env);
+    expect(run.stage).toBe("asking");
+    expect(w.notices).toEqual([]);
+  });
+
+  test("a verdict post that fails doesn't re-run the step", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 4, mergeSha: "mmm" });
+    await go(run, { ...env, notify: async () => Promise.reject(new Error("slack is down")) });
+    w.report("pass", "works on dev");
+    await go(run, { ...env, notify: async () => Promise.reject(new Error("slack is down")) });
+    expect(at(run)).toBe("agent:agent release-check");
+    expect(run.reports).toHaveLength(1);
+    expect(w.spawned.map((s) => s.step)).toEqual(["verify-dev", "release-check"]);
   });
 
   test("an agent that stops without reporting holds the run until a retry", async () => {

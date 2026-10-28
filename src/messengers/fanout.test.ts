@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { BothMode, MessengerKind } from "../sdk/config";
-import { decodeId, encodeId, Fanout } from "./fanout";
+import { decodeId, encodeId, Fanout, slackThreadFor } from "./fanout";
 import type { Messenger, PostOptions, Sink } from "./messenger";
 
 /** A messenger that records what it was asked to do and can play the user writing to it. */
@@ -132,4 +132,12 @@ test("one app failing doesn't lose the post; both failing is an error", async ()
   expect(decodeId(await fan.post("hi"))).toEqual({ telegram: telegram.posts[0]!.id });
   telegram.post = slack.post;
   await expect(fan.post("hi")).rejects.toThrow("slack down");
+});
+
+test("a Slack thread ref is named for a Fanout, so a post lands in that thread and not the DM", async () => {
+  const { fan, slack, telegram } = setup("mirror");
+  await fan.post("Started *flan*", { session: "flan", thread: slackThreadFor(fan, "C1/1712.0042") });
+  expect(slack.posts[0]!.opts.thread).toBe("C1/1712.0042");
+  expect(telegram.posts[0]!.opts.thread).toBeUndefined();
+  expect(slackThreadFor(slack, "C1/1712.0042")).toBe("C1/1712.0042");
 });

@@ -3,6 +3,9 @@
  * since the last digest. The wording is code, so it's the same every time and costs nothing.
  */
 
+/** Agent-written words may be posted into a channel's thread: a zero-width space keeps `<!channel>` or `<@U…>` from notifying people. */
+export const defang = (text: string) => text.replace(/<(?=[!@])/g, "<\u200b");
+
 /** What a notice says something about: a change between two looks at the sessions (sessions/changes.ts). */
 export type Change = { session: string; repo?: string; what: string; detail: string; pr?: string };
 

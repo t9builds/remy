@@ -101,7 +101,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | `src/sessions/waiting-list.ts` | Ranks what waits on you from that snapshot; the daemon keeps it as one message per workspace (`~/.remy/queue.json`) |
 | `remy daemon` (`src/daemon/`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, posts the merged/ended notices itself (`src/shared/notices.ts`), runs extensions and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
 | `src/sdk/` | What extensions and a repo's `.remy/factory.ts` import: the extension API (`extension.ts`) and the pipeline helpers (`factory.ts`, imported as `remy/factory`) |
-| `src/extension-host/` and `src/extensions/` | The host that runs extensions in the daemon, and the built-in ones: closing merged agents, Slack-thread tasks, `/queue`, and the factory (`src/extensions/factory/`: the run state machine, and gh / Cloud Build / shell) |
+| `src/extension-host/` and `src/extensions/` | The host that runs extensions in the daemon, and the built-in ones: closing merged agents, Slack-thread tasks, agents' updates in their threads, `/queue`, and the factory (`src/extensions/factory/`: the run state machine, and gh / Cloud Build / shell) |
 | `remy` channel (`src/channel.ts`) | Runs inside the coordinator session only. A thin client of the daemon over `~/.remy/daemon.sock` (`src/link/`): pushes the daemon's events into the session and gives Claude `post` / `update` |
 | `src/messengers/` | The Slack or Telegram bridge for each workspace, or both; each implements `Messenger` (`messenger.ts`) |
 | `src/messengers/slack/` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in |
@@ -324,7 +324,7 @@ A path covers the folder and everything inside it, not sibling folders that shar
 
 ## Extensions
 
-Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `queue` answers `/queue`, and `factory` runs [pipelines](#factory). Turn one off with `extensions.disabled` and write your own instead.
+Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `agent-updates` posts in each agent's thread what it said at the end of every turn and the PR it opened, `queue` answers `/queue`, and `factory` runs [pipelines](#factory). Turn one off with `extensions.disabled` and write your own instead.
 
 ```ts
 // ~/.remy/extensions/red-ci.ts
@@ -340,14 +340,14 @@ export default (remy: Remy) => {
 
 | Events | |
 |---|---|
-| `session.started`, `session.asks`, `session.stopped`, `session.ended` | A session appeared, waits for you (a question, or blocked on input), ended its turn, is gone |
+| `session.started`, `session.asks`, `session.stopped`, `session.ended` | A session appeared, waits for you (a question, or blocked on input), ended its turn (with its last message, and the question if it ended on one), is gone |
 | `pr.opened`, `pr.ready`, `pr.ci`, `pr.merged` | A session's PR opened, left draft, finished CI (pass or fail), merged |
 | `message` | You wrote in a workspace, or started a task from a Slack thread |
 | `tick` | Every `tickSeconds`, after Remy looked at the sessions again |
 
 | Actions | |
 |---|---|
-| `post(text, { workspace, session, thread })` | Post to you |
+| `post(text, { workspace, session, thread, expectReply })` | Post to you; with `session`, in that agent's thread (the Slack thread its task came from, else its DM thread) |
 | `ask(question, { session })` | Ask you and wait: it's on the waiting list until you reply in its thread, and the reply goes to the extension, not the coordinator |
 | `spawn({ repo, task })`, `close(session)` | Start an agent, close a session |
 | `waitingList.add(entry)`, `waitingList.remove(key)`, `waitingList.text(workspace)` | Put something on the waiting list, take it off, read the list |

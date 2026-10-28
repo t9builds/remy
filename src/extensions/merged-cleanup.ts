@@ -20,7 +20,8 @@ export default function mergedCleanup(remy: Remy) {
       const text = formatNotice([
         { session: s.name, repo: s.repo, what: "merged", detail: `PR #${pr.number} merged; ${cleanup}`, pr: pr.url },
       ]);
-      if (text) await remy.post(text, { workspace: s.workspace });
+      // In the agent's thread, where its task and its turns are.
+      if (text) await remy.post(text, { workspace: s.workspace, session: s.name });
     } finally {
       closing.delete(s.sessionId);
     }

@@ -28,6 +28,9 @@ export function decodeId(id: string): Parts {
   return parts;
 }
 
+/** A Slack thread ref ("<channel>/<ts>") as `m` reads a thread id: a Fanout needs the app named, or it drops the thread. */
+export const slackThreadFor = (m: Messenger, ref: string) => (m instanceof Fanout ? encodeId({ slack: ref }) : ref);
+
 export class Fanout implements Messenger {
   private members = new Map<MessengerKind, Messenger>();
   /** Where the user last wrote from, for "follow". */
