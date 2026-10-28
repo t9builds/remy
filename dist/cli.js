@@ -621,9 +621,15 @@ function turnText(name, last, question) {
   const said = last?.trim();
   if (!said)
     return;
-  const cut = said.length > MAX_LAST ? `${said.slice(0, MAX_LAST)}\u2026
+  let cut = said;
+  if (said.length > MAX_LAST) {
+    let kept = said.slice(0, MAX_LAST);
+    if ((kept.match(/```/g)?.length ?? 0) % 2)
+      kept += "\n```";
+    cut = `${kept}\u2026
 
-_(cut; \`claude logs ${name}\` has all of it)_` : said;
+_(cut; \`claude logs ${name}\` has all of it)_`;
+  }
   const body = defang(cut);
   return question ? `\u2753 **${name}** asks:
 

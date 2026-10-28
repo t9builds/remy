@@ -40,10 +40,12 @@ function fakeBridge() {
   bridge.save = () => {};
   const threads: Record<string, any[]> = {};
   const read: string[] = [];
+  const posted: { text: string; markdown?: boolean }[] = [];
   let n = 200;
   bridge.slack = {
     openDm: async () => "D1",
-    post: async (_c: string, text: string, th?: string) => {
+    post: async (_c: string, text: string, th?: string, markdown?: boolean) => {
+      posted.push({ text, markdown });
       const ts = `${++n}.0`;
       if (th) threads[th]?.push({ ts, user: "BOT", text });
       return ts;
@@ -56,8 +58,18 @@ function fakeBridge() {
       return t.filter((m) => m.ts > old);
     },
   };
-  return { bridge, pushes, threads, read };
+  return { bridge, pushes, threads, read, posted };
 }
+
+test("post passes the markdown flag on to Slack", async () => {
+  const { bridge, posted } = fakeBridge();
+  await bridge.post("**hi**", { markdown: true });
+  await bridge.post("plain");
+  expect(posted).toEqual([
+    { text: "**hi**", markdown: true },
+    { text: "plain", markdown: undefined },
+  ]);
+});
 
 test("the user's reply under the coordinator's answer in a DM thread reaches the coordinator", async () => {
   const { bridge, pushes, threads, read } = fakeBridge();

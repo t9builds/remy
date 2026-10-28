@@ -79,6 +79,12 @@ test("a long turn is cut, and an empty one isn't posted", () => {
   expect(text).toEndWith("_(cut; `claude logs flan` has all of it)_");
 });
 
+test("a cut inside a code block closes the fence before the footer", () => {
+  const text = turnText("flan", `Here:\n\`\`\`ts\n${"x".repeat(5000)}\n\`\`\``, undefined)!;
+  expect(text).toContain("\n```…\n\n_(cut;");
+  expect(text.match(/```/g)).toHaveLength(2);
+});
+
 test("a question whose post fails goes to the coordinator instead", async () => {
   const { posts, told, fail, raise } = setup();
   fail.post = true;

@@ -39,6 +39,12 @@ describe("extension host", () => {
     expect(posts).toEqual([{ text: "q?", opts: { session: "flan", expect_reply: true } }]);
   });
 
+  test("post passes markdown on", async () => {
+    const { h, posts } = host();
+    await h.load("writer", "test", (remy) => void remy.post("**hi**", { session: "flan", markdown: true }));
+    expect(posts).toEqual([{ text: "**hi**", opts: { session: "flan", markdown: true } }]);
+  });
+
   test("hands events to every handler; one failing doesn't stop the others", async () => {
     const { h, logs } = host();
     const got: string[] = [];

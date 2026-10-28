@@ -17,8 +17,13 @@ const reportsInThread = (s: SessionRef) => s.spawned && !s.role;
 export function turnText(name: string, last: string | undefined, question: string | undefined) {
   const said = last?.trim();
   if (!said) return undefined;
-  const cut =
-    said.length > MAX_LAST ? `${said.slice(0, MAX_LAST)}…\n\n_(cut; \`claude logs ${name}\` has all of it)_` : said;
+  let cut = said;
+  if (said.length > MAX_LAST) {
+    let kept = said.slice(0, MAX_LAST);
+    // A cut inside a code block would put the footer in the code; close the fence first.
+    if ((kept.match(/```/g)?.length ?? 0) % 2) kept += "\n```";
+    cut = `${kept}…\n\n_(cut; \`claude logs ${name}\` has all of it)_`;
+  }
   const body = defang(cut);
   return question
     ? `❓ **${name}** asks:\n\n${body}\n\n_Reply here to answer._`
