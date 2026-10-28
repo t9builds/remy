@@ -6,6 +6,7 @@ const STAGE: Record<Run["stage"], string> = {
   running: "next",
   agent: "agent at work",
   "awaiting-fix": "waiting for CI after fixes",
+  fixing: "fixer at work",
   asking: "asking you",
   held: "waits for you",
   done: "done",

@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS } from "../../config/config";
@@ -10,7 +10,7 @@ import { PLUGIN_ROOT } from "../../shared/paths";
 import { createFactory, endedOnUsageLimit, isReady, spawnHitUsageLimit } from "./factory";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
-import { gateBlockers, type PrDetail, type Run } from "./pipeline";
+import { type Env, gateBlockers, type PrDetail, type Run } from "./pipeline";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "remy-factory-")));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -49,6 +49,8 @@ test("Remy's own .remy/factory.ts loads", async () => {
     "action notify",
   ]);
   expect(l.factory?.autonomy).toBe("merge");
+  // Failures before the merge go to the fixer, which knows how this repo's checks and verify run (ADR-0010).
+  expect(l.factory?.fixer).toMatchObject({ instructions: expect.stringContaining("bun run check") });
   const review = l.factory?.steps.find((s) => s.kind === "agent" && s.name === "review");
   expect(review?.kind === "agent" && review.repeat).toBe("until-clean");
   const verify = l.factory?.steps.find((s) => s.kind === "agent" && s.name === "verify");
@@ -60,6 +62,7 @@ test("Remy's own .remy/factory.ts loads", async () => {
     draft: false,
     review: "",
     ci: "pass",
+    failing: [],
     head: "aaa",
     lines: 10,
     files: [file],
@@ -105,7 +108,12 @@ test("which PRs the factory takes on", () => {
   expect(isReady(ref({ pr: undefined }))).toBeFalse();
 });
 
-async function hostWith(config: Config, sessions: SessionRef[]) {
+async function hostWith(
+  config: Config,
+  sessions: SessionRef[],
+  world: Partial<Env> = { pr: async () => undefined },
+  stateDir = join(dir, `state-${Math.random()}`),
+) {
   const hidden: string[] = [];
   const h = new ExtensionHost({
     post: async () => "id",
@@ -117,10 +125,10 @@ async function hostWith(config: Config, sessions: SessionRef[]) {
     waitingListChanged: () => {},
     waitingListText: async () => "",
     log: () => {},
-    stateDir: join(dir, `state-${Math.random()}`),
+    stateDir,
   });
-  // Offline: the PR can't be looked up, so the run stays at its first step.
-  await h.load("builtin:factory", "test", createFactory({ pr: async () => undefined }));
+  // By default offline: the PR can't be looked up, so the run stays at its first step.
+  await h.load("builtin:factory", "test", createFactory(world));
   return { h, hidden };
 }
 
@@ -181,4 +189,90 @@ test("a turn that ends on Claude Code's limit notice pauses the factory; an agen
 test("a spawn that Claude Code refused for a limit pauses the factory", () => {
   expect(spawnHitUsageLimit("claude --bg failed (1): You've hit your session limit · resets 8:10pm")).toBe(true);
   expect(spawnHitUsageLimit("claude --bg failed (1): Workspace not trusted")).toBe(false);
+});
+
+/** A run of `api` at `stage`, as the factory saved it before a restart. */
+const savedRun = (root: string, number: number, stage: Run["stage"], agent?: string): Run => ({
+  pr: `https://github.com/acme-corp/api/pull/${number}`,
+  number,
+  title: "Fix login",
+  repo: "acme-corp/api",
+  repoDir: root,
+  branch: "fix",
+  session: "basil",
+  workspace: "work",
+  head: "aaa",
+  step: 0,
+  round: 1,
+  stage,
+  since: Date.now(),
+  stepSince: Date.now(),
+  reports: [],
+  approved: [],
+  fixes: 1,
+  agent: agent ? { name: agent, startedAt: Date.now() } : undefined,
+});
+
+/** The factory with `runs` on disk from before, as after a daemon restart. */
+async function hostWithRuns(runs: Run[], over: Partial<Config> = {}, world: Partial<Env> = {}) {
+  const stateDir = join(dir, `state-${Math.random()}`);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "builtin_factory.json"),
+    JSON.stringify({ runs: Object.fromEntries(runs.map((r) => [r.pr, r])) }),
+  );
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api"] }, ...over };
+  const { h } = await hostWith(config, [], world, stateDir);
+  const saved = () =>
+    JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs as Record<string, Run>;
+  return { h, saved };
+}
+
+const LIMIT = "You've hit your session limit · resets 8:10pm (Europe/Prague)";
+
+test("a fixer that stops on a usage limit stays fixing, to restart later; a held run stays held", async () => {
+  const root = repo("api-limit", GOOD);
+  const fixing = savedRun(root, 7, "fixing", "fixer1");
+  const held = savedRun(root, 8, "held", "basil-agent");
+  const { h, saved } = await hostWithRuns([fixing, held]);
+  await h.emit("session.stopped", { session: ref({ name: "fixer1" }), last: LIMIT });
+  expect(saved()[fixing.pr]).toMatchObject({ stage: "fixing", fixes: 1 });
+  expect(saved()[fixing.pr]!.agent).toBeUndefined();
+  await h.emit("session.stopped", { session: ref({ name: "basil-agent" }), last: LIMIT });
+  expect(saved()[held.pr]).toMatchObject({ stage: "held" });
+  // A fixer that stopped for another reason is the pipeline's to read, not the limit handler's.
+  const other = savedRun(root, 9, "fixing", "fixer2");
+  const again = await hostWithRuns([other]);
+  await again.h.emit("session.stopped", { session: ref({ name: "fixer2" }), last: "Done, pushed." });
+  expect(again.saved()[other.pr]!.agent).toMatchObject({ name: "fixer2" });
+});
+
+test("a fixer with its agent running counts against maxFactoryAgents", async () => {
+  const root = repo("api-count", GOOD);
+  const spawn = async (n: number) => {
+    const started: string[] = [];
+    const { h } = await hostWithRuns(
+      [savedRun(root, 7, "fixing", "fixer1"), savedRun(root, 8, "fixing")],
+      { maxFactoryAgents: n, extensions: { repos: ["api-count"] } },
+      {
+        pr: async () => ({
+          ...pr,
+          state: "OPEN",
+          ci: "fail",
+          failing: [],
+          head: "aaa",
+          lines: 1,
+          files: [],
+          allFiles: true,
+        }),
+        agentStatus: async () => "busy",
+        reports: () => [],
+        spawn: async (run) => (started.push(`#${run.number}`), { name: "fixer2" }),
+      },
+    );
+    await h.emit("tick", { at: 1 });
+    return started;
+  };
+  expect(await spawn(1)).toEqual([]);
+  expect(await spawn(2)).toEqual(["#8"]);
 });

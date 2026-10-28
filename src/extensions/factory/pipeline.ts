@@ -3,7 +3,8 @@
  * everything it can (ADR-0007): waits, gates, merges and deploys. Agents do the judgment work and report a verdict
  * with `remy report`, which code reads; no verdict is read from an agent's text. Holds are judgment calls for a
  * person (ADR-0005). What a run may do on its own is capped by its autonomy level (ADR-0006); a step above it is
- * asked for, and the user's yes is the consent.
+ * asked for, and the user's yes is the consent. Red CI and failed steps before the merge go to a fixer, and the
+ * pipeline runs again from its first step on the fix (ADR-0010).
  *
  * Pure apart from `env`, so every path is tested with a fake world (pipeline.test.ts).
  */
@@ -14,6 +15,8 @@ import {
   atLeast,
   type Environment,
   type Factory,
+  FIXER,
+  type Fixer,
   type GateStep,
   type Level,
   levelOf,
@@ -40,6 +43,7 @@ type Stage =
   | "running" // the current step is to start or check
   | "agent" // an agent is on the current step
   | "awaiting-fix" // an agent pushed fixes; a fresh one takes the step once CI is green on the new head
+  | "fixing" // the fixer is on red CI or a failed step; `reason` says which
   | "asking" // waits for the user's answer to `ask`
   | "held" // waits for the user; `reason` says why
   | "done";
@@ -72,6 +76,8 @@ export type Run = {
   reason?: string;
   /** A failed check after the change went live: the most urgent judgment call there is. */
   urgent?: boolean;
+  /** Fixer rounds this run has used, out of the fixer's `maxRounds`. */
+  fixes?: number;
   mergeSha?: string;
   mergeRequestedAt?: number;
 };
@@ -82,6 +88,8 @@ export type PrDetail = {
   draft: boolean;
   review: string;
   ci: Ci;
+  /** The names of the failing checks. */
+  failing: string[];
   head: string;
   lines: number;
   files: string[];
@@ -167,6 +175,41 @@ function agentPrompt(run: Run, step: AgentStep, f: Factory) {
   ].join("\n");
 }
 
+/** The fixer's settings; with `fixer: false` it never runs (`fixable`). */
+const fixerOf = (f: Factory): Fixer => f.fixer || {};
+const maxFixes = (f: Factory) => fixerOf(f).maxRounds ?? 3;
+
+/** The fixer's agent step: what it runs and the name it reports as. */
+const fixerStep = (f: Factory): AgentStep => {
+  const c = fixerOf(f);
+  return {
+    kind: "agent",
+    name: FIXER,
+    skill: c.skill ?? "/remy:fix",
+    instructions: c.instructions,
+    timeoutMinutes: c.timeoutMinutes,
+  };
+};
+
+function fixPrompt(run: Run, step: AgentStep, f: Factory) {
+  const n = run.number;
+  const report = (verdict: string, summary: string) =>
+    `  remy report ${FIXER} ${verdict} --pr ${run.pr} --summary "<one line: ${summary}>"`;
+  return [
+    `${step.skill}${step.instructions ? ` ${step.instructions}` : ""}`,
+    "",
+    `You are the fixer in Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}, fix ${run.fixes} of at most ${maxFixes(f)}. You didn't write this change. What failed: ${run.reason}.`,
+    ...(run.about ? [`What it is for: ${run.about}`] : []),
+    `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). Fix the cause, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. Once you push, the pipeline runs again from its first step.`,
+    "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
+    "",
+    "As the very last step, report with exactly one of:",
+    report("fixed", "what was wrong and what you changed"),
+    report("pass", "why nothing needed changing, e.g. a flaky check you re-ran"),
+    report("fail", "the call a person has to make, or why you couldn't fix it"),
+  ].join("\n");
+}
+
 function enter(run: Run, stage: Stage, now: number, reason?: string) {
   Object.assign(run, { stage, since: now, reason });
 }
@@ -200,6 +243,31 @@ function ask(run: Run, env: Env, purpose: NonNullable<Run["ask"]>["purpose"], qu
   return false;
 }
 
+/** Whether the fixer may take a failure: it's on, and there is still a PR branch to push a fix to. */
+const fixable = (run: Run, f: Factory) => f.fixer !== false && !run.mergeSha;
+
+/** Red CI or a failed step, before the merge: the fixer takes it, until the run has used its rounds (ADR-0010). */
+async function fix(run: Run, f: Factory, env: Env, what: string, detail?: string) {
+  const now = env.now();
+  const most = maxFixes(f);
+  const round = (run.fixes ?? 0) + 1;
+  const cause = `${what}${detail ? `: ${detail}` : ""}`;
+  const on = `${what} on *#${run.number} ${defang(run.title)}*${detail ? `: ${defang(detail)}` : ""}`;
+  if (round > most) {
+    await env.notify(run, `🛑 ${on}; the factory holds it after ${most} fixes\n${run.pr}`).catch(() => {});
+    return hold(run, now, `${cause} (after ${most} fixes)`);
+  }
+  run.fixes = round;
+  run.agent = undefined;
+  enter(run, "fixing", now, cause);
+  await env.notify(run, `🛠️ ${on}; a fixer is on it (${round} of ${most})\n${run.pr}`).catch(() => {});
+  return true;
+}
+
+/** Red CI before the merge goes to the fixer; with the fixer off, or nowhere to push, it holds. */
+const ciFails = (run: Run, f: Factory, env: Env, d: PrDetail, what = "CI fails") =>
+  fixable(run, f) ? fix(run, f, env, what, d.failing.join(", ") || undefined) : hold(run, env.now(), what);
+
 /** The newest pass or fix each agent step reported in this run. */
 const lastPass = (run: Run, name: string) =>
   run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
@@ -218,6 +286,7 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
     const retry = env.reports().findLast((r) => r.pr === run.pr && r.kind === "retry");
     if (retry && retry.at > run.since) {
       run.urgent = false;
+      run.fixes = 0;
       return next(run, now, run.step);
     }
     return mergedByHand(run, f, env);
@@ -242,10 +311,26 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
     return false;
   }
 
+  if (run.stage === "fixing") return fixing(run, f, env);
+
   const step = f.steps[run.step];
   if (!step) {
     enter(run, "done", now, "through the pipeline");
     return false;
+  }
+  if (run.stage === "awaiting-fix") {
+    const d = await env.pr(run.pr);
+    if (!d) return false;
+    if (d.state !== "OPEN") return closed(run, d, f, env);
+    const by = run.reports.at(-1)?.step === FIXER ? "the fixer" : (run.reports.at(-1)?.step ?? "an agent");
+    if (d.head === run.head)
+      return now - run.since > PUSH_WAIT_MS
+        ? hold(run, now, `${by} said it pushed fixes, but the PR didn't change`)
+        : false;
+    if (d.ci === "pending") return false;
+    run.head = d.head;
+    if (d.ci === "fail") return ciFails(run, f, env, d, `CI fails after ${by}'s fixes`);
+    enter(run, "running", now);
   }
   if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(approval(run))) {
     const said = run.reports.findLast((r) => r.verdict === "pass" || r.verdict === "fixed")?.summary;
@@ -292,21 +377,56 @@ function verdictText(run: Pick<Run, "number" | "title" | "pr">, step: string, r:
   return `${what} on *#${run.number} ${defang(run.title)}*${r.summary ? `: ${defang(r.summary)}` : ""}\n${run.pr}`;
 }
 
-async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promise<boolean> {
+/** The report of the run's agent on `step`, once it has one; holds the run if the agent is stuck or stopped without one. */
+async function reportOf(run: Run, step: AgentStep, env: Env): Promise<Report | undefined> {
   const now = env.now();
-  if (run.stage === "awaiting-fix") {
+  const agent = run.agent!;
+  const report = env
+    .reports()
+    .findLast((r) => r.pr === run.pr && r.step === step.name && !r.kind && r.at >= agent.startedAt);
+  if (!report) {
+    const status = await env.agentStatus(agent);
+    const minutes = step.timeoutMinutes ?? 60;
+    if (status === "busy" || status === "waiting") {
+      if (now - agent.startedAt > minutes * 60_000)
+        hold(run, now, `${step.name} (${agent.name}) has worked for over ${minutes} min without reporting`);
+      // A report may land just after the agent stops, and a new agent may not be listed yet.
+    } else if (now - agent.startedAt > GRACE_MS)
+      hold(run, now, `${step.name} (${agent.name}) stopped without reporting`);
+    return undefined;
+  }
+  await env.close(agent);
+  run.agent = undefined;
+  run.reports.push(report);
+  return report;
+}
+
+/** The fixer at work: start it, then read its report. A fix sends the run back to the first step, on the new head. */
+async function fixing(run: Run, f: Factory, env: Env): Promise<boolean> {
+  const step = fixerStep(f);
+  if (!run.agent) {
+    if (!env.canStartAgent()) return false;
     const d = await env.pr(run.pr);
     if (!d) return false;
     if (d.state !== "OPEN") return closed(run, d, f, env);
-    if (d.head === run.head)
-      return now - run.since > PUSH_WAIT_MS
-        ? hold(run, now, `${step.name} said it pushed fixes, but the PR didn't change`)
-        : false;
-    if (d.ci === "fail") return hold(run, now, `CI fails after ${step.name}'s fixes`);
-    if (d.ci === "pending") return false;
     run.head = d.head;
-    enter(run, "running", now);
+    const agent = await env.spawn(run, step, fixPrompt(run, step, f));
+    run.agent = { ...agent, startedAt: env.now() };
+    return false;
   }
+  const report = await reportOf(run, step, env);
+  if (!report) return false;
+  const now = env.now();
+  await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
+  if (report.verdict === "fail") return hold(run, now, `${step.name}: ${report.summary ?? ""}`);
+  next(run, now, 0);
+  // `pass`: nothing needed changing (say, a flaky check it re-ran), so there is no new head to wait for.
+  if (report.verdict === "fixed") enter(run, "awaiting-fix", now);
+  return report.verdict === "pass";
+}
+
+async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promise<boolean> {
+  const now = env.now();
   if (!run.agent) {
     if (!env.canStartAgent()) return false;
     if (!run.mergeSha) {
@@ -320,29 +440,14 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
     enter(run, "agent", env.now());
     return false;
   }
-  const report = env
-    .reports()
-    .findLast((r) => r.pr === run.pr && r.step === step.name && !r.kind && r.at >= run.agent!.startedAt);
-  if (!report) {
-    const status = await env.agentStatus(run.agent);
-    const minutes = step.timeoutMinutes ?? 60;
-    if (status === "busy" || status === "waiting")
-      return now - run.agent.startedAt > minutes * 60_000
-        ? hold(run, now, `${step.name} (${run.agent.name}) has worked for over ${minutes} min without reporting`)
-        : false;
-    // A report may land just after the agent stops, and a new agent may not be listed yet.
-    return now - run.agent.startedAt > GRACE_MS
-      ? hold(run, now, `${step.name} (${run.agent.name}) stopped without reporting`)
-      : false;
-  }
-  await env.close(run.agent);
-  run.agent = undefined;
-  run.reports.push(report);
+  const report = await reportOf(run, step, env);
+  if (!report) return false;
   const summary = report.summary ?? "";
-  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "hold");
-  // A failure that asks or alerts says so itself. The verdict is taken by now: a post that fails mustn't redo the step.
-  if (report.verdict !== "fail" || onFail === "hold")
-    await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
+  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "fix");
+  const holds = onFail === "hold" || (onFail === "fix" && !fixable(run, f));
+  // A failure that asks, alerts or goes to the fixer says so itself. The verdict is taken by now: a post that fails
+  // mustn't redo the step.
+  if (report.verdict !== "fail" || holds) await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "pass") return next(run, now);
   if (report.verdict === "fixed") {
     if (step.repeat !== "until-clean") return next(run, now);
@@ -367,6 +472,7 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
     );
     return ask(run, env, "fix", `Start an agent on a fix for #${run.number}? Reply yes.`);
   }
+  if (onFail === "fix" && !holds) return fix(run, f, env, `${step.name} failed`, summary);
   return hold(run, now, `${step.name}: ${summary}`);
 }
 
@@ -379,7 +485,7 @@ async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Fact
     if (!d) return false;
     if (d.state === "CLOSED") return closed(run, d, f, env);
     if (d.ci === "pass" || d.ci === "none") return next(run, now);
-    if (d.ci === "fail") return hold(run, now, "CI fails");
+    if (d.ci === "fail") return ciFails(run, f, env, d);
     return late ? hold(run, now, `CI still running after ${minutes} min`) : false;
   }
   if (!run.mergeSha) return hold(run, now, `nothing merged to wait for on ${step.env}`);
@@ -423,6 +529,8 @@ async function gateStep(run: Run, step: GateStep, f: Factory, env: Env): Promise
   }
   if (d.ci === "pending" && step.ci !== false) return false;
   const blockers = gateBlockers(d, step);
+  // Red CI alone is the fixer's; anything else the gate stops waits for a person, and fixing CI first wouldn't help.
+  if (blockers.length === 1 && d.ci === "fail" && step.ci !== false && fixable(run, f)) return ciFails(run, f, env, d);
   if (blockers.length) return hold(run, now, `gate ${step.name}: ${blockers.join("; ")}`);
   run.head = d.head;
   return next(run, now);

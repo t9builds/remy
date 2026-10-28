@@ -26,11 +26,13 @@ export async function prDetail(url: string): Promise<PrDetail | undefined> {
   if (!r.ok) return undefined;
   const j = JSON.parse(r.out);
   const files: string[] = (j.files ?? []).map((f: { path: string }) => f.path);
+  const { ci, failing } = ciOf(j.statusCheckRollup);
   return {
     state: j.state,
     draft: !!j.isDraft,
     review: j.reviewDecision ?? "",
-    ci: ciOf(j.statusCheckRollup).ci,
+    ci,
+    failing,
     head: j.headRefOid,
     lines: (j.additions ?? 0) + (j.deletions ?? 0),
     files,
