@@ -448,6 +448,7 @@ function newHost() {
         thread: where.thread,
         session: where.session,
         expect_reply: where.expect_reply,
+        markdown: where.markdown,
       });
     },
     spawn: (opts) => spawnAgent(opts),

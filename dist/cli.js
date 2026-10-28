@@ -622,11 +622,15 @@ function turnText(name, last, question) {
   if (!said)
     return;
   const cut = said.length > MAX_LAST ? `${said.slice(0, MAX_LAST)}\u2026
+
 _(cut; \`claude logs ${name}\` has all of it)_` : said;
   const body = defang(cut);
-  return question ? `\u2753 *${name}* asks:
+  return question ? `\u2753 **${name}** asks:
+
 ${body}
-_Reply here to answer._` : `*${name}* finished its turn:
+
+_Reply here to answer._` : `**${name}** finished its turn:
+
 ${body}`;
 }
 function agentUpdates(remy) {
@@ -637,7 +641,7 @@ function agentUpdates(remy) {
     if (!text)
       return;
     try {
-      await remy.post(text, { session: session.name, expectReply: !!question });
+      await remy.post(text, { session: session.name, expectReply: !!question, markdown: true });
     } catch (e) {
       if (!question)
         throw e;
@@ -1865,6 +1869,7 @@ function formBody(params) {
       form.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
   return form;
 }
+var MARKDOWN_MAX = 12000;
 
 class Slack {
   token;
@@ -1891,10 +1896,11 @@ class Slack {
     const r = await this.call("conversations.open", { users: userId });
     return r.channel.id;
   }
-  async post(channel, text, threadTs) {
+  async post(channel, text, threadTs, markdown) {
     const r = await this.call("chat.postMessage", {
       channel,
       text,
+      blocks: markdown && text.length <= MARKDOWN_MAX ? [{ type: "markdown", text }] : undefined,
       thread_ts: threadTs,
       unfurl_links: false,
       unfurl_media: false
@@ -2308,7 +2314,7 @@ class SlackBridge {
     const ref = opts.thread || (opts.session ? this.threadOf(opts.session) : undefined);
     const thread = ref ? parseRef(ref) : undefined;
     const channel = thread?.channel;
-    const ts = await this.slack.post(channel ?? await this.ensureDm(), text, thread?.ts);
+    const ts = await this.slack.post(channel ?? await this.ensureDm(), text, thread?.ts, opts.markdown);
     const root = thread?.ts ?? ts;
     const prev = this.state.threads[root];
     if (opts.session || opts.expect_reply || prev || thread && !channel) {
@@ -4168,7 +4174,8 @@ function newHost() {
       return (await route(where)).post(text, {
         thread: where.thread,
         session: where.session,
-        expect_reply: where.expect_reply
+        expect_reply: where.expect_reply,
+        markdown: where.markdown
       });
     },
     spawn: (opts) => spawnAgent(opts),
