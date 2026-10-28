@@ -283,7 +283,7 @@ From a terminal: `remy status` (`remy status <name>` for one session in detail, 
 | `extensions.packages` | `[]` | Extension packages installed in `~/.remy` |
 | `extensions.disabled` | `[]` | Extensions not to load, by name, built-in ones included |
 | `autonomy` | `notify` | The most you let the [factory](#factory) do with your changes: `notify`, `verify`, `merge`, `deploy-dev` or `deploy-prod` |
-| `maxFactoryAgents` | `2` | Factory agents (verifiers, checks) running at once on your subscription |
+| `maxFactoryAgents` | `5` | Factory agents (verifiers, checks) running at once on your subscription |
 
 Each workspace:
 

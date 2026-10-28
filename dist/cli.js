@@ -272,7 +272,7 @@ var DEFAULTS = {
   triggerEmoji: "mouse",
   tickSeconds: 60,
   autonomy: "notify",
-  maxFactoryAgents: 2
+  maxFactoryAgents: 5
 };
 function compactPct(value) {
   const n = Number(value);
@@ -1334,7 +1334,7 @@ var createFactory = (world = {}) => (remy) => {
     merge: mergePr,
     deployed: (sha, e, run) => deployed(sha, e, run.repoDir),
     deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
-    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => r.stage === "agent").length < (remy.config.maxFactoryAgents ?? 2),
+    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => r.stage === "agent").length < (remy.config.maxFactoryAgents ?? 5),
     spawn: async (run, step, prompt) => {
       try {
         const r = await remy.spawn({
