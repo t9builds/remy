@@ -174,6 +174,20 @@ export function validate(f: Factory): string[] {
   if (!Array.isArray(f?.steps) || !f.steps.length) return ["it has no steps"];
   if (f.autonomy && !LEVELS.includes(f.autonomy))
     errors.push(`autonomy "${f.autonomy}" isn't one of ${LEVELS.join(", ")}`);
+  const fx = f.fixer;
+  if (fx !== undefined && fx !== false) {
+    if (typeof fx !== "object" || fx === null) errors.push("fixer: an object, or false to turn it off");
+    else {
+      if (fx.maxRounds !== undefined && !(Number.isInteger(fx.maxRounds) && fx.maxRounds >= 1))
+        errors.push("fixer: maxRounds is a whole number of at least 1 (false turns the fixer off)");
+      if (fx.timeoutMinutes !== undefined && !(Number.isFinite(fx.timeoutMinutes) && fx.timeoutMinutes > 0))
+        errors.push("fixer: timeoutMinutes is a number above 0");
+      if (fx.skill !== undefined && (typeof fx.skill !== "string" || !fx.skill.trim()))
+        errors.push("fixer: skill is a skill name, like /remy:fix");
+      if (fx.instructions !== undefined && typeof fx.instructions !== "string")
+        errors.push("fixer: instructions is text");
+    }
+  }
   const names = new Set<string>();
   f.steps.forEach((s, i) => {
     const at = `step ${i + 1} (${s?.kind} ${s?.name})`;

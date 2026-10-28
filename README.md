@@ -283,7 +283,7 @@ From a terminal: `remy status` (`remy status <name>` for one session in detail, 
 | `extensions.packages` | `[]` | Extension packages installed in `~/.remy` |
 | `extensions.disabled` | `[]` | Extensions not to load, by name, built-in ones included |
 | `autonomy` | `notify` | The most you let the [factory](#factory) do with your changes: `notify`, `verify`, `merge`, `deploy-dev` or `deploy-prod` |
-| `maxFactoryAgents` | `2` | Factory agents (verifiers, checks) running at once on your subscription |
+| `maxFactoryAgents` | `2` | Factory agents (verifiers, checks, fixers) running at once on your subscription |
 
 Each workspace:
 
@@ -429,7 +429,7 @@ How far Remy goes on its own is the lower of the repo's `autonomy` and yours in 
 
 A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a failure the fixer couldn't fix, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
 
-The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Step agents count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
+The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Step agents and fixers count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
 
 ## Limits
 

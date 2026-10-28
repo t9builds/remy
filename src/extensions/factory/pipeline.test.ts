@@ -510,6 +510,51 @@ describe("the fixer (ADR-0010)", () => {
     ]);
     expect(validate({ fixer: false, steps: [agent("fix", { skill: "/x" })] })).toEqual([]);
   });
+
+  test("the fixer's config is checked", () => {
+    const steps = [agent("review", { skill: "/x" })];
+    const errors = (fixer: unknown) => validate({ fixer, steps } as Factory);
+    expect(errors(undefined)).toEqual([]);
+    expect(errors(false)).toEqual([]);
+    expect(errors({})).toEqual([]);
+    expect(errors({ skill: "/my:fix", instructions: "run it", maxRounds: 2, timeoutMinutes: 0.5 })).toEqual([]);
+    expect(errors(true)).toEqual(["fixer: an object, or false to turn it off"]);
+    for (const maxRounds of [Number.NaN, 0, -1, 1.5, Number.POSITIVE_INFINITY, "3"])
+      expect(errors({ maxRounds })).toEqual([
+        "fixer: maxRounds is a whole number of at least 1 (false turns the fixer off)",
+      ]);
+    for (const timeoutMinutes of [Number.NaN, 0, -5, Number.POSITIVE_INFINITY])
+      expect(errors({ timeoutMinutes })).toEqual(["fixer: timeoutMinutes is a number above 0"]);
+    expect(errors({ skill: "" })).toEqual(["fixer: skill is a skill name, like /remy:fix"]);
+    expect(errors({ instructions: 3 })).toEqual(["fixer: instructions is text"]);
+  });
+
+  test("a gate whose only blocker is red CI goes to the fixer; with another blocker it holds", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("pass");
+    await pre(run, env);
+    w.report("pass");
+    w.pr = detail({ ci: "fail", failing: ["unit-tests", "lint"] });
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("fixing:gate merge");
+    expect(run.reason).toBe("CI fails: unit-tests, lint");
+    expect(w.spawned.map((s) => s.step)).toEqual(["review", "verify", "fix"]);
+
+    // A draft is a person's call, and fixing CI first wouldn't change it.
+    const other = world();
+    const held = newRun();
+    await pre(held, other.env);
+    other.w.report("pass");
+    await pre(held, other.env);
+    other.w.report("pass");
+    other.w.pr = detail({ draft: true, ci: "fail", failing: ["lint"] });
+    await pre(held, other.env);
+    expect(held.stage).toBe("held");
+    expect(held.reason).toBe("gate merge: it's a draft; CI fails");
+    expect(other.w.spawned.map((s) => s.step)).toEqual(["review", "verify"]);
+  });
 });
 
 describe("autonomy", () => {
