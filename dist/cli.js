@@ -3383,6 +3383,169 @@ async function prInfo(cwd, branch) {
   };
 }
 
+// src/sessions/gitbutler.ts
+import { closeSync, openSync, readSync, statSync as statSync7 } from "fs";
+var GITBUTLER_WORKSPACE = "gitbutler/workspace";
+var MAX_LOOKUPS = 5;
+async function sessionBranch(cwd, transcriptPath) {
+  if (!transcriptPath)
+    return;
+  const newestFirst = [...new Set(transcriptBranches(transcriptPath).toReversed())].slice(0, MAX_LOOKUPS);
+  for (const branch of newestFirst) {
+    const refs = await run2(["git", "for-each-ref", "--format=%(refname)", `refs/heads/${branch}`, `refs/remotes/origin/${branch}`], cwd);
+    if (refs)
+      return branch;
+  }
+  return;
+}
+var scans = new Map;
+function transcriptBranches(path) {
+  let scan = scans.get(path) ?? { offset: 0, branches: [] };
+  let fd;
+  try {
+    const size = statSync7(path).size;
+    if (size < scan.offset)
+      scan = { offset: 0, branches: [] };
+    if (size === scan.offset)
+      return scan.branches;
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(size - scan.offset);
+    readSync(fd, buf, 0, buf.length, scan.offset);
+    const end = buf.lastIndexOf(10) + 1;
+    const branches = [...scan.branches];
+    for (const line of buf.subarray(0, end).toString("utf8").split(`
+`)) {
+      if (line.includes('"name":"Bash"'))
+        branches.push(...lineBranches(line));
+    }
+    scan = { offset: scan.offset + end, branches };
+    scans.set(path, scan);
+    return scan.branches;
+  } catch {
+    return scan.branches;
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
+  }
+}
+function lineBranches(line) {
+  try {
+    const content = JSON.parse(line)?.message?.content;
+    if (!Array.isArray(content))
+      return [];
+    return content.filter((c) => c?.type === "tool_use" && c.name === "Bash" && typeof c.input?.command === "string").flatMap((c) => branchesNamed(c.input.command));
+  } catch {
+    return [];
+  }
+}
+function branchesNamed(command) {
+  return simpleCommands(command).map(branchOf).filter((b) => !!b && !b.startsWith("gitbutler/"));
+}
+function branchOf(words) {
+  const at = words.findIndex((w) => !/^\w+=/.test(w));
+  const program = words[at]?.split("/").pop();
+  const args = words.slice(at + 1);
+  if (program === "gh") {
+    return args[0] === "pr" && args[1] === "create" ? optionValue(args, "-H", "--head") : undefined;
+  }
+  if (program !== "but")
+    return;
+  const sub = args.findIndex((w, j) => !w.startsWith("-") && args[j - 1] !== "-C" && args[j - 1] !== "--current-dir");
+  if (sub < 0)
+    return;
+  const [cmd, ...rest] = args.slice(sub);
+  if (cmd === "commit")
+    return optionValue(rest, "-b", "--branch");
+  if (cmd === "push")
+    return positional(rest, []);
+  if (cmd === "branch" && rest[0] === "new")
+    return positional(rest.slice(1), ["-A", "--above", "-B", "--below"]);
+  if (cmd === "pr" && rest[0] === "new")
+    return positional(rest.slice(1), ["-m", "--message", "-F", "--file"]);
+  return;
+}
+function optionValue(args, short, long) {
+  for (let i = 0;i < args.length; i++) {
+    const a = args[i];
+    if (a === short || a === long)
+      return args[i + 1];
+    if (a.startsWith(`${long}=`))
+      return a.slice(long.length + 1);
+  }
+  return;
+}
+function positional(args, valued) {
+  for (let i = 0;i < args.length; i++) {
+    const a = args[i];
+    if (valued.includes(a))
+      i++;
+    else if (!a.startsWith("-"))
+      return a;
+  }
+  return;
+}
+function simpleCommands(line) {
+  const commands = [];
+  let words = [];
+  let word;
+  let target = false;
+  const endWord = () => {
+    if (word !== undefined && !target)
+      words.push(word);
+    if (word !== undefined)
+      target = false;
+    word = undefined;
+  };
+  const endCommand = () => {
+    endWord();
+    if (words.length)
+      commands.push(words);
+    words = [];
+    target = false;
+  };
+  for (let i = 0;i < line.length; i++) {
+    const c = line[i];
+    if (c === "'") {
+      const close = line.indexOf("'", i + 1);
+      const to = close < 0 ? line.length : close;
+      word = (word ?? "") + line.slice(i + 1, to);
+      i = to;
+    } else if (c === '"') {
+      word ??= "";
+      for (i++;i < line.length && line[i] !== '"'; i++) {
+        if (line[i] === "\\" && i + 1 < line.length && '"\\$`'.includes(line[i + 1]))
+          i++;
+        word += line[i];
+      }
+    } else if (c === "\\") {
+      if (line[i + 1] === `
+`)
+        i++;
+      else
+        word = (word ?? "") + (line[++i] ?? "");
+    } else if (c === "<" || c === ">") {
+      if (word !== undefined && /^\d+$/.test(word))
+        word = undefined;
+      endWord();
+      while (line[i + 1] === "<" || line[i + 1] === ">")
+        i++;
+      if (line[i + 1] === "&")
+        while (/[&\d-]/.test(line[i + 1] ?? ""))
+          i++;
+      else
+        target = true;
+    } else if (c === " " || c === "\t")
+      endWord();
+    else if (`;&|()
+`.includes(c))
+      endCommand();
+    else
+      word = (word ?? "") + c;
+  }
+  endCommand();
+  return commands;
+}
+
 // src/sessions/spawned.ts
 function spawnedEntry(spawned, name, sessionId) {
   const byId = Object.values(spawned).find((s) => s.id && sessionId.startsWith(s.id));
@@ -3393,7 +3556,7 @@ function spawnedEntry(spawned, name, sessionId) {
 }
 
 // src/sessions/snapshot.ts
-var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
+var NO_PR_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk", GITBUTLER_WORKSPACE]);
 async function takeSnapshot() {
   const config = loadConfig();
   const spawned = readJson(PATHS.spawned, {});
@@ -3405,8 +3568,9 @@ async function takeSnapshot() {
   const sessions = await Promise.all(agents.map(async (a) => {
     const ev = latest.get(a.sessionId);
     const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
-    const { branch, repo } = await gitInfo(cwd);
-    const pr = branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
+    const git = await gitInfo(cwd);
+    const branch = git.branch === GITBUTLER_WORKSPACE ? await sessionBranch(cwd, ev?.transcript_path) ?? git.branch : git.branch;
+    const pr = branch && !NO_PR_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
     const spawn = spawnedEntry(spawned, a.name, a.sessionId);
     return {
       sessionId: a.sessionId,
@@ -3418,7 +3582,7 @@ async function takeSnapshot() {
       spawned: !!spawn,
       role: spawn?.role,
       about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
-      repo,
+      repo: git.repo,
       branch,
       pr,
       lastEvent: ev && { event: ev.event, type: ev.type, ts: ev.ts, text: ev.message ?? ev.last }
@@ -3798,17 +3962,17 @@ var originThread = (bridge, origin) => origin && bridge.workspace === origin.wor
 var agentUpdatesPostsIt = (e, s, agentUpdatesOn) => e.event === "Stop" && !!s.spawned && !s.role && agentUpdatesOn;
 
 // src/daemon/tail.ts
-import { closeSync, openSync, readSync, statSync as statSync7 } from "fs";
+import { closeSync as closeSync2, openSync as openSync2, readSync as readSync2, statSync as statSync8 } from "fs";
 function tailLines(path, onLine, everyMs = 2000) {
   let offset = 0;
   try {
-    offset = statSync7(path).size;
+    offset = statSync8(path).size;
   } catch {}
   let partial = "";
   return setInterval(() => {
     let size = 0;
     try {
-      size = statSync7(path).size;
+      size = statSync8(path).size;
     } catch {
       return;
     }
@@ -3816,10 +3980,10 @@ function tailLines(path, onLine, everyMs = 2000) {
       offset = 0;
     if (size === offset)
       return;
-    const fd = openSync(path, "r");
+    const fd = openSync2(path, "r");
     const buf = Buffer.alloc(size - offset);
-    readSync(fd, buf, 0, buf.length, offset);
-    closeSync(fd);
+    readSync2(fd, buf, 0, buf.length, offset);
+    closeSync2(fd);
     offset = size;
     const lines = (partial + buf.toString("utf8")).split(`
 `);
@@ -4489,7 +4653,7 @@ async function spawn(args) {
 
 // src/cli/commands/start.ts
 import { spawn as spawn2 } from "child_process";
-import { openSync as openSync2 } from "fs";
+import { openSync as openSync3 } from "fs";
 import { homedir as homedir3 } from "os";
 import { join as join12 } from "path";
 
@@ -4650,7 +4814,7 @@ async function ensureDaemon(cwd) {
     for (const until = Date.now() + 5000;Date.now() < until && await daemonStatus(); )
       await Bun.sleep(100);
   }
-  const out = openSync2(PATHS.log, "a");
+  const out = openSync3(PATHS.log, "a");
   const env = { ...process.env, REMY_DAEMON_SERVICE: "0" };
   spawn2(process.execPath, [join12(PLUGIN_ROOT, "dist", "cli.js"), "daemon"], {
     cwd,
