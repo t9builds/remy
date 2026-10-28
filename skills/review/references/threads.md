@@ -79,7 +79,7 @@ If GitHub rejects the review because a line isn't part of the diff, make that co
 
 ## Reply and resolve
 
-Then, for each of your threads:
+Then list the threads again, for the ids of the ones you just opened, and for each of your threads:
 
 - **fixed**: reply `Fixed in {sha}: {what changed}`, then resolve. The sha is the pushed commit that fixed it.
 - **decided**: reply `{what you chose, and why}`, then resolve
