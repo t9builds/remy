@@ -47,7 +47,7 @@ var __export = (target, all) => {
     });
 };
 
-// ../../../node_modules/picocolors/picocolors.js
+// node_modules/picocolors/picocolors.js
 var require_picocolors = __commonJS(function(exports, module) {
   var p = process || {};
   var argv = p.argv || [];
@@ -117,7 +117,7 @@ var require_picocolors = __commonJS(function(exports, module) {
   module.exports.createColors = createColors;
 });
 
-// ../../../node_modules/sisteransi/src/index.js
+// node_modules/sisteransi/src/index.js
 var require_src = __commonJS(function(exports, module) {
   var ESC = "\x1B";
   var CSI = `${ESC}[`;
@@ -5365,13 +5365,13 @@ import { chmodSync as chmodSync2, mkdirSync as mkdirSync4, writeFileSync as writ
 import { homedir as homedir6 } from "os";
 import { join as join15 } from "path";
 
-// ../../../node_modules/@clack/core/dist/index.mjs
+// node_modules/@clack/core/dist/index.mjs
 import { styleText } from "util";
 import { stdout, stdin } from "process";
 import * as l from "readline";
 import l__default from "readline";
 
-// ../../../node_modules/fast-string-truncated-width/dist/utils.js
+// node_modules/fast-string-truncated-width/dist/utils.js
 var getCodePointsLength = (() => {
   const SURROGATE_PAIR_RE = /[\uD800-\uDBFF][\uDC00-\uDFFF]/g;
   return (input) => {
@@ -5390,7 +5390,7 @@ var isWideNotCJKTNotEmoji = (x) => {
   return x === 8987 || x === 9001 || x >= 12272 && x <= 12287 || x >= 12289 && x <= 12350 || x >= 12441 && x <= 12543 || x >= 12549 && x <= 12591 || x >= 12593 && x <= 12686 || x >= 12688 && x <= 12771 || x >= 12783 && x <= 12830 || x >= 12832 && x <= 12871 || x >= 12880 && x <= 19903 || x >= 65040 && x <= 65049 || x >= 65072 && x <= 65106 || x >= 65108 && x <= 65126 || x >= 65128 && x <= 65131 || x >= 127488 && x <= 127490 || x >= 127504 && x <= 127547 || x >= 127552 && x <= 127560 || x >= 131072 && x <= 196605 || x >= 196608 && x <= 262141;
 };
 
-// ../../../node_modules/fast-string-truncated-width/dist/index.js
+// node_modules/fast-string-truncated-width/dist/index.js
 var ANSI_RE = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]|\u001b\]8;[^;]*;.*?(?:\u0007|\u001b\u005c)/y;
 var CONTROL_RE = /[\x00-\x08\x0A-\x1F\x7F-\x9F]{1,1000}/y;
 var CJKT_WIDE_RE = /(?:(?![\uFF61-\uFF9F\uFF00-\uFFEF])[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Tangut}]){1,1000}/yu;
@@ -5489,7 +5489,7 @@ var getStringTruncatedWidth = (input, truncationOptions = {}, widthOptions = {})
 };
 var dist_default = getStringTruncatedWidth;
 
-// ../../../node_modules/fast-string-width/dist/index.js
+// node_modules/fast-string-width/dist/index.js
 var NO_TRUNCATION2 = {
   limit: Infinity,
   ellipsis: "",
@@ -5500,7 +5500,7 @@ var fastStringWidth = (input, options = {}) => {
 };
 var dist_default2 = fastStringWidth;
 
-// ../../../node_modules/fast-wrap-ansi/lib/main.js
+// node_modules/fast-wrap-ansi/lib/main.js
 var ESC = "\x1B";
 var CSI = "\x9B";
 var END_CODE = 39;
@@ -5712,7 +5712,7 @@ function wrapAnsi(string, columns, options) {
 `);
 }
 
-// ../../../node_modules/@clack/core/dist/index.mjs
+// node_modules/@clack/core/dist/index.mjs
 var import_sisteransi = __toESM(require_src(), 1);
 import { ReadStream } from "tty";
 function findCursor(s, o, l) {
@@ -6147,7 +6147,7 @@ class n2 extends y {
   }
 }
 
-// ../../../node_modules/@clack/prompts/dist/index.mjs
+// node_modules/@clack/prompts/dist/index.mjs
 import { styleText as styleText2, stripVTControlCharacters } from "util";
 import process$1 from "process";
 var import_sisteransi2 = __toESM(require_src(), 1);
