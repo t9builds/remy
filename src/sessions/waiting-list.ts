@@ -71,8 +71,13 @@ export function questionOf(last: string | undefined): string | undefined {
 function itemOf(s: SessionView): Omit<WaitingItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
+  // A message can't approve a permission; a background session can be resumed instead (`remy resume`).
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
-    return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
+    return {
+      rank: 0,
+      why: "wants a permission",
+      action: s.kind === "background" ? `reply "resume", or \`claude attach ${s.name}\`` : "answer it in its terminal",
+    };
   if (s.status === "busy") return undefined;
   if (asked) return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
   if (s.status === "waiting") return { rank: 0, why: "waits for your answer", action: "reply to its thread" };

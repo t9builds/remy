@@ -80,6 +80,14 @@ Everything else is on the list.
 
 You review and merge PRs like you always do. Once an agent's PR is merged, Remy closes that agent within about a minute and tells you: `claude rm` deletes the session and its worktree, or, if the worktree still has uncommitted or unpushed work, `claude stop` ends the session and the worktree stays. The agent then counts as merged: it's left out of `remy status`, and `remy status --merged` lists it. Remy only does this for agents it started (`remy spawn`), never for sessions you started yourself, and waits while an agent is mid-turn.
 
+An agent that can't go on gets resumed instead of abandoned. Say "resume pear" (or reply "resume" in its thread) and Remy runs `remy resume pear`: it stops the agent if it's stuck, say on a permission prompt, and continues the same session in the background with a prompt to carry on where it left off. The agent keeps its history, branch, worktree and uncommitted edits, its name and its thread, and runs in the permission mode it was started with (`spawnPermissionMode`, normally `auto`). `remy start` does this by itself for every agent Remy started that isn't finished (not closed, its PR neither merged nor closed) and whose process ended mid-task, as after a reboot, or that has waited over an hour on a permission prompt. It posts one message per workspace listing them:
+
+```
+♻️ Agents that stopped before finishing their task
+• pear · acme/api · it waited 3 days on a permission prompt; resumed
+• thyme · acme/api · its process had ended; resumed
+```
+
 Telegram works the same way, in your chat with your bot. Telegram has no threads there, so each agent's messages come as a reply chain: reply to any of them to talk to that agent. Right after an agent asks you something, a plain message works too. When the coordinator itself needs a permission, you get Allow / Deny buttons.
 
 ## Tips
@@ -107,6 +115,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | `src/messengers/slack/` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in |
 | `src/messengers/telegram/` | Telegram: your chat with your bot, read by long polling, with Slack-style formatting converted to Telegram's |
 | `remy spawn` | `claude --bg -n <kitchen-name> -w <repo-and-task> --permission-mode auto "<task>"` in the chosen repo |
+| `remy resume` (`src/sessions/resume.ts`) | `claude stop <id>` if it runs, then `claude --bg --resume <id> "<carry on>"`. No other options: with any, Claude Code starts a copy under a new id instead, so the session keeps the options it was spawned with |
 | `coordinator.md` | The coordinator's instructions, appended to its system prompt |
 
 Messages to other sessions go through Claude Code's built-in `SendMessage`.
@@ -261,7 +270,7 @@ In any channel the bot is in, mention it in a thread (`@bot fix this, it's in ap
 
 Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
 
-From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`, `remy factory`, `remy trace`.
+From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy resume <name>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`, `remy factory`, `remy trace`.
 
 ### Tracing what agents did
 
@@ -439,7 +448,8 @@ The factory runs only in repos listed in `extensions.repos`, and only on PRs of 
 
 ## Limits
 
-- A message from another session can't approve a permission prompt. When an agent waits on one, remy tells you to `claude attach <name>`. Spawned agents run in auto mode, so this is rare.
+- A message from another session can't approve a permission prompt. When a background agent waits on one, reply "resume" to have it carry on in its own mode and find another way, or `claude attach <name>` to answer the prompt. Spawned agents run in auto mode, so this is rare.
+- A resumed agent keeps the permission mode it was started with: Claude Code can't change a session's options without starting a copy. A factory agent isn't resumed; `remy factory retry <pr>` runs its step again.
 - The coordinator's own permission prompts are relayed to the chat: reply `yes <id>` or `no <id>`, or tap the buttons in Telegram.
 - With `poll`, Slack replies arrive within about 4 seconds while you're chatting and 15 seconds when idle. Slack allows about 50 reads a minute per app, shared by everyone using it, which is enough for 3–4 active people. `socket` is instant.
 - The coordinator's own permission prompts go to the workspace you last wrote from (the catch-all until you've written).

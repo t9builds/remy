@@ -67,7 +67,7 @@ test("ranks questions, then red CI, then reviews, then ready PRs, then agents wi
     "4:nopr",
   ]);
   expect(q[0]!.why).toBe('asks: "Should I drop the column?"');
-  expect(q[1]!.action).toBe("`claude attach perm`");
+  expect(q[1]!.action).toBe('reply "resume", or `claude attach perm`');
 });
 
 test("leaves out busy sessions, pending CI, closed PRs and interactive sessions with nothing to show", () => {

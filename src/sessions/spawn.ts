@@ -23,6 +23,16 @@ const SESSION_ENV = new Set([
   "CLAUDE_CODE_MESSAGING_TOKEN",
 ]);
 
+/**
+ * The environment for a `claude --bg` this process starts. It drops the variables that tie a process to the session
+ * running this command (the coordinator), or the agent would inherit its session id, inbox and REMY_ROLE.
+ */
+export const agentEnv = (env: Record<string, string | undefined> = process.env) =>
+  Object.fromEntries(Object.entries(env).filter(([k, v]) => v !== undefined && !SESSION_ENV.has(k))) as Record<
+    string,
+    string
+  >;
+
 function slug(s: string) {
   return s
     .toLowerCase()
@@ -74,13 +84,7 @@ export async function spawnAgent(opts: {
   if (worktree) cmd.push("-w", label);
   cmd.push(...remyDirArgs(), prompt);
 
-  // Drop the variables that tie a process to the session running this command (the coordinator),
-  // or the new agent would inherit its session id, inbox and REMY_ROLE.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_ENV.has(k))) as Record<
-    string,
-    string
-  >;
-  const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env });
+  const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env: agentEnv() });
   const out = (r.stdout.toString() + r.stderr.toString()).trim();
   if (r.exitCode !== 0) throw new Error(`claude --bg failed (${r.exitCode}): ${out}`);
   const id = out.match(/\b([0-9a-f]{6,}(?:-[0-9a-f-]+)?)\b/i)?.[1];
