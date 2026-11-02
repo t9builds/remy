@@ -20,7 +20,7 @@ Agents get stuck: blocked on a permission prompt for days, or their process gone
 
 ## Consequences
 
-- A permission prompt on the waiting list now offers `reply "resume"` next to `claude attach`, so a stuck background agent can go on from the phone.
+- A permission prompt on the waiting list now offers `reply "resume"` next to `claude attach`, so a stuck background agent can go on from the phone, except for a factory agent, which gets only `claude attach`.
 - `remy status` shows a background session whose process is gone as `ended` rather than without a status.
 - `remy start` takes a little longer when there are agents to resume: up to 30 s per stuck agent to stop it.
 - An agent whose process ended while it waited on the user's answer (state blocked) is resumed too, and asks again; that makes it reachable from its thread, which a gone process isn't.
