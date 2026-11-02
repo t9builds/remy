@@ -90,18 +90,36 @@ const latestEvents = () => {
   return latest;
 };
 
-async function prOf(cwd: string) {
-  const { branch } = await gitInfo(cwd);
-  return branch && !DEFAULT_BRANCHES.has(branch) ? prInfo(cwd, branch) : undefined;
-}
+/** What `toResume` reaches the machine through; tests fake it. */
+export type ToResumeWorld = {
+  spawned: () => Spawned;
+  agents: () => Promise<AgentRow[]>;
+  /** The newest hook event of each session, by session id. */
+  latest: () => Map<string, RemyEvent>;
+  exists: (path: string) => boolean;
+  /** The repo a folder belongs to and the PR of its branch, if it has one. */
+  lookup: (cwd: string) => Promise<{ repo?: string; pr?: Pick<Pr, "state"> }>;
+};
+
+const realToResumeWorld: ToResumeWorld = {
+  spawned: () => readJson<Spawned>(PATHS.spawned, {}),
+  agents: () => listAgents(true),
+  latest: latestEvents,
+  exists: existsSync,
+  lookup: async (cwd) => {
+    const { branch, repo } = await gitInfo(cwd);
+    return { repo, pr: branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
+  },
+};
 
 export type ToResume = { name: string; why: string; cwd: string; repo?: string };
 
 /** The spawned agents `remy start` resumes, and why. */
-export async function toResume(now = Date.now()): Promise<ToResume[]> {
-  const spawned = readJson<Spawned>(PATHS.spawned, {});
-  const rows = await listAgents(true);
-  const latest = latestEvents();
+export async function toResume(now = Date.now(), world: Partial<ToResumeWorld> = {}): Promise<ToResume[]> {
+  const w = { ...realToResumeWorld, ...world };
+  const spawned = w.spawned();
+  const rows = await w.agents();
+  const latest = w.latest();
   const out: ToResume[] = [];
   for (const [name, spawn] of Object.entries(spawned)) {
     const row = rowOf(rows, name, spawn);
@@ -109,10 +127,11 @@ export async function toResume(now = Date.now()): Promise<ToResume[]> {
     if (!row || !resumeReason(c, now)) continue;
     // The newest hook event has the folder the agent works in (its worktree); a gone process's row has where it started.
     const cwd = c.last?.cwd ?? row.cwd;
-    c.folderGone = !existsSync(cwd);
-    c.pr = await prOf(cwd);
+    c.folderGone = !w.exists(cwd);
+    const { repo, pr } = c.folderGone ? { repo: undefined, pr: undefined } : await w.lookup(cwd);
+    c.pr = pr;
     const why = resumeReason(c, now);
-    if (why) out.push({ name, why, cwd, repo: (await gitInfo(cwd)).repo });
+    if (why) out.push({ name, why, cwd, repo });
   }
   return out;
 }

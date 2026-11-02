@@ -4641,14 +4641,21 @@ var latestEvents = () => {
     latest.set(e.session_id, e);
   return latest;
 };
-async function prOf(cwd) {
-  const { branch } = await gitInfo(cwd);
-  return branch && !DEFAULT_BRANCHES.has(branch) ? prInfo(cwd, branch) : undefined;
-}
-async function toResume(now = Date.now()) {
-  const spawned = readJson(PATHS.spawned, {});
-  const rows = await listAgents(true);
-  const latest = latestEvents();
+var realToResumeWorld = {
+  spawned: () => readJson(PATHS.spawned, {}),
+  agents: () => listAgents(true),
+  latest: latestEvents,
+  exists: existsSync9,
+  lookup: async (cwd) => {
+    const { branch, repo } = await gitInfo(cwd);
+    return { repo, pr: branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
+  }
+};
+async function toResume(now = Date.now(), world = {}) {
+  const w = { ...realToResumeWorld, ...world };
+  const spawned = w.spawned();
+  const rows = await w.agents();
+  const latest = w.latest();
   const out = [];
   for (const [name, spawn] of Object.entries(spawned)) {
     const row = rowOf(rows, name, spawn);
@@ -4656,11 +4663,12 @@ async function toResume(now = Date.now()) {
     if (!row || !resumeReason(c, now))
       continue;
     const cwd = c.last?.cwd ?? row.cwd;
-    c.folderGone = !existsSync9(cwd);
-    c.pr = await prOf(cwd);
+    c.folderGone = !w.exists(cwd);
+    const { repo, pr } = c.folderGone ? { repo: undefined, pr: undefined } : await w.lookup(cwd);
+    c.pr = pr;
     const why = resumeReason(c, now);
     if (why)
-      out.push({ name, why, cwd, repo: (await gitInfo(cwd)).repo });
+      out.push({ name, why, cwd, repo });
   }
   return out;
 }

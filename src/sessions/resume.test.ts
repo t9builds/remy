@@ -13,6 +13,7 @@ import {
   resumeSession,
   rowOf,
   STUCK_MS,
+  toResume,
 } from "./resume";
 import type { Spawned } from "./spawned";
 
@@ -209,4 +210,40 @@ test("resumeSession removes the copy Claude Code started, and throws", async () 
   const { calls, w } = world({ live: gone("working"), out: "started a copy as abcdef123456" });
   await expect(resumeSession("pear", "why", w)).rejects.toThrow("started a copy instead of resuming pear");
   expect(calls.at(-1)).toEqual(["claude", "rm", "abcdef123456"]);
+});
+
+const todo = (over: Parameters<typeof toResume>[1] = {}) =>
+  toResume(now, {
+    spawned: () => ({ pear: spawn }),
+    agents: async () => [gone("working")],
+    latest: () => new Map(),
+    exists: () => true,
+    lookup: async () => ({ repo: "o/r" }),
+    ...over,
+  });
+
+test("toResume leaves an agent whose last-event folder is gone, even if its row's folder exists", async () => {
+  const worktree = "/r/.claude/worktrees/moved";
+  const last: RemyEvent = { ...asked(0), event: "Stop", cwd: worktree };
+  const exists = (p: string) => p !== worktree;
+  expect(await todo({ latest: () => new Map([[sid, last]]), exists })).toEqual([]);
+  expect(await todo({ exists })).toHaveLength(1);
+});
+
+test("toResume leaves an agent whose PR at its folder is merged", async () => {
+  expect(await todo({ lookup: async () => ({ repo: "o/r", pr: { state: "MERGED" } }) })).toEqual([]);
+});
+
+test("toResume returns a gone agent with why, the last event's folder and its repo", async () => {
+  const cwd = "/r/.claude/worktrees/moved";
+  const seen: string[] = [];
+  const out = await todo({
+    latest: () => new Map([[sid, { ...asked(0), event: "Stop", cwd }]]),
+    lookup: async (c) => {
+      seen.push(c);
+      return { repo: "o/r" };
+    },
+  });
+  expect(out).toEqual([{ name: "pear", why: "its process had ended", cwd, repo: "o/r" }]);
+  expect(seen).toEqual([cwd]);
 });
