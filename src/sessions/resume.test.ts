@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { homedir, tmpdir } from "node:os";
 import type { AgentRow } from "./agents";
 import type { RemyEvent } from "./events";
 import {
@@ -156,14 +157,17 @@ test("an agent whose folder is gone is left to `remy resume` by hand", () => {
 /** A fake machine: the listing shows the pid until `clearsAfter` listings have passed; the clock moves with sleeps. */
 function world(opts: { live?: AgentRow; clearsAfter?: number; fail?: (cmd: string[]) => boolean; out?: string } = {}) {
   const calls: string[][] = [];
+  const seen: unknown[] = [];
   let listed = 0;
   let clock = 0;
   const base = opts.live ?? row();
   return {
     calls,
+    seen,
     w: {
-      run: (cmd: string[]) => {
+      run: (cmd: string[], o?: unknown) => {
         calls.push(cmd);
+        seen.push(o);
         const ok = !opts.fail?.(cmd);
         return { ok, out: cmd[1] === "--bg" ? (opts.out ?? "resumed") : "" };
       },
@@ -219,6 +223,31 @@ test("resumeSession removes the copy Claude Code started, and throws", async () 
   const { calls, w } = world({ live: gone("working"), out: "started a copy as abcdef123456" });
   await expect(resumeSession("pear", "why", w)).rejects.toThrow("started a copy instead of resuming pear");
   expect(calls.at(-1)).toEqual(["claude", "rm", "abcdef123456"]);
+});
+
+test("resumeSession resumes from the session's folder, else ~, without cmux or session variables", async () => {
+  const saved = { cmux: process.env.CMUX_TEST_X, sid: process.env.CLAUDE_CODE_SESSION_ID };
+  process.env.CMUX_TEST_X = "1";
+  process.env.CLAUDE_CODE_SESSION_ID = "x";
+  try {
+    const here = world({ live: gone("working") });
+    here.w.agents = async () => [{ ...gone("working"), cwd: tmpdir() }];
+    await resumeSession("pear", "why", here.w);
+    const o = here.seen[0] as { cwd: string; env: Record<string, string> };
+    expect(o.cwd).toBe(tmpdir());
+    expect(Object.keys(o.env).filter((k) => k.startsWith("CMUX_"))).toEqual([]);
+    expect(o.env.CLAUDE_CODE_SESSION_ID).toBeUndefined();
+
+    const away = world({ live: gone("working") });
+    away.w.agents = async () => [{ ...gone("working"), cwd: "/nonexistent/remy-gone-folder" }];
+    await resumeSession("pear", "why", away.w);
+    expect((away.seen[0] as { cwd: string }).cwd).toBe(homedir());
+  } finally {
+    if (saved.cmux === undefined) delete process.env.CMUX_TEST_X;
+    else process.env.CMUX_TEST_X = saved.cmux;
+    if (saved.sid === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = saved.sid;
+  }
 });
 
 const todo = (over: Parameters<typeof toResume>[1] = {}) =>
