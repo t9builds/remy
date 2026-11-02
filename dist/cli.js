@@ -3719,7 +3719,7 @@ function itemOf(s) {
     return {
       rank: 0,
       why: "wants a permission",
-      action: s.kind === "background" ? `reply "resume", or \`claude attach ${s.name}\`` : "answer it in its terminal"
+      action: s.kind !== "background" ? "answer it in its terminal" : s.role ? `\`claude attach ${s.name}\`` : `reply "resume", or \`claude attach ${s.name}\``
     };
   if (s.status === "busy")
     return;

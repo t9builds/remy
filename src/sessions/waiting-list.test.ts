@@ -138,3 +138,13 @@ test("a permission prompt offers resume for a background session, the terminal f
   expect(bg?.action).toBe(`reply "resume", or \`claude attach ${bgSession.name}\``);
   expect(waitingListOf(snap(waiting("terminal")))[0]?.action).toBe("answer it in its terminal");
 });
+
+test("a permission prompt on a factory agent doesn't offer resume, which `remy resume` refuses", () => {
+  const factory = session({
+    kind: "background",
+    role: "verify",
+    status: "waiting",
+    lastEvent: { event: "Notification", ts: 1, type: "permission_prompt" },
+  });
+  expect(waitingListOf(snap(factory))[0]?.action).toBe(`\`claude attach ${factory.name}\``);
+});

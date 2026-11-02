@@ -71,12 +71,18 @@ export function questionOf(last: string | undefined): string | undefined {
 function itemOf(s: SessionView): Omit<WaitingItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
-  // A message can't approve a permission; a background session can be resumed instead (`remy resume`).
+  // A message can't approve a permission; a background session can be resumed instead (`remy resume`), except a
+  // factory agent, which `remy resume` refuses.
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
     return {
       rank: 0,
       why: "wants a permission",
-      action: s.kind === "background" ? `reply "resume", or \`claude attach ${s.name}\`` : "answer it in its terminal",
+      action:
+        s.kind !== "background"
+          ? "answer it in its terminal"
+          : s.role
+            ? `\`claude attach ${s.name}\``
+            : `reply "resume", or \`claude attach ${s.name}\``,
     };
   if (s.status === "busy") return undefined;
   if (asked) return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
