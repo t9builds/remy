@@ -13,7 +13,7 @@ import { type RemyEvent, readEvents } from "./events";
 import { gitInfo, prInfo } from "./git";
 import { DEFAULT_BRANCHES } from "./snapshot";
 import { agentEnv } from "./spawn";
-import type { Spawned } from "./spawned";
+import { type Spawned, spawnedEntry } from "./spawned";
 
 /** How long an agent may wait on a permission prompt before `remy start` resumes it instead. */
 export const STUCK_MS = 60 * 60_000;
@@ -145,11 +145,12 @@ const runSync: Run = (cmd, opts) => {
 
 /** The session `remy resume <name>` resumes, or why it can't. */
 export function resumable(rows: AgentRow[], spawned: Spawned, name: string): AgentRow {
-  const spawn = spawned[name];
-  const row = rowOf(rows, name, spawn);
+  const row = rowOf(rows, name, spawned[name]);
   if (!row) throw new Error(`no session "${name}"; \`remy status\` lists them`);
   if (row.kind !== "background")
     throw new Error(`${name} runs in a terminal, not in the background: continue it there`);
+  // By session id, so a renamed session keeps its guards (the record is keyed by the name Remy gave it).
+  const spawn = spawnedEntry(spawned, row.name, row.sessionId);
   if (spawn?.merged) throw new Error(`${name} was closed when its PR merged (${spawn.merged.pr})`);
   if (spawn?.role)
     throw new Error(

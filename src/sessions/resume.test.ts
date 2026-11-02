@@ -80,6 +80,15 @@ test("a spawn record finds its own session by id, not a later one that reused th
   expect(rowOf([row(), later], "pear")?.sessionId).toBe("59833c56-7822");
 });
 
+test("remy resume keeps its guards for a renamed session", () => {
+  const renamed = [row({ name: "foo" })];
+  const merged = { at: 1, pr: "https://github.com/o/r/pull/7", number: 7, cleanup: "stopped" };
+  expect(() => resumable(renamed, { pear: { ...spawn, role: "review", pr: merged.pr } }, "foo")).toThrow(
+    "remy factory retry https://github.com/o/r/pull/7",
+  );
+  expect(() => resumable(renamed, { pear: { ...spawn, merged } }, "foo")).toThrow("closed when its PR merged");
+});
+
 test("remy resume refuses sessions it must not continue", () => {
   const spawned: Spawned = { pear: spawn };
   expect(resumable([row()], spawned, "pear").sessionId).toBe(sid);
