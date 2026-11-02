@@ -4618,10 +4618,10 @@ var span2 = (ms) => {
   return h < 48 ? `${h} h` : `${Math.round(h / 24)} days`;
 };
 function resumeReason(c, now) {
-  const { spawn, row, last, pr } = c;
+  const { spawn, row, last, pr, folderGone } = c;
   if (spawn.merged || spawn.role || row?.kind !== "background")
     return;
-  if (pr && pr.state !== "OPEN")
+  if (folderGone || pr && pr.state !== "OPEN")
     return;
   if (!row.pid)
     return row.state === "done" || row.state === "stopped" ? undefined : "its process had ended";
@@ -4656,6 +4656,7 @@ async function toResume(now = Date.now()) {
     if (!row || !resumeReason(c, now))
       continue;
     const cwd = c.last?.cwd ?? row.cwd;
+    c.folderGone = !existsSync9(cwd);
     c.pr = await prOf(cwd);
     const why = resumeReason(c, now);
     if (why)
@@ -4680,18 +4681,27 @@ function resumable(rows, spawned, name) {
     throw new Error(`${name} is the factory's ${spawn.role} agent; \`remy factory retry ${spawn.pr}\` runs its step again`);
   return row;
 }
-async function resumeSession(name, why = "the user asked for it", run = runSync2) {
-  const spawned = readJson(PATHS.spawned, {});
-  const row = resumable(await listAgents(true), spawned, name);
+var realWorld = {
+  run: runSync2,
+  agents: () => listAgents(true),
+  spawned: () => readJson(PATHS.spawned, {}),
+  sleep: (ms) => Bun.sleep(ms),
+  now: () => Date.now(),
+  stopTimeoutMs: 30000
+};
+async function resumeSession(name, why = "the user asked for it", world = {}) {
+  const w = { ...realWorld, ...world };
+  const run = w.run;
+  const row = resumable(await w.agents(), w.spawned(), name);
   if (row.pid) {
     const stop = run(["claude", "stop", row.id ?? row.sessionId.slice(0, 8)]);
     if (!stop.ok)
       throw new Error(`couldn't stop ${name}: ${stop.out}`);
-    const until = Date.now() + 30000;
-    while ((await listAgents(true)).find((r) => r.sessionId === row.sessionId)?.pid) {
-      if (Date.now() > until)
-        throw new Error(`${name} didn't stop within 30 s`);
-      await Bun.sleep(500);
+    const until = w.now() + w.stopTimeoutMs;
+    while ((await w.agents()).find((r) => r.sessionId === row.sessionId)?.pid) {
+      if (w.now() > until)
+        throw new Error(`${name} didn't stop within ${w.stopTimeoutMs / 1000} s`);
+      await w.sleep(500);
     }
   }
   const cwd = existsSync9(row.cwd) ? row.cwd : homedir3();

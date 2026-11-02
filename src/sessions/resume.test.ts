@@ -10,6 +10,7 @@ import {
   resumeEnv,
   resumePrompt,
   resumeReason,
+  resumeSession,
   rowOf,
   STUCK_MS,
 } from "./resume";
@@ -135,4 +136,77 @@ test("one message per workspace lists what was resumed and what wasn't", () => {
       "• *pear* · o/api · it waited 3 days on a permission prompt; resumed\n" +
       "• *thyme* · couldn't resume it (didn't stop within 30 s)",
   );
+});
+
+test("an agent whose folder is gone is left to `remy resume` by hand", () => {
+  expect(reason({ row: gone("working"), folderGone: true })).toBeUndefined();
+  expect(reason({ row: gone("working"), folderGone: false })).toBe("its process had ended");
+});
+
+/** A fake machine: the listing shows the pid until `clearsAfter` listings have passed; the clock moves with sleeps. */
+function world(opts: { live?: AgentRow; clearsAfter?: number; fail?: (cmd: string[]) => boolean; out?: string } = {}) {
+  const calls: string[][] = [];
+  let listed = 0;
+  let clock = 0;
+  const base = opts.live ?? row();
+  return {
+    calls,
+    w: {
+      run: (cmd: string[]) => {
+        calls.push(cmd);
+        const ok = !opts.fail?.(cmd);
+        return { ok, out: cmd[1] === "--bg" ? (opts.out ?? "resumed") : "" };
+      },
+      agents: async () => {
+        listed++;
+        const cleared = base.pid && listed > 1 + (opts.clearsAfter ?? 0);
+        return [cleared ? { ...base, pid: undefined } : base];
+      },
+      spawned: () => ({ pear: spawn }) as Spawned,
+      sleep: async (ms: number) => {
+        clock += ms;
+      },
+      now: () => clock,
+      stopTimeoutMs: 30_000,
+    },
+  };
+}
+
+test("resumeSession stops a live agent, waits for its pid to clear, then resumes it", async () => {
+  const { calls, w } = world({ clearsAfter: 2 });
+  const r = await resumeSession("pear", "why", w);
+  expect(r).toMatchObject({ name: "pear", sessionId: sid, stopped: true });
+  expect(calls[0]).toEqual(["claude", "stop", sid.slice(0, 8)]);
+  expect(calls[1]).toEqual(resumeCommand(sid, resumePrompt("why")));
+  expect(calls).toHaveLength(2);
+});
+
+test("resumeSession does not stop an agent whose process is gone", async () => {
+  const { calls, w } = world({ live: gone("working") });
+  const r = await resumeSession("pear", "why", w);
+  expect(r.stopped).toBe(false);
+  expect(calls.map((c) => c[1])).toEqual(["--bg"]);
+});
+
+test("resumeSession throws when claude stop fails", async () => {
+  const { calls, w } = world({ fail: (c) => c[1] === "stop" });
+  await expect(resumeSession("pear", "why", w)).rejects.toThrow("couldn't stop pear");
+  expect(calls).toHaveLength(1);
+});
+
+test("resumeSession throws when the pid never clears within 30 s", async () => {
+  const { calls, w } = world({ clearsAfter: 1_000_000 });
+  await expect(resumeSession("pear", "why", w)).rejects.toThrow("pear didn't stop within 30 s");
+  expect(calls.map((c) => c[1])).toEqual(["stop"]);
+});
+
+test("resumeSession throws when the resume command fails", async () => {
+  const { w } = world({ live: gone("working"), fail: (c) => c[1] === "--bg" });
+  await expect(resumeSession("pear", "why", w)).rejects.toThrow("claude --bg --resume failed");
+});
+
+test("resumeSession removes the copy Claude Code started, and throws", async () => {
+  const { calls, w } = world({ live: gone("working"), out: "started a copy as abcdef123456" });
+  await expect(resumeSession("pear", "why", w)).rejects.toThrow("started a copy instead of resuming pear");
+  expect(calls.at(-1)).toEqual(["claude", "rm", "abcdef123456"]);
 });

@@ -50,19 +50,27 @@ const span = (ms: number) => {
 };
 
 /** What `toResume` looks at for one spawned agent. `pr` is looked up only for agents that would be resumed. */
-export type Candidate = { spawn: Spawned[string]; row?: AgentRow; last?: RemyEvent; pr?: Pick<Pr, "state"> };
+export type Candidate = {
+  spawn: Spawned[string];
+  row?: AgentRow;
+  last?: RemyEvent;
+  pr?: Pick<Pr, "state">;
+  /** The folder the agent worked in no longer exists (its worktree was removed). */
+  folderGone?: boolean;
+};
 
 /**
  * Why `remy start` resumes this agent, or undefined when it leaves it alone. It resumes an agent that isn't finished
  * (not closed, its PR neither merged nor closed) when its process is gone mid-task, or when it has waited on a
  * permission prompt for `STUCK_MS`. A process that is gone with the agent done, or stopped by someone, stays so.
+ * An agent whose folder is gone was abandoned (its worktree removed), so `remy start` leaves it; `remy resume` still works.
  * Factory agents are left to the factory, which holds their run and starts a new agent on `remy factory retry`.
  */
 export function resumeReason(c: Candidate, now: number): string | undefined {
-  const { spawn, row, last, pr } = c;
+  const { spawn, row, last, pr, folderGone } = c;
   // No row: the session was removed (`claude rm`).
   if (spawn.merged || spawn.role || row?.kind !== "background") return undefined;
-  if (pr && pr.state !== "OPEN") return undefined;
+  if (folderGone || (pr && pr.state !== "OPEN")) return undefined;
   if (!row.pid) return row.state === "done" || row.state === "stopped" ? undefined : "its process had ended";
   const asked = last?.event === "Notification" && last.type === "permission_prompt" ? last.ts : undefined;
   if (row.status === "waiting" && asked !== undefined && now - asked >= STUCK_MS)
@@ -101,6 +109,7 @@ export async function toResume(now = Date.now()): Promise<ToResume[]> {
     if (!row || !resumeReason(c, now)) continue;
     // The newest hook event has the folder the agent works in (its worktree); a gone process's row has where it started.
     const cwd = c.last?.cwd ?? row.cwd;
+    c.folderGone = !existsSync(cwd);
     c.pr = await prOf(cwd);
     const why = resumeReason(c, now);
     if (why) out.push({ name, why, cwd, repo: (await gitInfo(cwd)).repo });
@@ -130,21 +139,42 @@ export function resumable(rows: AgentRow[], spawned: Spawned, name: string): Age
   return row;
 }
 
+/** What `resumeSession` reaches the machine through; tests fake it. */
+export type ResumeWorld = {
+  run: Run;
+  agents: () => Promise<AgentRow[]>;
+  spawned: () => Spawned;
+  sleep: (ms: number) => Promise<unknown>;
+  now: () => number;
+  /** How long to wait for the stopped process to go. */
+  stopTimeoutMs: number;
+};
+
+const realWorld: ResumeWorld = {
+  run: runSync,
+  agents: () => listAgents(true),
+  spawned: () => readJson<Spawned>(PATHS.spawned, {}),
+  sleep: (ms) => Bun.sleep(ms),
+  now: () => Date.now(),
+  stopTimeoutMs: 30_000,
+};
+
 /**
  * Resume the background session `name`: stop its process if it still runs (stuck on a permission prompt, say), then
  * continue the same session with a prompt to carry on. Returns what Claude Code printed.
  */
-export async function resumeSession(name: string, why = "the user asked for it", run: Run = runSync) {
-  const spawned = readJson<Spawned>(PATHS.spawned, {});
-  const row = resumable(await listAgents(true), spawned, name);
+export async function resumeSession(name: string, why = "the user asked for it", world: Partial<ResumeWorld> = {}) {
+  const w = { ...realWorld, ...world };
+  const run = w.run;
+  const row = resumable(await w.agents(), w.spawned(), name);
   if (row.pid) {
     const stop = run(["claude", "stop", row.id ?? row.sessionId.slice(0, 8)]);
     if (!stop.ok) throw new Error(`couldn't stop ${name}: ${stop.out}`);
     // `claude stop` returns before the process is gone, and a running session would be copied, not continued.
-    const until = Date.now() + 30_000;
-    while ((await listAgents(true)).find((r) => r.sessionId === row.sessionId)?.pid) {
-      if (Date.now() > until) throw new Error(`${name} didn't stop within 30 s`);
-      await Bun.sleep(500);
+    const until = w.now() + w.stopTimeoutMs;
+    while ((await w.agents()).find((r) => r.sessionId === row.sessionId)?.pid) {
+      if (w.now() > until) throw new Error(`${name} didn't stop within ${w.stopTimeoutMs / 1000} s`);
+      await w.sleep(500);
     }
   }
   const cwd = existsSync(row.cwd) ? row.cwd : homedir();
