@@ -3651,6 +3651,13 @@ function slug(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 }
 var remyDirArgs = (env = process.env) => env.REMY_DIR ? ["--settings", JSON.stringify({ env: { REMY_DIR: env.REMY_DIR } })] : [];
+var TURN_REPORT = `The last message of each of your turns is posted to the user's Slack or Telegram thread for this task, where they read it, often on a phone. Write it for them:
+- Lead with the outcome in a line or two: what is done, what changed, or what blocks you.
+- Then only what they need: the PR link, how you verified it, what didn't work or is left out. No file-by-file walkthrough and no restating the task; the details belong in the PR.
+- End with a \`Next:\` line. If you need the user, give your recommendation first and end the message on the one decision as a question, with the \`?\` as the last character, so a word answers it and nothing follows it. Example: \`Next: I recommend merging now, since CI is green. Merge it?\` That question is the only one in the message, with no other line ending in \`?\`, since any question puts you on the user's waiting list. Keep the \`Next:\` line short enough to read in a list; put longer reasoning on the line before it. Otherwise say what happens next and who does it: the follow-up you recommend (and will do if they say go), or that nothing is needed from them.
+- Keep it under about 10 lines, in Slack mrkdwn: *bold*, _italic_, \`code\`, <https://url|label>, no headings or tables.
+Decide what you can decide yourself and carry on; don't stop to ask what isn't the user's call.`;
+var turnReportArgs = (role) => role ? [] : ["--append-system-prompt", TURN_REPORT];
 async function spawnAgent(opts) {
   const config = loadConfig();
   const cwd = resolveRepo(opts.repo, config.repoRoots);
@@ -3668,7 +3675,7 @@ async function spawnAgent(opts) {
   const cmd = ["claude", "--bg", "-n", name, "--permission-mode", opts.permissionMode ?? config.spawnPermissionMode];
   if (worktree)
     cmd.push("-w", label);
-  cmd.push(...remyDirArgs(), prompt);
+  cmd.push(...remyDirArgs(), ...turnReportArgs(opts.role), prompt);
   const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env: agentEnv() });
   const out = (r.stdout.toString() + r.stderr.toString()).trim();
   if (r.exitCode !== 0)
