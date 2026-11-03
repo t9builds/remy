@@ -20,3 +20,7 @@ test("the Next: example in the turn report is a question the waiting list catche
   expect(example).toBeDefined();
   expect(questionOf(`Done, PR is up.\n\n${example}`)).toBe(example);
 });
+
+test("a statement Next: with no other question is not a waiting-list question", () => {
+  expect(questionOf("Done, PR is up.\n\nNext: I will open the PR once CI is green.")).toBeUndefined();
+});
