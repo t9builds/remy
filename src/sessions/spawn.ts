@@ -52,12 +52,13 @@ export const remyDirArgs = (env: Record<string, string | undefined> = process.en
 /**
  * How an agent ends its turns. Remy posts the last message of each turn to the agent's thread (`agent-updates`), so
  * that message is the user's whole view of the work: short, outcome first, and ending on what comes next. It goes in
- * the system prompt rather than the task, so it holds for every turn and survives `spawnTemplate` and `remy resume`.
+ * the system prompt rather than the task, so it holds for every turn and survives `spawnTemplate`. It rides on the
+ * session, which `remy resume` continues without re-passing options (checked with `claude -p --resume`, not `--bg`).
  */
 export const TURN_REPORT = `The last message of each of your turns is posted to the user's Slack or Telegram thread for this task, where they read it, often on a phone. Write it for them:
 - Lead with the outcome in a line or two: what is done, what changed, or what blocks you.
 - Then only what they need: the PR link, how you verified it, what didn't work or is left out. No file-by-file walkthrough and no restating the task; the details belong in the PR.
-- End with a \`Next:\` line. If you need the user, ask the one decision as a question and say which option you recommend, so a word answers it. Otherwise say what happens next and who does it: the follow-up you recommend (and will do if they say go), or that nothing is needed from them.
+- End with a \`Next:\` line. If you need the user, give your recommendation first and end the message on the one decision as a question, with the \`?\` as the last character, so a word answers it and nothing follows it. Example: \`Next: I recommend merging now, since CI is green. Merge it?\` Otherwise say what happens next and who does it: the follow-up you recommend (and will do if they say go), or that nothing is needed from them.
 - Keep it under about 10 lines, in Slack mrkdwn: *bold*, _italic_, \`code\`, <https://url|label>, no headings or tables.
 Decide what you can decide yourself and carry on; don't stop to ask what isn't the user's call.`;
 
