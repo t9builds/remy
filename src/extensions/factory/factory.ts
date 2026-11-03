@@ -61,6 +61,7 @@ export const createFactory =
       remy.state.set("backoffUntil", backoffUntil);
     };
 
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 18); don't add to it
     async function factoryAt(root: string) {
       if (!trusted.has(root)) return undefined;
       const path = join(root, ".remy", "factory.ts");
@@ -148,6 +149,7 @@ export const createFactory =
     }
 
     let ticking = false;
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 40); don't add to it
     remy.on("tick", async () => {
       if (ticking) return;
       ticking = true;

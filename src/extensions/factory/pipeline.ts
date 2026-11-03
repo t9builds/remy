@@ -278,6 +278,7 @@ export async function advance(run: Run, f: Factory, autonomy: Level, env: Env): 
 }
 
 /** One move. True when the run went on to another step and may move again right away. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 48); don't add to it
 async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promise<boolean> {
   const now = env.now();
   if (run.stage === "done") return false;
@@ -425,6 +426,7 @@ async function fixing(run: Run, f: Factory, env: Env): Promise<boolean> {
   return report.verdict === "pass";
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 32); don't add to it
 async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
   if (!run.agent) {
@@ -476,6 +478,7 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
   return hold(run, now, `${step.name}: ${summary}`);
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 25); don't add to it
 async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
   const minutes = step.timeoutMinutes ?? 60;
@@ -536,6 +539,7 @@ async function gateStep(run: Run, step: GateStep, f: Factory, env: Env): Promise
   return next(run, now);
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 22); don't add to it
 async function actionStep(run: Run, step: Extract<Step, { kind: "action" }>, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
   if (step.name === "notify") {

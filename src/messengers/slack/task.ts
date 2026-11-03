@@ -65,6 +65,7 @@ function clock(ts: string) {
 }
 
 /** Text of section, header and context blocks; buttons and other controls are left out. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 21); don't add to it
 function blockText(blocks: SlackBlock[] = []) {
   const out: string[] = [];
   for (const b of blocks) {

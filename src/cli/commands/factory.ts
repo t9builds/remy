@@ -22,6 +22,7 @@ const disabledNote = (what: string) =>
 
 const say = (...lines: (string | undefined)[]) => console.log(lines.filter(Boolean).join("\n"));
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 19); don't add to it
 export async function factory(args: string[]) {
   const { values, positionals } = parse(args, { json: { type: "boolean" } });
   const runs = readJson<{ runs?: Record<string, Run> }>(PATHS.factory, {}).runs ?? {};

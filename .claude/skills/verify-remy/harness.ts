@@ -145,6 +145,7 @@ async function until<T>(seconds: number, ok: () => Promise<T | undefined> | T | 
  * the holder is alive. The lock is linked into place already written, so no one sees it empty; one that can't be
  * read is held, not dead.
  */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 24); don't add to it
 function takeLock() {
   const tmp = `${LOCK}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify({ run: RUN, pid: process.pid }));

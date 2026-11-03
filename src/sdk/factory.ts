@@ -169,6 +169,7 @@ export function levelOf(step: Step): Level {
 }
 
 /** What's wrong with a pipeline, so a broken factory.ts is reported instead of half run. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 40); don't add to it
 export function validate(f: Factory): string[] {
   const errors: string[] = [];
   if (!Array.isArray(f?.steps) || !f.steps.length) return ["it has no steps"];
@@ -189,6 +190,7 @@ export function validate(f: Factory): string[] {
     }
   }
   const names = new Set<string>();
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 38); don't add to it
   f.steps.forEach((s, i) => {
     const at = `step ${i + 1} (${s?.kind} ${s?.name})`;
     if (!["agent", "wait", "gate", "action"].includes(s?.kind)) {

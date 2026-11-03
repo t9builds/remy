@@ -97,6 +97,7 @@ function globMatch(pattern: string, value: string) {
  * The workspace a session reports to: a `repos` match on its GitHub repo, else the longest `paths` match on its
  * folder, else the first workspace with neither (the catch-all), else the first workspace.
  */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 18); don't add to it
 export function workspaceFor(where: { cwd?: string; repo?: string }, config: Config): Workspace | undefined {
   const { cwd, repo } = where;
   if (repo) {

@@ -252,6 +252,7 @@ async function refOf(sessionId: string, cwd?: string): Promise<SessionRef> {
 
 const agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-updates" && !l.error);
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 20); don't add to it
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
   // Read on every event: `remy spawn` writes this file from another process.

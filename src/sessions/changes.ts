@@ -14,6 +14,7 @@ export type Change = {
   pr?: string;
 };
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 36); don't add to it
 export function diff(prev: Snapshot | undefined, next: Snapshot): Change[] {
   if (!prev) return [];
   const changes: Change[] = [];
