@@ -4,9 +4,11 @@ import { parse } from "./cli/args";
 import { daemon } from "./cli/commands/daemon";
 import { factory, report } from "./cli/commands/factory";
 import { post } from "./cli/commands/post";
+import { resume } from "./cli/commands/resume";
 import { spawn } from "./cli/commands/spawn";
 import { start } from "./cli/commands/start";
 import { changes, status, waitingList } from "./cli/commands/status";
+import { trace } from "./cli/commands/trace";
 import { doctor } from "./cli/doctor";
 import { runHook } from "./cli/hook";
 import { setup } from "./cli/setup";
@@ -25,10 +27,18 @@ const HELP = formatHelp("remy — a coordinator for your Claude Code sessions, i
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task…>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
   [
+    "resume <name>",
+    "Carry on an agent's own session in the background, stopping it first if it's stuck; keeps its history and worktree",
+  ],
+  [
     "factory [--json] | factory retry <pr> | factory check [repo]",
     "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts",
   ],
   ["report <step> pass|fail|fixed --pr <url> --summary <text>", "A factory agent's verdict on its step"],
+  [
+    "trace <pr|agent> [--calls] [--json]",
+    "What Remy's agents did for a PR, or one agent did: tools, skills, subagents, tokens, cost, verdicts; --calls lists each tool call",
+  ],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
   ["doctor", "Check requirements, tokens and scopes"],
   ["dir", "Print remy's state folder"],
@@ -40,8 +50,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   queue: waitingList,
   changes: () => changes(),
   spawn,
+  resume,
   factory,
   report,
+  trace,
   post,
   setup: async (args) => setup(parse(args, {}).positionals[0]),
   start, // the rest goes to claude

@@ -14,7 +14,7 @@ export type SessionView = {
   sessionId: string;
   name: string;
   kind: string;
-  status: string; // idle | busy | waiting
+  status: string; // idle | busy | waiting | ended (a background session whose process is gone; `remy resume` continues it)
   cwd: string;
   startedAt: number;
   spawned: boolean;
@@ -31,7 +31,7 @@ export type SessionView = {
 export type Snapshot = { takenAt: number; sessions: SessionView[] };
 
 /** Branches that never head a PR: trunks, and a GitButler workspace whose session named no branch of its own. */
-const NO_PR_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk", GITBUTLER_WORKSPACE]);
+export const NO_PR_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk", GITBUTLER_WORKSPACE]);
 
 export async function takeSnapshot(): Promise<Snapshot> {
   const config = loadConfig();
@@ -56,7 +56,7 @@ export async function takeSnapshot(): Promise<Snapshot> {
         sessionId: a.sessionId,
         name: a.name,
         kind: a.kind,
-        status: a.status,
+        status: a.status ?? "ended",
         cwd,
         startedAt: a.startedAt,
         spawned: !!spawn,

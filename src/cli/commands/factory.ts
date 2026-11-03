@@ -73,6 +73,7 @@ export async function report(args: string[]) {
     verdict: verdict as "pass" | "fail" | "fixed",
     summary: values.summary,
     head: await headOf(values.pr!),
+    session: process.env.CLAUDE_CODE_SESSION_ID,
   });
   const note = disabledNote("nothing reads it until you turn it back on");
   say(note ? "Recorded." : "Recorded. Remy picks it up within a minute or so.", note);

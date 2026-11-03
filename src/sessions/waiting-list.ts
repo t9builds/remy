@@ -74,8 +74,19 @@ function itemOf(s: SessionView): Omit<WaitingItem, "session" | "sessionId" | "cw
   // A picker (AskUserQuestion): Remy relays it to the agent's thread, and a reply there answers it.
   if (s.status === "waiting" && s.lastEvent?.event === "PermissionRequest")
     return { rank: 0, why: `asks: "${short(s.lastEvent.text ?? "pick an option")}"`, action: "reply to its thread" };
+  // A message can't approve a permission; a background session can be resumed instead (`remy resume`), except a
+  // factory agent, which `remy resume` refuses.
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
-    return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
+    return {
+      rank: 0,
+      why: "wants a permission",
+      action:
+        s.kind !== "background"
+          ? "answer it in its terminal"
+          : s.role
+            ? `\`claude attach ${s.name}\``
+            : `reply "resume", or \`claude attach ${s.name}\``,
+    };
   if (s.status === "busy") return undefined;
   if (asked) return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
   if (s.status === "waiting") return { rank: 0, why: "waits for your answer", action: "reply to its thread" };

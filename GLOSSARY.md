@@ -27,6 +27,14 @@ Any Claude Code session on the user's machine, whoever started it.
 A background session Remy started for a task.
 _Avoid_: worker, bot
 
+**Resume**:
+Continue an agent's own session in the background after it got stuck or its process ended, with its history, branch, worktree and uncommitted edits, under the same id and name. `remy resume` does it for one agent; `remy start` for every unfinished one.
+_Avoid_: restart, respawn (Claude Code's `respawn` restarts a process on a new version), retry (the factory's, which starts a new agent)
+
+**Trace**:
+What Remy's agents did for a PR, or one agent did, read from Claude Code's transcripts: tools, skills, subagents, tokens, cost and verdicts. `remy trace` shows it.
+_Avoid_: log, history
+
 **Waiting list**:
 The one list of everything that needs the user now, most urgent first. `/queue` and `remy queue` show it; in code and docs it's the waiting list.
 _Avoid_: queue, inbox, notifications
@@ -72,7 +80,7 @@ A problem a reviewer reports, with where it is and the evidence; the verifier so
 _Avoid_: issue, comment
 
 **Fixer**:
-The agent a verifier hands its confirmed findings to; it fixes them and commits, and the verifier pushes.
+An agent that fixes what was found in a change it didn't write. Inside a review, the verifier hands it the confirmed findings; it commits and the verifier pushes. In the factory, it takes red CI or a failed step before the merge, pushes, and the pipeline runs again from its first step.
 _Avoid_: author
 
 **Verification skill**:

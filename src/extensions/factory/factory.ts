@@ -104,7 +104,8 @@ export const createFactory =
       deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
       canStartAgent: () =>
         Date.now() >= backoffUntil &&
-        Object.values(runs).filter((r) => r.stage === "agent").length < (remy.config.maxFactoryAgents ?? 2),
+        Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing") && r.agent).length <
+          (remy.config.maxFactoryAgents ?? 2),
       spawn: async (run, step, prompt) => {
         try {
           const r = await remy.spawn({
@@ -201,13 +202,13 @@ export const createFactory =
       }
     });
 
-    // A step agent that stopped on a usage limit: pause new agents, and give the step to a fresh one later.
+    // A step agent or fixer that stopped on a usage limit: pause new agents, and give its work to a fresh one later.
     remy.on("session.stopped", ({ session, last }) => {
       const run = Object.values(runs).find((r) => r.agent?.name === session.name);
       if (!run || !endedOnUsageLimit(last)) return;
       backoffUntil = Date.now() + BACKOFF_MS;
       run.agent = undefined;
-      run.stage = "running";
+      if (run.stage === "agent") run.stage = "running";
       save();
       remy.log("usage limit; factory agents paused until", new Date(backoffUntil).toISOString());
     });

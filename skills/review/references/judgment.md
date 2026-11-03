@@ -67,6 +67,8 @@ The PR comment, posted after the fixes are pushed. A person skims it in seconds:
 Checks:
 - ✅ {command}: {result}
 - ❌ {command}: {result}
+
+{optional, added later if a thread call failed: `Threads: {what failed}`; see threads.md}
 ```
 
 The headline is one bold line, fixed by the verdict:
@@ -76,3 +78,5 @@ The headline is one bold line, fixed by the verdict:
 - `fail`: **🛑 Needs you:** {the critical problem, one line}.
 
 Severity is your own after the trace, not the reviewer's: `critical` (wrong behavior, data loss, a security hole, a broken check or written rule), `warning` (works but will hurt), `nit`. Rows go **needs you**, then **fixed**, then **decided**, most severe first within each. Keep each cell to a sentence; the `path:line` carries the detail. Leave out an empty bucket and an empty table. A review with no findings is the headline and the checks.
+
+The table is the summary; each finding with a line in the diff also gets a thread there ([threads.md](threads.md)).

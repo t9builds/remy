@@ -33,7 +33,7 @@ import type { RemyEvent } from "../sessions/events";
 import { githubRepoOf } from "../sessions/git";
 import { type SessionView, type Snapshot, takeSnapshot } from "../sessions/snapshot";
 import { spawnAgent } from "../sessions/spawn";
-import { type Spawned, spawnedEntry } from "../sessions/spawned";
+import { noteSession, type Spawned, spawnedEntry } from "../sessions/spawned";
 import { questionOf } from "../sessions/waiting-list";
 import { ensureDir, readJson, writeJson } from "../shared/json-file";
 import { formatNotice } from "../shared/notices";
@@ -282,6 +282,9 @@ async function pingNeedsInput(a: {
 
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
+  // Read on every event: `remy spawn` writes this file from another process.
+  const spawned = readJson<Spawned>(PATHS.spawned, {});
+  if (noteSession(spawned, e.session_id, e.transcript_path)) writeJson(PATHS.spawned, spawned);
   scheduleWaitingList();
   // A picker that ran, failed, or whose turn or session ended was settled in the terminal.
   pickers.ended(e);
