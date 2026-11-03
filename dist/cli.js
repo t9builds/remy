@@ -3138,8 +3138,8 @@ async function run2(cmd, cwd) {
 }
 
 // src/sessions/agents.ts
-async function listAgents() {
-  const out = await run2(["claude", "agents", "--json"]);
+async function listAgents(all = false) {
+  const out = await run2(["claude", "agents", "--json", ...all ? ["--all"] : []]);
   if (!out)
     throw new Error("`claude agents --json` failed; is Claude Code \u2265 2.1.224 on PATH?");
   return JSON.parse(out);
@@ -3542,7 +3542,7 @@ async function takeSnapshot() {
       sessionId: a.sessionId,
       name: a.name,
       kind: a.kind,
-      status: a.status,
+      status: a.status ?? "ended",
       cwd,
       startedAt: a.startedAt,
       spawned: !!spawn,
@@ -3646,6 +3646,7 @@ var SESSION_ENV = new Set([
   "CLAUDE_CODE_MESSAGING_SOCKET",
   "CLAUDE_CODE_MESSAGING_TOKEN"
 ]);
+var agentEnv = (env = process.env) => Object.fromEntries(Object.entries(env).filter(([k, v]) => v !== undefined && !SESSION_ENV.has(k)));
 function slug(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 }
@@ -3668,8 +3669,7 @@ async function spawnAgent(opts) {
   if (worktree)
     cmd.push("-w", label);
   cmd.push(...remyDirArgs(), prompt);
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_ENV.has(k)));
-  const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env });
+  const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env: agentEnv() });
   const out = (r.stdout.toString() + r.stderr.toString()).trim();
   if (r.exitCode !== 0)
     throw new Error(`claude --bg failed (${r.exitCode}): ${out}`);
@@ -3716,7 +3716,11 @@ function itemOf(s) {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
-    return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
+    return {
+      rank: 0,
+      why: "wants a permission",
+      action: s.kind !== "background" ? "answer it in its terminal" : s.role ? `\`claude attach ${s.name}\`` : `reply "resume", or \`claude attach ${s.name}\``
+    };
   if (s.status === "busy")
     return;
   if (asked)
@@ -4596,6 +4600,171 @@ async function post(args) {
   console.log(await createMessenger(ws, quietSink, { triggerEmoji: c.triggerEmoji }).post(positionals.join(" ") || "remy test"));
 }
 
+// src/sessions/resume.ts
+import { existsSync as existsSync9 } from "fs";
+import { homedir as homedir3 } from "os";
+var STUCK_MS = 60 * 60000;
+var resumeCommand = (sessionId, prompt) => ["claude", "--bg", "--resume", sessionId, prompt];
+var resumeEnv = (env = process.env) => Object.fromEntries(Object.entries(agentEnv(env)).filter(([k]) => !k.startsWith("CMUX_")));
+var copyOf = (out) => out.match(/started a copy as ([0-9a-f]{6,})/)?.[1];
+var resumePrompt = (why) => [
+  `Remy resumed this session: ${why}. Carry on with your task from where you left off.`,
+  "First check what is already done (git status, your branch, your PR), so you don't redo or undo it.",
+  "If an action needs a permission you can't get, find another way, or say in one line what you need and why, and go on with the rest.",
+  "If you were waiting for the user's answer, ask again in one short message."
+].join(" ");
+var span2 = (ms) => {
+  const h = Math.round(ms / 3600000);
+  return h < 48 ? `${h} h` : `${Math.round(h / 24)} days`;
+};
+function resumeReason(c, now) {
+  const { spawn, row, last, pr, folderGone } = c;
+  if (spawn.merged || spawn.role || row?.kind !== "background")
+    return;
+  if (folderGone || pr && pr.state !== "OPEN")
+    return;
+  if (!row.pid)
+    return row.state === "done" || row.state === "stopped" ? undefined : "its process had ended";
+  const asked = last?.event === "Notification" && last.type === "permission_prompt" ? last.ts : undefined;
+  if (row.status === "waiting" && asked !== undefined && now - asked >= STUCK_MS)
+    return `it waited ${span2(now - asked)} on a permission prompt`;
+  return;
+}
+function rowOf(rows, name, spawn) {
+  if (spawn?.id)
+    return rows.find((r) => r.sessionId.startsWith(spawn.id));
+  return rows.filter((r) => r.name === name).sort((a, b) => b.startedAt - a.startedAt)[0];
+}
+var latestEvents = () => {
+  const latest = new Map;
+  for (const e of readEvents())
+    latest.set(e.session_id, e);
+  return latest;
+};
+var realToResumeWorld = {
+  spawned: () => readJson(PATHS.spawned, {}),
+  agents: () => listAgents(true),
+  latest: latestEvents,
+  exists: existsSync9,
+  lookup: async (cwd) => {
+    const { branch, repo } = await gitInfo(cwd);
+    return { repo, pr: branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
+  }
+};
+async function toResume(now = Date.now(), world = {}) {
+  const w = { ...realToResumeWorld, ...world };
+  const spawned = w.spawned();
+  const rows = await w.agents();
+  const latest = w.latest();
+  const out = [];
+  for (const [name, spawn] of Object.entries(spawned)) {
+    const row = rowOf(rows, name, spawn);
+    const c = { spawn, row, last: row && latest.get(row.sessionId) };
+    if (!row || !resumeReason(c, now))
+      continue;
+    const cwd = c.last?.cwd ?? row.cwd;
+    c.folderGone = !w.exists(cwd);
+    const { repo, pr } = c.folderGone ? { repo: undefined, pr: undefined } : await w.lookup(cwd);
+    c.pr = pr;
+    const why = resumeReason(c, now);
+    if (why)
+      out.push({ name, why, cwd, repo });
+  }
+  return out;
+}
+var runSync2 = (cmd, opts) => {
+  const r = Bun.spawnSync(cmd, { ...opts, stdout: "pipe", stderr: "pipe" });
+  return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
+};
+function resumable(rows, spawned, name) {
+  const row = rowOf(rows, name, spawned[name]);
+  if (!row)
+    throw new Error(`no session "${name}"; \`remy status\` lists them`);
+  if (row.kind !== "background")
+    throw new Error(`${name} runs in a terminal, not in the background: continue it there`);
+  const spawn = spawnedEntry(spawned, row.name, row.sessionId);
+  if (spawn?.merged)
+    throw new Error(`${name} was closed when its PR merged (${spawn.merged.pr})`);
+  if (spawn?.role)
+    throw new Error(`${name} is the factory's ${spawn.role} agent; \`remy factory retry ${spawn.pr}\` runs its step again`);
+  return row;
+}
+var realWorld = {
+  run: runSync2,
+  agents: () => listAgents(true),
+  spawned: () => readJson(PATHS.spawned, {}),
+  sleep: (ms) => Bun.sleep(ms),
+  now: () => Date.now(),
+  stopTimeoutMs: 30000
+};
+async function resumeSession(name, why = "the user asked for it", world = {}) {
+  const w = { ...realWorld, ...world };
+  const run = w.run;
+  const row = resumable(await w.agents(), w.spawned(), name);
+  if (row.pid) {
+    const stop = run(["claude", "stop", row.id ?? row.sessionId.slice(0, 8)]);
+    if (!stop.ok)
+      throw new Error(`couldn't stop ${name}: ${stop.out}`);
+    const until = w.now() + w.stopTimeoutMs;
+    while ((await w.agents()).find((r) => r.sessionId === row.sessionId)?.pid) {
+      if (w.now() > until)
+        throw new Error(`${name} didn't stop within ${w.stopTimeoutMs / 1000} s`);
+      await w.sleep(500);
+    }
+  }
+  const cwd = existsSync9(row.cwd) ? row.cwd : homedir3();
+  const r = run(resumeCommand(row.sessionId, resumePrompt(why)), { cwd, env: resumeEnv() });
+  if (!r.ok)
+    throw new Error(`claude --bg --resume failed: ${r.out}`);
+  const copy = copyOf(r.out);
+  if (copy) {
+    run(["claude", "rm", copy]);
+    throw new Error(`Claude Code started a copy instead of resuming ${name}, and it was removed: ${r.out}`);
+  }
+  return { name, sessionId: row.sessionId, stopped: !!row.pid, output: r.out };
+}
+function formatResumed(items) {
+  const lines = items.map((it) => `\u2022 *${it.name}*${it.repo ? ` \xB7 ${it.repo}` : ""} \xB7 ${it.error ? `couldn't resume it (${it.error})` : `${it.why}; resumed`}`);
+  return `\u267B\uFE0F *Agents that stopped before finishing their task*
+${lines.join(`
+`)}`;
+}
+
+// src/cli/commands/resume.ts
+async function resume(args) {
+  const name = parse(args, {}).positionals[0];
+  if (!name)
+    throw new Error(`usage: ${import_picocolors.default.cyan("remy resume <name>")}`);
+  console.log(JSON.stringify(await resumeSession(name), null, 2));
+}
+async function resumeUnfinished(c = loadConfig()) {
+  let todo;
+  try {
+    todo = await toResume();
+  } catch (e) {
+    return console.log(import_picocolors.default.yellow(`! Couldn't look for agents to resume: ${e?.message ?? e}`));
+  }
+  const byWorkspace = new Map;
+  for (const it of todo) {
+    let error;
+    try {
+      await resumeSession(it.name, it.why);
+      console.log(import_picocolors.default.dim(`Resumed ${it.name}: ${it.why}.`));
+    } catch (e) {
+      error = e?.message ?? String(e);
+      console.log(import_picocolors.default.yellow(`! Couldn't resume ${it.name}: ${error}`));
+    }
+    const workspace = workspaceFor({ cwd: it.cwd, repo: githubRepoOf(it.cwd) }, c)?.name ?? "";
+    byWorkspace.set(workspace, [...byWorkspace.get(workspace) ?? [], { ...it, error }]);
+  }
+  for (const [workspace, items] of byWorkspace) {
+    const args = { name: "post", arguments: { text: formatResumed(items), workspace } };
+    const r = await askDaemon(PATHS.socket, "call", args, 30000).then((r) => !r ? "the daemon didn't answer" : r.isError ? r.content?.[0]?.text : undefined).catch((e) => e?.message ?? String(e));
+    if (r)
+      console.log(import_picocolors.default.yellow(`! Couldn't tell ${workspace || "the workspace"} what was resumed: ${r}`));
+  }
+}
+
 // src/cli/commands/spawn.ts
 async function spawn(args) {
   const { values, positionals } = parse(args, {
@@ -4624,7 +4793,7 @@ async function spawn(args) {
 // src/cli/commands/start.ts
 import { spawn as spawn2 } from "child_process";
 import { openSync as openSync2 } from "fs";
-import { homedir as homedir3 } from "os";
+import { homedir as homedir4 } from "os";
 import { join as join12 } from "path";
 
 // src/cli/doctor.ts
@@ -4727,11 +4896,12 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
     }
     console.log("");
   }
-  await ensureDaemon(c.repoRoots[0] ?? homedir3());
+  await ensureDaemon(c.repoRoots[0] ?? homedir4());
+  await resumeUnfinished(c);
   writeJson(PATHS.mcpConfig, {
     mcpServers: { remy: { command: process.execPath, args: [join12(PLUGIN_ROOT, "dist", "channel.js")] } }
   });
-  const cwd = c.repoRoots[0] ?? homedir3();
+  const cwd = c.repoRoots[0] ?? homedir4();
   const args = [
     "claude",
     "-n",
@@ -4827,15 +4997,15 @@ async function changes() {
 }
 
 // src/cli/commands/trace.ts
-import { existsSync as existsSync10 } from "fs";
+import { existsSync as existsSync11 } from "fs";
 import { join as join14 } from "path";
 
 // src/sessions/transcript.ts
-import { existsSync as existsSync9, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
-import { homedir as homedir4 } from "os";
+import { existsSync as existsSync10, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
+import { homedir as homedir5 } from "os";
 import { join as join13 } from "path";
 var projectDirOf = (cwd, claudeDir = claudeHome()) => join13(claudeDir, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
-var claudeHome = () => process.env.CLAUDE_CONFIG_DIR ?? join13(homedir4(), ".claude");
+var claudeHome = () => process.env.CLAUDE_CONFIG_DIR ?? join13(homedir5(), ".claude");
 function findTranscript(id, cwd, claudeDir = claudeHome()) {
   const inDir = (dir) => {
     try {
@@ -4875,7 +5045,7 @@ function readLines2(path) {
   }
 }
 function readTranscript(path) {
-  if (!existsSync9(path))
+  if (!existsSync10(path))
     return;
   const dir = join13(path.replace(/\.jsonl$/, ""), "subagents");
   let subagents = [];
@@ -5159,7 +5329,7 @@ async function trace(args) {
     spawned: readJson(PATHS.spawned, {}),
     events: readEvents(),
     transcript: (id, cwd, known) => {
-      const path = known && existsSync10(known) ? known : findTranscript(id, cwd);
+      const path = known && existsSync11(known) ? known : findTranscript(id, cwd);
       return { path, summary: path ? readTranscript(path) : undefined };
     }
   });
@@ -5210,7 +5380,7 @@ function trim(s, n) {
 
 // src/cli/setup.ts
 import { chmodSync as chmodSync2, mkdirSync as mkdirSync4, writeFileSync as writeFileSync4 } from "fs";
-import { homedir as homedir5 } from "os";
+import { homedir as homedir6 } from "os";
 import { join as join15 } from "path";
 
 // node_modules/@clack/core/dist/index.mjs
@@ -6601,7 +6771,7 @@ async function general(c) {
   const roots = await answer(text({
     message: "Folders that hold your repos",
     placeholder: "~/Repositories, ~/work",
-    initialValue: c.repoRoots.map((r) => r.replace(homedir5(), "~")).join(", "),
+    initialValue: c.repoRoots.map((r) => r.replace(homedir6(), "~")).join(", "),
     validate: (v) => list(v ?? "").length ? undefined : "At least one folder"
   }));
   c.repoRoots = list(roots).map(expandHome);
@@ -6871,7 +7041,7 @@ async function pairTelegram(tg, username, workspace) {
   throw new Error(`No message reached @${username}; run \`remy setup ${workspace}\` again.`);
 }
 function installShim() {
-  const bin = join15(homedir5(), ".local", "bin");
+  const bin = join15(homedir6(), ".local", "bin");
   mkdirSync4(bin, { recursive: true });
   const shim = join15(bin, "remy");
   writeFileSync4(shim, `#!/bin/sh
@@ -6898,6 +7068,10 @@ var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, 
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task\u2026>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
   [
+    "resume <name>",
+    "Carry on an agent's own session in the background, stopping it first if it's stuck; keeps its history and worktree"
+  ],
+  [
     "factory [--json] | factory retry <pr> | factory check [repo]",
     "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts"
   ],
@@ -6916,6 +7090,7 @@ var COMMANDS = {
   queue: waitingList,
   changes: () => changes(),
   spawn,
+  resume,
   factory,
   report,
   trace,

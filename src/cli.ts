@@ -4,6 +4,7 @@ import { parse } from "./cli/args";
 import { daemon } from "./cli/commands/daemon";
 import { factory, report } from "./cli/commands/factory";
 import { post } from "./cli/commands/post";
+import { resume } from "./cli/commands/resume";
 import { spawn } from "./cli/commands/spawn";
 import { start } from "./cli/commands/start";
 import { changes, status, waitingList } from "./cli/commands/status";
@@ -26,6 +27,10 @@ const HELP = formatHelp("remy — a coordinator for your Claude Code sessions, i
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task…>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
   [
+    "resume <name>",
+    "Carry on an agent's own session in the background, stopping it first if it's stuck; keeps its history and worktree",
+  ],
+  [
     "factory [--json] | factory retry <pr> | factory check [repo]",
     "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts",
   ],
@@ -45,6 +50,7 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   queue: waitingList,
   changes: () => changes(),
   spawn,
+  resume,
   factory,
   report,
   trace,
