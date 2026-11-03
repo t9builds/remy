@@ -13,7 +13,7 @@ The default `/remy:review` therefore splits the work inside the one `review` ste
 1. **Reviewers.** Three subagents read the PR in parallel, each through one lens: correctness, design, proof. They only report findings, each with a location and evidence.
 2. **Judgment.** The verifier traces every finding against the code and puts it in one bucket: fix, decided, person, or dismissed. Nits are dismissed, so rounds converge.
 3. **Fixer.** A separate subagent fixes everything in "fix" and the decided calls that change code, at its root, with a test for each correctness fix. The verifier checks its diff and pushes.
-4. **Record.** The verifier posts the findings and their outcomes on the PR, and reports `pass`, `fixed` or `fail`.
+4. **Record.** The verifier posts the findings and their outcomes on the PR, and reports `pass`, `fixed` or `fail`. Each finding with a line in the diff also gets a review thread there: a reply says how it was fixed or decided and resolves it, and only a finding for a person stays open.
 
 With `repeat: "until-clean"`, a `fixed` sends the PR to a fresh verifier, so fixes are reviewed by agents that didn't make them. A change gets through on its own once a round finds nothing to fix and nothing for a person.
 
@@ -28,5 +28,5 @@ The lenses and the judgment are adapted from pstack's `interrogate` skill. pstac
 ## Consequences
 
 - A round costs about four agents' work instead of one, all counted as one factory agent against `maxFactoryAgents`. A round also takes longer, so the step's `timeoutMinutes` may need raising.
-- The PR carries every round's findings, which the next round and the release check read.
+- The PR carries every round's findings, which the next round and the release check read. The record is the summary; the threads put each finding on its code, and a later round closes an earlier one's open thread once its problem is gone.
 - The default judges a change by the repo's own written rules, so a team improves its reviews by writing its rules down. Teams that review differently name their own skill on the step.

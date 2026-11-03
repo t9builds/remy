@@ -422,7 +422,7 @@ Any skill can be an agent step: Remy adds the PR, the rules and the `remy report
 
 | Skill | What it does |
 |---|---|
-| `/remy:review` | Three reviewers in parallel, each through one lens: correctness (the claim, edge cases, security, what it breaks beyond the diff), design (the repo's own rules, root causes, structure, complexity) and proof (tests, and the app run for real). The verifier checks each finding against the code, hands the real ones to a fixer agent, pushes, and records the review on the PR. With `repeat: "until-clean"`, a fresh round reviews every fix |
+| `/remy:review` | Three reviewers in parallel, each through one lens: correctness (the claim, edge cases, security, what it breaks beyond the diff), design (the repo's own rules, root causes, structure, complexity) and proof (tests, and the app run for real). The verifier checks each finding against the code, hands the real ones to a fixer agent, pushes, and records the review on the PR: a summary, and a thread on each finding's line, resolved with how it was fixed or decided. With `repeat: "until-clean"`, a fresh round reviews every fix |
 | `/remy:verify` | Runs the change: on an environment after a deploy, or from the PR's checkout before the merge (an agent step without `env`) |
 | `/remy:fix` | The fixer, not a step: reproduces red CI or a step's failure, fixes the root cause with a test, runs every check, pushes, and records the fix on the PR |
 | `/remy:release-check` | Decides whether a verified change can go to production on its own |
