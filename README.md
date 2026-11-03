@@ -106,7 +106,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 
 ## Tips
 
-- Put your usual routine in `spawnTemplate`, e.g. `/start-feature {task}`. Every agent Remy starts then branches, tests and opens a PR the way you would.
+- Every agent Remy starts builds its task with `/remy:implement` (the default `spawnTemplate`): it grounds itself in the code, picks a playbook (feature, bug fix or refactor), shapes the change before writing it, proves it on the real thing, reviews its own diff and opens a ready PR. Put your own routine there instead, e.g. `/start-feature {task}`, and agents work the way you do.
 - Sessions you start yourself show up too. Remy only pings you about one if it's been stuck for about a minute, so it won't bother you about a session you're watching.
 - Every session gets a short kitchen name, like `saffron` or `risotto`, that's easy to type from your phone. A session you named yourself (`claude -n`, `/rename`) keeps its name.
 - Each agent gets its own Slack thread, or reply chain in Telegram. Reply there to talk to that agent. Remy posts what the agent says at the end of each turn, and tells the agent so (in its system prompt), so the agent keeps that message short, leads with the outcome and ends on a `Next:` line, either the decision it needs from you or the step it recommends.
@@ -300,7 +300,7 @@ Remy keeps each agent's session id and transcript path in `~/.remy/spawned.json`
 |---|---|---|
 | `workspaces` | | Slack workspaces and Telegram chats, see below |
 | `repoRoots` | `["~/Repositories"]` | Where `remy spawn --repo <name>` looks |
-| `spawnTemplate` | `{task}` | Prompt for spawned agents, e.g. `/start-feature {task}` |
+| `spawnTemplate` | `/remy:implement {task}` | Prompt for spawned agents, e.g. `/start-feature {task}` |
 | `spawnPermissionMode` | `auto` | Permission mode for spawned agents |
 | `spawnWorktree` | `true` | Give each spawned agent its own worktree |
 | `digestMinutes` | `15` | Minutes between notices of merged PRs and ended sessions |
@@ -440,6 +440,7 @@ Any skill can be an agent step: Remy adds the PR, the rules and the `remy report
 | `/remy:verify` | Runs the change: on an environment after a deploy, or from the PR's checkout before the merge (an agent step without `env`) |
 | `/remy:fix` | The fixer, not a step: reproduces red CI or a step's failure, fixes the root cause with a test, runs every check, pushes, and records the fix on the PR |
 | `/remy:release-check` | Decides whether a verified change can go to production on its own |
+| `/remy:implement` | Not a step: how an agent Remy starts builds its task, so the review finds little. Grounds itself in the repo's rules and code, follows a playbook for a feature, a bug fix (reproduce, failing test first, root cause) or a refactor (pin the behavior, subtract first), shapes the change before writing it, proves it on the real thing, reviews its own diff against the reviewers' lenses and opens a ready PR. The default `spawnTemplate` |
 | `/remy:create-verification-skill` | Not a step: run it once in a repo to write the repo's own `verify-<app>` skill, which launches the app, drives it like a user and captures evidence. `/remy:review` and `/remy:verify` follow it when it's there |
 
 Before the merge, a failure doesn't wait for you. Red CI (at `wait("ci")`, a gate, or after an agent's fixes) and a step's `fail` go to a fixer agent, which fixes the cause, pushes, and the pipeline runs again from its first step, so a fresh review checks the fix. You're asked only when the fixer says the fix needs your call, or the run has used `maxRounds` fixes and still fails. Set it with `fixer` next to `steps`: `fixer: { skill: "/our-fix", instructions: "…", maxRounds: 3, timeoutMinutes: 60 }` (all optional), or `fixer: false` to hold every failure for you. An agent step can't be called `fix`: that is the name the fixer reports as.
@@ -488,4 +489,4 @@ Remy runs its own factory on its PRs: [.remy/factory.ts](.remy/factory.ts). To u
 
 ## Credits
 
-The review lenses, the reviewer prompt and the judgment of findings, and `/remy:create-verification-skill` are adapted from [pstack](https://github.com/cursor/plugins/tree/main/pstack) by Lauren Tan (MIT). Its license is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The review lenses, the reviewer prompt and the judgment of findings, the playbooks and principles of `/remy:implement`, and `/remy:create-verification-skill` are adapted from [pstack](https://github.com/cursor/plugins/tree/main/pstack) by Lauren Tan (MIT). Its license is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

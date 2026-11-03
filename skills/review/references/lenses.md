@@ -30,6 +30,8 @@ Does the change fit the system it lands in, and is it as simple as it can be?
   - *Split ownership*: two modules write the same state or keep their own copies.
   - *Two ways to do one task*: a new path added beside an old one that stays alive.
   - *Hand-synced lists*: the same items listed in several places that must be edited together.
+  - *Temporal decomposition*: modules split by execution order (load, validate, save) instead of the knowledge they own, each repeating the same rules.
+  - *Importable internals*: a module's internals reachable from outside it, so callers import them and they become its interface.
 - **Complexity budget.** Abstractions with one caller, options for cases that don't exist, dead code, compatibility paths nobody needs. Look for the restructuring that makes whole branches or layers disappear, not only local cleanup. Simpler wins unless simpler is wrong; duplication beats the wrong abstraction.
 
 ## Proof
