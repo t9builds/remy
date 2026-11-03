@@ -33,7 +33,7 @@ import type { RemyEvent } from "../sessions/events";
 import { githubRepoOf } from "../sessions/git";
 import { type SessionView, type Snapshot, takeSnapshot } from "../sessions/snapshot";
 import { spawnAgent } from "../sessions/spawn";
-import { type Spawned, spawnedEntry } from "../sessions/spawned";
+import { noteSession, type Spawned, spawnedEntry } from "../sessions/spawned";
 import { questionOf } from "../sessions/waiting-list";
 import { ensureDir, readJson, writeJson } from "../shared/json-file";
 import { formatNotice } from "../shared/notices";
@@ -254,6 +254,9 @@ const agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-u
 
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
+  // Read on every event: `remy spawn` writes this file from another process.
+  const spawned = readJson<Spawned>(PATHS.spawned, {});
+  if (noteSession(spawned, e.session_id, e.transcript_path)) writeJson(PATHS.spawned, spawned);
   scheduleWaitingList();
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {

@@ -7,6 +7,9 @@ export type Spawned = Record<
   string,
   {
     id?: string;
+    /** The full session id and Claude Code's transcript of it, kept from its first hook event (`noteSession`). */
+    sessionId?: string;
+    transcript?: string;
     repo: string;
     /** Descriptive name from repo and task, e.g. "api-fix-login-timeout"; also the worktree's name. */
     label?: string;
@@ -31,4 +34,17 @@ export function spawnedEntry(spawned: Spawned, name: string, sessionId: string) 
   if (byId) return byId;
   const s = spawned[name];
   return s && !s.id ? s : undefined;
+}
+
+/**
+ * Keep a spawned agent's full session id and transcript path, from a hook event of it; true when that changed the
+ * record. `spawn` knows only the short id, and events.jsonl drops old lines, so this is what lets `remy trace` find an
+ * agent's transcript later.
+ */
+export function noteSession(spawned: Spawned, sessionId: string, transcript?: string) {
+  const s = Object.values(spawned).find((x) => x.id && sessionId?.startsWith(x.id));
+  if (!s || (s.sessionId === sessionId && (s.transcript || !transcript))) return false;
+  s.sessionId = sessionId;
+  s.transcript ??= transcript;
+  return true;
 }

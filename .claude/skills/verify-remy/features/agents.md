@@ -8,6 +8,7 @@ The user asks the coordinator for work; it starts a background agent with `remy 
 - `turn`: every turn of the agent is posted in its thread as `*<name>* finished its turn:`, and its PR as `*<name>* opened #N …`.
 - `ask`: the agent's question is posted by Remy in the DM, in a thread for that agent: `❓ *<name>* asks:`, then the question, then `_Reply here to answer._`.
 - `answer`: the user's reply in that thread reaches the agent, and it goes on.
+- `resume`: an agent that is stuck or whose process is gone is resumed with `remy resume <name>` (or by replying "resume" in its thread), in its own session.
 - `cleanup`: the run's agents are stopped and removed by `harness.ts cleanup`.
 
 ## How to get to it (user POV)
@@ -25,6 +26,7 @@ Preconditions:
 - **Ask.** Run `harness.ts replies --after <start post ts> --wait-for "colour" --timeout 300`. Remy's post `❓ *<name>* asks:\nWhich colour do you like best?\n_Reply here to answer._` (fixed wording, match it exactly), starting a thread (note its ts). It is Remy's, not the coordinator's.
 - **Pinned.** Run `harness.ts pinned`: the [waiting list](./waiting-list.md)'s `question` line for this agent, reading `asks: "Which colour do you like best?"` with no trailing "Once you tell me..." clause.
 - **Answer.** Run `harness.ts say --thread <question ts> "blue"`, then `harness.ts replies --thread <question ts> --in <dm> --after <ts> --wait-for "blue"`: the coordinator confirms it sent the answer. The agent goes on: `colour.txt` in the run's `repos/fixture` says `blue` within a few minutes, and `claude logs <name>` shows the answer arrive.
+- **Resume.** Note the agent's `sessionId` and pid from `claude agents --json --all`, run `bun src/cli.ts resume <name>` under the run's `REMY_DIR` (never against real agents). `claude agents --json --all` shows the same `sessionId` with a new pid, no copy, and the agent posts again in its own thread.
 - **Proof.** `harness.ts snap agents`. The DM shows the request, the start, the question and your answer, and every turn of the agent as `*<name>* finished its turn:`; `colour.txt` shows it reached the agent.
 
 ## Gotchas

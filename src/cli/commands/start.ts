@@ -21,6 +21,7 @@ import { PATHS, PLUGIN_ROOT } from "../../shared/paths";
 import { VERSION } from "../../shared/version";
 import { doctor } from "../doctor";
 import { errorLine, formatChecks, pc } from "../ui";
+import { resumeUnfinished } from "./resume";
 
 /** Start when the basics pass and at least one workspace works; a broken workspace only warns. */
 export async function start(extra: string[]) {
@@ -57,6 +58,8 @@ export async function start(extra: string[]) {
     console.log("");
   }
   await ensureDaemon(c.repoRoots[0] ?? homedir());
+  // After a restart, agents whose process ended or that sat on a permission prompt carry on by themselves.
+  await resumeUnfinished(c);
   writeJson(PATHS.mcpConfig, {
     mcpServers: { remy: { command: process.execPath, args: [join(PLUGIN_ROOT, "dist", "channel.js")] } },
   });

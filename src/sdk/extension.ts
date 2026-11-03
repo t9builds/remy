@@ -49,7 +49,7 @@ export type SessionRef = {
   about?: string;
   /** Set for an agent started with a `role` (e.g. the factory's step agents). */
   role?: string;
-  /** As last seen: idle, busy or waiting. */
+  /** As last seen: idle, busy, waiting, or ended (a background session whose process is gone). */
   status: string;
   /** Its branch's PR, as last seen. */
   pr?: Pr;

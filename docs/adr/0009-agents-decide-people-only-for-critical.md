@@ -2,6 +2,8 @@
 status: accepted
 ---
 
+> Red CI and failed steps before the merge go to a fixer before a person: [ADR-0010](0010-fixer-takes-failures-before-the-merge.md).
+
 # Agents make judgment calls and record them; a person is asked only for what is critical
 
 [ADR-0005](0005-agents-verify-humans-judge.md) sends judgment calls to a person: a protected path, a low-confidence verdict, a product question. In practice almost every change carries one, so almost every run stops and waits. The first run of Remy's own factory (PR #15) held on a policy question the verifier could have answered itself: which paths the gate should protect.

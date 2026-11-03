@@ -670,6 +670,7 @@ import { join as join6 } from "path";
 // src/sdk/factory.ts
 var exports_factory = {};
 __export(exports_factory, {
+  FIXER: () => FIXER,
   LEVELS: () => LEVELS,
   action: () => action,
   agent: () => agent,
@@ -684,6 +685,7 @@ __export(exports_factory, {
 var LEVELS = ["notify", "verify", "merge", "deploy-dev", "deploy-prod"];
 var lowerLevel = (a, b) => LEVELS.indexOf(a) <= LEVELS.indexOf(b) ? a : b;
 var atLeast = (have, need) => LEVELS.indexOf(have) >= LEVELS.indexOf(need);
+var FIXER = "fix";
 var defineFactory = (f) => f;
 var agent = (name, opts) => ({
   kind: "agent",
@@ -718,6 +720,21 @@ function validate(f) {
     return ["it has no steps"];
   if (f.autonomy && !LEVELS.includes(f.autonomy))
     errors.push(`autonomy "${f.autonomy}" isn't one of ${LEVELS.join(", ")}`);
+  const fx = f.fixer;
+  if (fx !== undefined && fx !== false) {
+    if (typeof fx !== "object" || fx === null)
+      errors.push("fixer: an object, or false to turn it off");
+    else {
+      if (fx.maxRounds !== undefined && !(Number.isInteger(fx.maxRounds) && fx.maxRounds >= 1))
+        errors.push("fixer: maxRounds is a whole number of at least 1 (false turns the fixer off)");
+      if (fx.timeoutMinutes !== undefined && !(Number.isFinite(fx.timeoutMinutes) && fx.timeoutMinutes > 0))
+        errors.push("fixer: timeoutMinutes is a number above 0");
+      if (fx.skill !== undefined && (typeof fx.skill !== "string" || !fx.skill.trim()))
+        errors.push("fixer: skill is a skill name, like /remy:fix");
+      if (fx.instructions !== undefined && typeof fx.instructions !== "string")
+        errors.push("fixer: instructions is text");
+    }
+  }
   const names = new Set;
   f.steps.forEach((s, i) => {
     const at = `step ${i + 1} (${s?.kind} ${s?.name})`;
@@ -730,6 +747,10 @@ function validate(f) {
         errors.push(`${at}: needs a skill`);
       if (names.has(s.name))
         errors.push(`${at}: another agent step is called "${s.name}"`);
+      if (s.name === FIXER && f.fixer !== false)
+        errors.push(`${at}: "${FIXER}" is the fixer's name`);
+      if (s.onFail !== undefined && !["fix", "hold", "ask-human", "notify-author"].includes(s.onFail))
+        errors.push(`${at}: onFail is "fix", "hold", "ask-human" or "notify-author"`);
       names.add(s.name);
     }
     if (s.kind === "wait" && !["ci", "deploy"].includes(s.name))
@@ -759,6 +780,7 @@ var STAGE = {
   running: "next",
   agent: "agent at work",
   "awaiting-fix": "waiting for CI after fixes",
+  fixing: "fixer at work",
   asking: "asking you",
   held: "waits for you",
   done: "done"
@@ -817,11 +839,13 @@ async function prDetail(url) {
     return;
   const j = JSON.parse(r.out);
   const files = (j.files ?? []).map((f) => f.path);
+  const { ci, failing } = ciOf(j.statusCheckRollup);
   return {
     state: j.state,
     draft: !!j.isDraft,
     review: j.reviewDecision ?? "",
-    ci: ciOf(j.statusCheckRollup).ci,
+    ci,
+    failing,
     head: j.headRefOid,
     lines: (j.additions ?? 0) + (j.deletions ?? 0),
     files,
@@ -997,6 +1021,36 @@ function agentPrompt(run, step, f) {
   ].join(`
 `);
 }
+var fixerOf = (f) => f.fixer || {};
+var maxFixes = (f) => fixerOf(f).maxRounds ?? 3;
+var fixerStep = (f) => {
+  const c = fixerOf(f);
+  return {
+    kind: "agent",
+    name: FIXER,
+    skill: c.skill ?? "/remy:fix",
+    instructions: c.instructions,
+    timeoutMinutes: c.timeoutMinutes
+  };
+};
+function fixPrompt(run, step, f) {
+  const n = run.number;
+  const report = (verdict, summary) => `  remy report ${FIXER} ${verdict} --pr ${run.pr} --summary "<one line: ${summary}>"`;
+  return [
+    `${step.skill}${step.instructions ? ` ${step.instructions}` : ""}`,
+    "",
+    `You are the fixer in Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}, fix ${run.fixes} of at most ${maxFixes(f)}. You didn't write this change. What failed: ${run.reason}.`,
+    ...run.about ? [`What it is for: ${run.about}`] : [],
+    `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). Fix the cause, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. Once you push, the pipeline runs again from its first step.`,
+    "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
+    "",
+    "As the very last step, report with exactly one of:",
+    report("fixed", "what was wrong and what you changed"),
+    report("pass", "why nothing needed changing, e.g. a flaky check you re-ran"),
+    report("fail", "the call a person has to make, or why you couldn't fix it")
+  ].join(`
+`);
+}
 function enter(run, stage, now, reason) {
   Object.assign(run, { stage, since: now, reason });
 }
@@ -1024,6 +1078,26 @@ function ask(run, env, purpose, question) {
   env.ask(run, question);
   return false;
 }
+var fixable = (run, f) => f.fixer !== false && !run.mergeSha;
+async function fix(run, f, env, what, detail) {
+  const now = env.now();
+  const most = maxFixes(f);
+  const round = (run.fixes ?? 0) + 1;
+  const cause = `${what}${detail ? `: ${detail}` : ""}`;
+  const on = `${what} on *#${run.number} ${defang(run.title)}*${detail ? `: ${defang(detail)}` : ""}`;
+  if (round > most) {
+    await env.notify(run, `\uD83D\uDED1 ${on}; the factory holds it after ${most} fixes
+${run.pr}`).catch(() => {});
+    return hold(run, now, `${cause} (after ${most} fixes)`);
+  }
+  run.fixes = round;
+  run.agent = undefined;
+  enter(run, "fixing", now, cause);
+  await env.notify(run, `\uD83D\uDEE0\uFE0F ${on}; a fixer is on it (${round} of ${most})
+${run.pr}`).catch(() => {});
+  return true;
+}
+var ciFails = (run, f, env, d, what = "CI fails") => fixable(run, f) ? fix(run, f, env, what, d.failing.join(", ") || undefined) : hold(run, env.now(), what);
 var lastPass = (run, name) => run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
 async function advance(run, f, autonomy, env) {
   for (let i = 0;i < 50 && await stepOnce(run, f, autonomy, env); i++)
@@ -1037,6 +1111,7 @@ async function stepOnce(run, f, autonomy, env) {
     const retry = env.reports().findLast((r) => r.pr === run.pr && r.kind === "retry");
     if (retry && retry.at > run.since) {
       run.urgent = false;
+      run.fixes = 0;
       return next(run, now, run.step);
     }
     return mergedByHand(run, f, env);
@@ -1062,10 +1137,28 @@ async function stepOnce(run, f, autonomy, env) {
     enter(run, "done", now, yes ? "a fix was started" : "no fix wanted");
     return false;
   }
+  if (run.stage === "fixing")
+    return fixing(run, f, env);
   const step = f.steps[run.step];
   if (!step) {
     enter(run, "done", now, "through the pipeline");
     return false;
+  }
+  if (run.stage === "awaiting-fix") {
+    const d = await env.pr(run.pr);
+    if (!d)
+      return false;
+    if (d.state !== "OPEN")
+      return closed(run, d, f, env);
+    const by = run.reports.at(-1)?.step === FIXER ? "the fixer" : run.reports.at(-1)?.step ?? "an agent";
+    if (d.head === run.head)
+      return now - run.since > PUSH_WAIT_MS ? hold(run, now, `${by} said it pushed fixes, but the PR didn't change`) : false;
+    if (d.ci === "pending")
+      return false;
+    run.head = d.head;
+    if (d.ci === "fail")
+      return ciFails(run, f, env, d, `CI fails after ${by}'s fixes`);
+    enter(run, "running", now);
   }
   if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(approval(run))) {
     const said = run.reports.findLast((r) => r.verdict === "pass" || r.verdict === "fixed")?.summary;
@@ -1095,23 +1188,54 @@ function verdictText(run, step, r) {
   return `${what} on *#${run.number} ${defang(run.title)}*${r.summary ? `: ${defang(r.summary)}` : ""}
 ${run.pr}`;
 }
-async function agentStep(run, step, f, env) {
+async function reportOf(run, step, env) {
   const now = env.now();
-  if (run.stage === "awaiting-fix") {
+  const agent = run.agent;
+  const report = env.reports().findLast((r) => r.pr === run.pr && r.step === step.name && !r.kind && r.at >= agent.startedAt);
+  if (!report) {
+    const status = await env.agentStatus(agent);
+    const minutes = step.timeoutMinutes ?? 60;
+    if (status === "busy" || status === "waiting") {
+      if (now - agent.startedAt > minutes * 60000)
+        hold(run, now, `${step.name} (${agent.name}) has worked for over ${minutes} min without reporting`);
+    } else if (now - agent.startedAt > GRACE_MS)
+      hold(run, now, `${step.name} (${agent.name}) stopped without reporting`);
+    return;
+  }
+  await env.close(agent);
+  run.agent = undefined;
+  run.reports.push(report);
+  return report;
+}
+async function fixing(run, f, env) {
+  const step = fixerStep(f);
+  if (!run.agent) {
+    if (!env.canStartAgent())
+      return false;
     const d = await env.pr(run.pr);
     if (!d)
       return false;
     if (d.state !== "OPEN")
       return closed(run, d, f, env);
-    if (d.head === run.head)
-      return now - run.since > PUSH_WAIT_MS ? hold(run, now, `${step.name} said it pushed fixes, but the PR didn't change`) : false;
-    if (d.ci === "fail")
-      return hold(run, now, `CI fails after ${step.name}'s fixes`);
-    if (d.ci === "pending")
-      return false;
     run.head = d.head;
-    enter(run, "running", now);
+    const agent = await env.spawn(run, step, fixPrompt(run, step, f));
+    run.agent = { ...agent, startedAt: env.now() };
+    return false;
   }
+  const report = await reportOf(run, step, env);
+  if (!report)
+    return false;
+  const now = env.now();
+  await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
+  if (report.verdict === "fail")
+    return hold(run, now, `${step.name}: ${report.summary ?? ""}`);
+  next(run, now, 0);
+  if (report.verdict === "fixed")
+    enter(run, "awaiting-fix", now);
+  return report.verdict === "pass";
+}
+async function agentStep(run, step, f, env) {
+  const now = env.now();
   if (!run.agent) {
     if (!env.canStartAgent())
       return false;
@@ -1128,20 +1252,13 @@ async function agentStep(run, step, f, env) {
     enter(run, "agent", env.now());
     return false;
   }
-  const report = env.reports().findLast((r) => r.pr === run.pr && r.step === step.name && !r.kind && r.at >= run.agent.startedAt);
-  if (!report) {
-    const status = await env.agentStatus(run.agent);
-    const minutes = step.timeoutMinutes ?? 60;
-    if (status === "busy" || status === "waiting")
-      return now - run.agent.startedAt > minutes * 60000 ? hold(run, now, `${step.name} (${run.agent.name}) has worked for over ${minutes} min without reporting`) : false;
-    return now - run.agent.startedAt > GRACE_MS ? hold(run, now, `${step.name} (${run.agent.name}) stopped without reporting`) : false;
-  }
-  await env.close(run.agent);
-  run.agent = undefined;
-  run.reports.push(report);
+  const report = await reportOf(run, step, env);
+  if (!report)
+    return false;
   const summary = report.summary ?? "";
-  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "hold");
-  if (report.verdict !== "fail" || onFail === "hold")
+  const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "fix");
+  const holds = onFail === "hold" || onFail === "fix" && !fixable(run, f);
+  if (report.verdict !== "fail" || holds)
     await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "pass")
     return next(run, now);
@@ -1162,6 +1279,8 @@ async function agentStep(run, step, f, env) {
 ${run.pr}`);
     return ask(run, env, "fix", `Start an agent on a fix for #${run.number}? Reply yes.`);
   }
+  if (onFail === "fix" && !holds)
+    return fix(run, f, env, `${step.name} failed`, summary);
   return hold(run, now, `${step.name}: ${summary}`);
 }
 async function waitStep(run, step, f, env) {
@@ -1177,7 +1296,7 @@ async function waitStep(run, step, f, env) {
     if (d.ci === "pass" || d.ci === "none")
       return next(run, now);
     if (d.ci === "fail")
-      return hold(run, now, "CI fails");
+      return ciFails(run, f, env, d);
     return late ? hold(run, now, `CI still running after ${minutes} min`) : false;
   }
   if (!run.mergeSha)
@@ -1216,6 +1335,8 @@ async function gateStep(run, step, f, env) {
   if (d.ci === "pending" && step.ci !== false)
     return false;
   const blockers = gateBlockers(d, step);
+  if (blockers.length === 1 && d.ci === "fail" && step.ci !== false && fixable(run, f))
+    return ciFails(run, f, env, d);
   if (blockers.length)
     return hold(run, now, `gate ${step.name}: ${blockers.join("; ")}`);
   run.head = d.head;
@@ -1334,7 +1455,7 @@ var createFactory = (world = {}) => (remy) => {
     merge: mergePr,
     deployed: (sha, e, run) => deployed(sha, e, run.repoDir),
     deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
-    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => r.stage === "agent").length < (remy.config.maxFactoryAgents ?? 5),
+    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing") && r.agent).length < (remy.config.maxFactoryAgents ?? 5),
     spawn: async (run, step, prompt) => {
       try {
         const r = await remy.spawn({
@@ -1435,7 +1556,8 @@ var createFactory = (world = {}) => (remy) => {
       return;
     backoffUntil = Date.now() + BACKOFF_MS;
     run.agent = undefined;
-    run.stage = "running";
+    if (run.stage === "agent")
+      run.stage = "running";
     save();
     remy.log("usage limit; factory agents paused until", new Date(backoffUntil).toISOString());
   });
@@ -3016,8 +3138,8 @@ async function run2(cmd, cwd) {
 }
 
 // src/sessions/agents.ts
-async function listAgents() {
-  const out = await run2(["claude", "agents", "--json"]);
+async function listAgents(all = false) {
+  const out = await run2(["claude", "agents", "--json", ...all ? ["--all"] : []]);
   if (!out)
     throw new Error("`claude agents --json` failed; is Claude Code \u2265 2.1.224 on PATH?");
   return JSON.parse(out);
@@ -3391,6 +3513,14 @@ function spawnedEntry(spawned, name, sessionId) {
   const s = spawned[name];
   return s && !s.id ? s : undefined;
 }
+function noteSession(spawned, sessionId, transcript) {
+  const s = Object.values(spawned).find((x) => x.id && sessionId?.startsWith(x.id));
+  if (!s || s.sessionId === sessionId && (s.transcript || !transcript))
+    return false;
+  s.sessionId = sessionId;
+  s.transcript ??= transcript;
+  return true;
+}
 
 // src/sessions/snapshot.ts
 var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
@@ -3412,7 +3542,7 @@ async function takeSnapshot() {
       sessionId: a.sessionId,
       name: a.name,
       kind: a.kind,
-      status: a.status,
+      status: a.status ?? "ended",
       cwd,
       startedAt: a.startedAt,
       spawned: !!spawn,
@@ -3516,6 +3646,7 @@ var SESSION_ENV = new Set([
   "CLAUDE_CODE_MESSAGING_SOCKET",
   "CLAUDE_CODE_MESSAGING_TOKEN"
 ]);
+var agentEnv = (env = process.env) => Object.fromEntries(Object.entries(env).filter(([k, v]) => v !== undefined && !SESSION_ENV.has(k)));
 function slug(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 }
@@ -3538,8 +3669,7 @@ async function spawnAgent(opts) {
   if (worktree)
     cmd.push("-w", label);
   cmd.push(...remyDirArgs(), prompt);
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SESSION_ENV.has(k)));
-  const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env });
+  const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", env: agentEnv() });
   const out = (r.stdout.toString() + r.stderr.toString()).trim();
   if (r.exitCode !== 0)
     throw new Error(`claude --bg failed (${r.exitCode}): ${out}`);
@@ -3586,7 +3716,11 @@ function itemOf(s) {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
-    return { rank: 0, why: "wants a permission", action: `\`claude attach ${s.name}\`` };
+    return {
+      rank: 0,
+      why: "wants a permission",
+      action: s.kind !== "background" ? "answer it in its terminal" : s.role ? `\`claude attach ${s.name}\`` : `reply "resume", or \`claude attach ${s.name}\``
+    };
   if (s.status === "busy")
     return;
   if (asked)
@@ -4007,6 +4141,9 @@ var agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-upd
 async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
+  const spawned = readJson(PATHS.spawned, {});
+  if (noteSession(spawned, e.session_id, e.transcript_path))
+    writeJson(PATHS.spawned, spawned);
   scheduleWaitingList();
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
@@ -4446,7 +4583,8 @@ async function report(args) {
     step,
     verdict,
     summary: values.summary,
-    head: await headOf(values.pr)
+    head: await headOf(values.pr),
+    session: process.env.CLAUDE_CODE_SESSION_ID
   });
   const note = disabledNote("nothing reads it until you turn it back on");
   say(note ? "Recorded." : "Recorded. Remy picks it up within a minute or so.", note);
@@ -4460,6 +4598,171 @@ async function post(args) {
   if (!ws)
     throw new Error(values.workspace ? `no workspace "${values.workspace}"; run \`remy setup ${values.workspace}\`` : "run `remy setup` first");
   console.log(await createMessenger(ws, quietSink, { triggerEmoji: c.triggerEmoji }).post(positionals.join(" ") || "remy test"));
+}
+
+// src/sessions/resume.ts
+import { existsSync as existsSync9 } from "fs";
+import { homedir as homedir3 } from "os";
+var STUCK_MS = 60 * 60000;
+var resumeCommand = (sessionId, prompt) => ["claude", "--bg", "--resume", sessionId, prompt];
+var resumeEnv = (env = process.env) => Object.fromEntries(Object.entries(agentEnv(env)).filter(([k]) => !k.startsWith("CMUX_")));
+var copyOf = (out) => out.match(/started a copy as ([0-9a-f]{6,})/)?.[1];
+var resumePrompt = (why) => [
+  `Remy resumed this session: ${why}. Carry on with your task from where you left off.`,
+  "First check what is already done (git status, your branch, your PR), so you don't redo or undo it.",
+  "If an action needs a permission you can't get, find another way, or say in one line what you need and why, and go on with the rest.",
+  "If you were waiting for the user's answer, ask again in one short message."
+].join(" ");
+var span2 = (ms) => {
+  const h = Math.round(ms / 3600000);
+  return h < 48 ? `${h} h` : `${Math.round(h / 24)} days`;
+};
+function resumeReason(c, now) {
+  const { spawn, row, last, pr, folderGone } = c;
+  if (spawn.merged || spawn.role || row?.kind !== "background")
+    return;
+  if (folderGone || pr && pr.state !== "OPEN")
+    return;
+  if (!row.pid)
+    return row.state === "done" || row.state === "stopped" ? undefined : "its process had ended";
+  const asked = last?.event === "Notification" && last.type === "permission_prompt" ? last.ts : undefined;
+  if (row.status === "waiting" && asked !== undefined && now - asked >= STUCK_MS)
+    return `it waited ${span2(now - asked)} on a permission prompt`;
+  return;
+}
+function rowOf(rows, name, spawn) {
+  if (spawn?.id)
+    return rows.find((r) => r.sessionId.startsWith(spawn.id));
+  return rows.filter((r) => r.name === name).sort((a, b) => b.startedAt - a.startedAt)[0];
+}
+var latestEvents = () => {
+  const latest = new Map;
+  for (const e of readEvents())
+    latest.set(e.session_id, e);
+  return latest;
+};
+var realToResumeWorld = {
+  spawned: () => readJson(PATHS.spawned, {}),
+  agents: () => listAgents(true),
+  latest: latestEvents,
+  exists: existsSync9,
+  lookup: async (cwd) => {
+    const { branch, repo } = await gitInfo(cwd);
+    return { repo, pr: branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
+  }
+};
+async function toResume(now = Date.now(), world = {}) {
+  const w = { ...realToResumeWorld, ...world };
+  const spawned = w.spawned();
+  const rows = await w.agents();
+  const latest = w.latest();
+  const out = [];
+  for (const [name, spawn] of Object.entries(spawned)) {
+    const row = rowOf(rows, name, spawn);
+    const c = { spawn, row, last: row && latest.get(row.sessionId) };
+    if (!row || !resumeReason(c, now))
+      continue;
+    const cwd = c.last?.cwd ?? row.cwd;
+    c.folderGone = !w.exists(cwd);
+    const { repo, pr } = c.folderGone ? { repo: undefined, pr: undefined } : await w.lookup(cwd);
+    c.pr = pr;
+    const why = resumeReason(c, now);
+    if (why)
+      out.push({ name, why, cwd, repo });
+  }
+  return out;
+}
+var runSync2 = (cmd, opts) => {
+  const r = Bun.spawnSync(cmd, { ...opts, stdout: "pipe", stderr: "pipe" });
+  return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
+};
+function resumable(rows, spawned, name) {
+  const row = rowOf(rows, name, spawned[name]);
+  if (!row)
+    throw new Error(`no session "${name}"; \`remy status\` lists them`);
+  if (row.kind !== "background")
+    throw new Error(`${name} runs in a terminal, not in the background: continue it there`);
+  const spawn = spawnedEntry(spawned, row.name, row.sessionId);
+  if (spawn?.merged)
+    throw new Error(`${name} was closed when its PR merged (${spawn.merged.pr})`);
+  if (spawn?.role)
+    throw new Error(`${name} is the factory's ${spawn.role} agent; \`remy factory retry ${spawn.pr}\` runs its step again`);
+  return row;
+}
+var realWorld = {
+  run: runSync2,
+  agents: () => listAgents(true),
+  spawned: () => readJson(PATHS.spawned, {}),
+  sleep: (ms) => Bun.sleep(ms),
+  now: () => Date.now(),
+  stopTimeoutMs: 30000
+};
+async function resumeSession(name, why = "the user asked for it", world = {}) {
+  const w = { ...realWorld, ...world };
+  const run = w.run;
+  const row = resumable(await w.agents(), w.spawned(), name);
+  if (row.pid) {
+    const stop = run(["claude", "stop", row.id ?? row.sessionId.slice(0, 8)]);
+    if (!stop.ok)
+      throw new Error(`couldn't stop ${name}: ${stop.out}`);
+    const until = w.now() + w.stopTimeoutMs;
+    while ((await w.agents()).find((r) => r.sessionId === row.sessionId)?.pid) {
+      if (w.now() > until)
+        throw new Error(`${name} didn't stop within ${w.stopTimeoutMs / 1000} s`);
+      await w.sleep(500);
+    }
+  }
+  const cwd = existsSync9(row.cwd) ? row.cwd : homedir3();
+  const r = run(resumeCommand(row.sessionId, resumePrompt(why)), { cwd, env: resumeEnv() });
+  if (!r.ok)
+    throw new Error(`claude --bg --resume failed: ${r.out}`);
+  const copy = copyOf(r.out);
+  if (copy) {
+    run(["claude", "rm", copy]);
+    throw new Error(`Claude Code started a copy instead of resuming ${name}, and it was removed: ${r.out}`);
+  }
+  return { name, sessionId: row.sessionId, stopped: !!row.pid, output: r.out };
+}
+function formatResumed(items) {
+  const lines = items.map((it) => `\u2022 *${it.name}*${it.repo ? ` \xB7 ${it.repo}` : ""} \xB7 ${it.error ? `couldn't resume it (${it.error})` : `${it.why}; resumed`}`);
+  return `\u267B\uFE0F *Agents that stopped before finishing their task*
+${lines.join(`
+`)}`;
+}
+
+// src/cli/commands/resume.ts
+async function resume(args) {
+  const name = parse(args, {}).positionals[0];
+  if (!name)
+    throw new Error(`usage: ${import_picocolors.default.cyan("remy resume <name>")}`);
+  console.log(JSON.stringify(await resumeSession(name), null, 2));
+}
+async function resumeUnfinished(c = loadConfig()) {
+  let todo;
+  try {
+    todo = await toResume();
+  } catch (e) {
+    return console.log(import_picocolors.default.yellow(`! Couldn't look for agents to resume: ${e?.message ?? e}`));
+  }
+  const byWorkspace = new Map;
+  for (const it of todo) {
+    let error;
+    try {
+      await resumeSession(it.name, it.why);
+      console.log(import_picocolors.default.dim(`Resumed ${it.name}: ${it.why}.`));
+    } catch (e) {
+      error = e?.message ?? String(e);
+      console.log(import_picocolors.default.yellow(`! Couldn't resume ${it.name}: ${error}`));
+    }
+    const workspace = workspaceFor({ cwd: it.cwd, repo: githubRepoOf(it.cwd) }, c)?.name ?? "";
+    byWorkspace.set(workspace, [...byWorkspace.get(workspace) ?? [], { ...it, error }]);
+  }
+  for (const [workspace, items] of byWorkspace) {
+    const args = { name: "post", arguments: { text: formatResumed(items), workspace } };
+    const r = await askDaemon(PATHS.socket, "call", args, 30000).then((r) => !r ? "the daemon didn't answer" : r.isError ? r.content?.[0]?.text : undefined).catch((e) => e?.message ?? String(e));
+    if (r)
+      console.log(import_picocolors.default.yellow(`! Couldn't tell ${workspace || "the workspace"} what was resumed: ${r}`));
+  }
 }
 
 // src/cli/commands/spawn.ts
@@ -4490,7 +4793,7 @@ async function spawn(args) {
 // src/cli/commands/start.ts
 import { spawn as spawn2 } from "child_process";
 import { openSync as openSync2 } from "fs";
-import { homedir as homedir3 } from "os";
+import { homedir as homedir4 } from "os";
 import { join as join12 } from "path";
 
 // src/cli/doctor.ts
@@ -4593,11 +4896,12 @@ ${errorLine(`fix the ${import_picocolors.default.red("\u2717")} items first (${i
     }
     console.log("");
   }
-  await ensureDaemon(c.repoRoots[0] ?? homedir3());
+  await ensureDaemon(c.repoRoots[0] ?? homedir4());
+  await resumeUnfinished(c);
   writeJson(PATHS.mcpConfig, {
     mcpServers: { remy: { command: process.execPath, args: [join12(PLUGIN_ROOT, "dist", "channel.js")] } }
   });
-  const cwd = c.repoRoots[0] ?? homedir3();
+  const cwd = c.repoRoots[0] ?? homedir4();
   const args = [
     "claude",
     "-n",
@@ -4692,6 +4996,348 @@ async function changes() {
   console.log(first ? "Baseline stored; nothing to compare yet." : changes.length ? JSON.stringify(changes, null, 2) : "No changes.");
 }
 
+// src/cli/commands/trace.ts
+import { existsSync as existsSync11 } from "fs";
+import { join as join14 } from "path";
+
+// src/sessions/transcript.ts
+import { existsSync as existsSync10, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
+import { homedir as homedir5 } from "os";
+import { join as join13 } from "path";
+var projectDirOf = (cwd, claudeDir = claudeHome()) => join13(claudeDir, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
+var claudeHome = () => process.env.CLAUDE_CONFIG_DIR ?? join13(homedir5(), ".claude");
+function findTranscript(id, cwd, claudeDir = claudeHome()) {
+  const inDir = (dir) => {
+    try {
+      const f = readdirSync2(dir).find((n) => n.startsWith(id) && n.endsWith(".jsonl"));
+      return f ? join13(dir, f) : undefined;
+    } catch {
+      return;
+    }
+  };
+  if (cwd) {
+    const hit = inDir(projectDirOf(cwd, claudeDir));
+    if (hit)
+      return hit;
+  }
+  const projects = join13(claudeDir, "projects");
+  try {
+    for (const d of readdirSync2(projects)) {
+      const hit = inDir(join13(projects, d));
+      if (hit)
+        return hit;
+    }
+  } catch {}
+  return;
+}
+function readLines2(path) {
+  try {
+    return readFileSync5(path, "utf8").split(`
+`).filter(Boolean).flatMap((l) => {
+      try {
+        return [JSON.parse(l)];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+function readTranscript(path) {
+  if (!existsSync10(path))
+    return;
+  const dir = join13(path.replace(/\.jsonl$/, ""), "subagents");
+  let subagents = [];
+  try {
+    subagents = readdirSync2(dir).filter((f) => f.endsWith(".jsonl")).map((f) => {
+      const meta = readJsonOr(join13(dir, f.replace(/\.jsonl$/, ".meta.json")));
+      return { name: meta?.description || f.replace(/\.jsonl$/, ""), entries: readLines2(join13(dir, f)) };
+    });
+  } catch {}
+  return summarize(readLines2(path), subagents);
+}
+function readJsonOr(path) {
+  try {
+    return JSON.parse(readFileSync5(path, "utf8"));
+  } catch {
+    return;
+  }
+}
+function inputOf(name, input = {}) {
+  const v = input.command ?? input.skill ?? input.url ?? input.file_path ?? input.path ?? input.pattern ?? input.query ?? input.description ?? input.prompt;
+  const s = typeof v === "string" ? v : JSON.stringify(input);
+  const line = s.replace(/\s+/g, " ").trim();
+  return name === "Skill" && input.args ? `${line} ${String(input.args).replace(/\s+/g, " ")}`.slice(0, 200) : line.slice(0, 200);
+}
+function summarize(main, subagents = []) {
+  const s = {
+    models: [],
+    prompts: 0,
+    requests: 0,
+    tools: {},
+    subagentTools: {},
+    errors: {},
+    subagentErrors: {},
+    skills: [],
+    subagents: [],
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    calls: []
+  };
+  const seen = new Set;
+  const stamps = [];
+  const walk = (entries, agent) => {
+    const toolOf = new Map;
+    for (const e of entries) {
+      if (typeof e.timestamp === "string")
+        stamps.push(e.timestamp);
+      if (e.type === "cost-state" && !agent && typeof e.totalCostUSD === "number")
+        s.costUsd = e.totalCostUSD;
+      const content = e.message?.content;
+      if (e.type === "user" && !agent && !e.isMeta && isPrompt(e))
+        s.prompts++;
+      if (e.type === "user" && !agent) {
+        const text = typeof content === "string" ? content : "";
+        for (const m of text.matchAll(/<command-name>\/?([^<]+)<\/command-name>/g))
+          addOnce(s.skills, m[1].trim());
+      }
+      if (e.type === "user" && Array.isArray(content)) {
+        for (const c of content)
+          if (c?.type === "tool_result" && c.is_error) {
+            const call = toolOf.get(c.tool_use_id);
+            if (call) {
+              call.error = true;
+              const errors = agent ? s.subagentErrors : s.errors;
+              errors[call.tool] = (errors[call.tool] ?? 0) + 1;
+            }
+          }
+      }
+      if (e.type !== "assistant" || !e.message)
+        continue;
+      const m = e.message;
+      const key = m.id ?? e.requestId ?? e.uuid;
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        s.requests++;
+        if (m.model && m.model !== "<synthetic>")
+          addOnce(s.models, m.model);
+        const u = m.usage ?? {};
+        s.tokens.input += u.input_tokens ?? 0;
+        s.tokens.output += u.output_tokens ?? 0;
+        s.tokens.cacheRead += u.cache_read_input_tokens ?? 0;
+        s.tokens.cacheWrite += u.cache_creation_input_tokens ?? 0;
+      }
+      if (!Array.isArray(m.content))
+        continue;
+      for (const c of m.content) {
+        if (c?.type !== "tool_use")
+          continue;
+        const tools = agent ? s.subagentTools : s.tools;
+        tools[c.name] = (tools[c.name] ?? 0) + 1;
+        const call = { at: e.timestamp, tool: c.name, input: inputOf(c.name, c.input), agent };
+        toolOf.set(c.id, call);
+        s.calls.push(call);
+        if (c.name === "Skill" && c.input?.skill)
+          addOnce(s.skills, String(c.input.skill));
+        if ((c.name === "Agent" || c.name === "Task") && !agent)
+          s.subagents.push({ description: String(c.input?.description ?? ""), type: c.input?.subagent_type });
+      }
+    }
+  };
+  walk(main);
+  for (const a of subagents)
+    walk(a.entries, a.name);
+  stamps.sort();
+  s.start = stamps[0];
+  s.end = stamps.at(-1);
+  s.calls.sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
+  return s;
+}
+function isPrompt(e) {
+  if (e.origin?.kind)
+    return e.origin.kind === "human";
+  const content = e.message?.content;
+  if (typeof content === "string")
+    return !/^<(local-command|task-notification|system-reminder)/.test(content);
+  return Array.isArray(content) && content.some((c) => c?.type === "text") && !content.some((c) => c?.type === "tool_result");
+}
+function addOnce(list, v) {
+  if (!list.includes(v))
+    list.push(v);
+}
+
+// src/cli/commands/trace.ts
+var prNumber = (url) => Number(url.match(/\/pull\/(\d+)$/)?.[1]);
+function resolvePr(want, w) {
+  const urls = new Set([
+    ...Object.keys(w.runs),
+    ...w.reports.map((r) => r.pr),
+    ...Object.values(w.spawned).flatMap((s) => s.pr ? [s.pr] : [])
+  ]);
+  if (urls.has(want))
+    return want;
+  if (!/^#?\d+$/.test(want))
+    return;
+  const n = Number(want.replace(/^#/, ""));
+  if (n <= 0)
+    return;
+  const hits = [...urls].filter((u) => prNumber(u) === n);
+  if (hits.length > 1)
+    throw new Error(`#${n} is more than one PR; give its URL:
+${hits.join(`
+`)}`);
+  return hits[0];
+}
+function buildTrace(want, w) {
+  const pr = resolvePr(want, w);
+  const entries = Object.entries(w.spawned).filter(([name, s]) => pr ? s.pr === pr : name === want || !!s.id && (want.startsWith(s.id) || want.length >= 4 && s.id.startsWith(want)));
+  if (!pr && !entries.length && /^#?\d+$/.test(want))
+    throw new Error(`no PR ${want.startsWith("#") ? want : `#${want}`} that Remy knows; \`remy factory\` lists them`);
+  if (!pr && !entries.length)
+    throw new Error(`no PR or agent "${want}" that Remy knows; \`remy factory\` and \`remy status\` list them`);
+  const one = !pr && entries.length === 1 ? entries[0] : undefined;
+  if (one?.[1].pr) {
+    const t = buildTrace(one[1].pr, w);
+    return { ...t, agents: t.agents.filter((a) => a.name === one[0]), reports: [] };
+  }
+  entries.sort(([, a], [, b]) => a.startedAt - b.startedAt);
+  const agents = entries.map(([name, s]) => {
+    const cwd = s.label ? join14(s.repo, ".claude", "worktrees", s.label) : s.repo;
+    const ev = s.id ? w.events.find((e) => e.session_id?.startsWith(s.id)) : undefined;
+    const sessionId = s.sessionId ?? ev?.session_id;
+    const t = sessionId || s.id ? w.transcript(sessionId ?? s.id, cwd, s.transcript ?? ev?.transcript_path) : {};
+    return {
+      name,
+      task: s.task,
+      role: s.role,
+      startedAt: s.startedAt,
+      sessionId: sessionId ?? t.path?.match(/([0-9a-f-]{36})\.jsonl$/)?.[1] ?? s.id,
+      transcript: t.path,
+      cwd,
+      merged: s.merged ? true : undefined,
+      reports: [],
+      summary: t.summary
+    };
+  });
+  const reports = pr ? w.reports.filter((r) => r.pr === pr) : [];
+  const loose = [];
+  for (const r of reports) {
+    const a = reporterOf(r, agents);
+    if (a)
+      a.reports.push(r);
+    else
+      loose.push(r);
+  }
+  for (const a of agents)
+    if (!pr)
+      a.reports = w.reports.filter((r) => a.sessionId && r.session?.startsWith(a.sessionId));
+  const run = pr ? w.runs[pr] : undefined;
+  if (run?.stage === "agent") {
+    const newest = agents.at(-1);
+    if (newest)
+      newest.working = true;
+  }
+  return {
+    pr,
+    run: run && {
+      number: run.number,
+      title: run.title,
+      repo: run.repo,
+      stage: run.stage,
+      step: run.step,
+      round: run.round,
+      reason: run.reason,
+      head: run.head
+    },
+    agents,
+    reports: loose
+  };
+}
+function reporterOf(r, agents) {
+  if (r.kind)
+    return;
+  if (r.session)
+    return agents.find((a) => a.sessionId && r.session.startsWith(a.sessionId));
+  return agents.findLast((a) => a.startedAt <= r.at && a.task.startsWith(`${r.step} for `));
+}
+var n = (x) => x >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : String(x);
+function duration(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60)
+    return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+var pad = (x) => String(x).padStart(2, "0");
+var clock2 = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+var time = (ms) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock2(d).slice(0, 5)}`;
+};
+var counts = (c, errors = {}) => Object.entries(c).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}${errors[k] ? import_picocolors.default.red(` (${errors[k]} failed)`) : ""}`).join(" \xB7 ");
+function verdictLine(r) {
+  const v = r.verdict === "fail" ? import_picocolors.default.red(r.verdict) : r.verdict === "pass" ? import_picocolors.default.green(r.verdict) : import_picocolors.default.yellow(r.verdict ?? "");
+  return `${r.step} ${v}${r.head ? import_picocolors.default.dim(` @${r.head.slice(0, 7)}`) : ""}: ${r.summary ?? ""}`;
+}
+function formatTrace(t, opts = {}) {
+  const out = [];
+  if (t.pr) {
+    const r = t.run;
+    out.push(import_picocolors.default.bold(r ? `#${r.number} ${r.title}` : `#${prNumber(t.pr)}`) + (r ? import_picocolors.default.dim(` (${r.repo})`) : ""), t.pr, r ? `factory: ${r.stage}, step ${r.step + 1}${r.round > 1 ? `, round ${r.round}` : ""}${r.reason ? ` \xB7 ${r.reason}` : ""}` : import_picocolors.default.dim("factory: no run now (done runs are dropped after a while)"), "");
+  }
+  if (!t.agents.length)
+    out.push(import_picocolors.default.dim("No agents Remy started for it."));
+  for (const a of t.agents) {
+    const s = a.summary;
+    const span = s?.start && s.end ? Date.parse(s.end) - Date.parse(s.start) : undefined;
+    out.push(`${import_picocolors.default.bold(a.task)}  ${import_picocolors.default.cyan(a.name)}  ${time(a.startedAt)}${span !== undefined ? ` \xB7 ${duration(span)}` : ""}${s?.costUsd !== undefined ? ` \xB7 $${s.costUsd.toFixed(2)}` : ""}`);
+    out.push(import_picocolors.default.dim(`  session ${a.sessionId ?? "?"}`));
+    out.push(import_picocolors.default.dim(`  transcript ${a.transcript ?? "not found (Claude Code may have cleaned it up)"}`));
+    if (s) {
+      out.push(`  requests ${s.requests} \xB7 prompts ${s.prompts}${s.models.length ? ` \xB7 ${s.models.join(", ")}` : ""}`, `  tokens in ${n(s.tokens.input)} \xB7 out ${n(s.tokens.output)} \xB7 cache read ${n(s.tokens.cacheRead)} \xB7 cache write ${n(s.tokens.cacheWrite)}`);
+      if (Object.keys(s.tools).length)
+        out.push(`  tools ${counts(s.tools, s.errors)}`);
+      if (s.skills.length)
+        out.push(`  skills ${s.skills.join(", ")}`);
+      if (s.subagents.length)
+        out.push(`  subagents ${s.subagents.map((x) => `${x.description}${x.type ? import_picocolors.default.dim(` (${x.type})`) : ""}`).join(" \xB7 ")}`);
+      if (Object.keys(s.subagentTools).length)
+        out.push(`  subagent tools ${counts(s.subagentTools, s.subagentErrors)}`);
+      if (opts.calls)
+        for (const c of s.calls)
+          out.push(import_picocolors.default.dim(`    ${c.at ? clock2(new Date(c.at)) : ""} `) + `${c.agent ? import_picocolors.default.dim(`[${c.agent}] `) : ""}${c.error ? import_picocolors.default.red(c.tool) : c.tool} ${import_picocolors.default.dim(c.input)}`);
+    }
+    for (const r of a.reports)
+      out.push(`  ${verdictLine(r)}`);
+    if (!a.reports.length && a.role === "factory")
+      out.push(a.working ? import_picocolors.default.dim("  no report yet") : import_picocolors.default.yellow("  no report"));
+    out.push("");
+  }
+  for (const r of t.reports)
+    out.push(r.kind === "retry" ? import_picocolors.default.dim(`${time(r.at)} retry asked`) : `${time(r.at)} ${verdictLine(r)}`);
+  return out.join(`
+`).trimEnd();
+}
+async function trace(args) {
+  const { values, positionals } = parse(args, { json: { type: "boolean" }, calls: { type: "boolean" } });
+  const want = positionals[0];
+  if (!want)
+    throw new Error(`usage: ${import_picocolors.default.cyan("remy trace <pr-url|#number|agent> [--calls] [--json]")}`);
+  const t = buildTrace(want, {
+    runs: readJson(PATHS.factory, {}).runs ?? {},
+    reports: readReports(),
+    spawned: readJson(PATHS.spawned, {}),
+    events: readEvents(),
+    transcript: (id, cwd, known) => {
+      const path = known && existsSync11(known) ? known : findTranscript(id, cwd);
+      return { path, summary: path ? readTranscript(path) : undefined };
+    }
+  });
+  const text = values.json ? JSON.stringify(t, null, 2) : formatTrace(t, { calls: values.calls });
+  await new Promise((done) => process.stdout.write(`${text}
+`, () => done()));
+}
+
 // src/cli/hook.ts
 async function runHook() {
   if (process.env.REMY_ROLE === "coordinator")
@@ -4734,8 +5380,8 @@ function trim(s, n) {
 
 // src/cli/setup.ts
 import { chmodSync as chmodSync2, mkdirSync as mkdirSync4, writeFileSync as writeFileSync4 } from "fs";
-import { homedir as homedir4 } from "os";
-import { join as join13 } from "path";
+import { homedir as homedir6 } from "os";
+import { join as join15 } from "path";
 
 // node_modules/@clack/core/dist/index.mjs
 import { styleText } from "util";
@@ -5494,7 +6140,7 @@ var n$1 = class n extends y {
     });
   }
 };
-class n extends y {
+class n2 extends y {
   get userInputWithCursor() {
     if (this.state === "submit")
       return this.userInput;
@@ -6040,7 +6686,7 @@ ${f}
   }).prompt();
 };
 var i = `${styleText2("gray", S_BAR)}  `;
-var text = (t) => new n({
+var text = (t) => new n2({
   validate: t.validate,
   placeholder: t.placeholder,
   defaultValue: t.defaultValue,
@@ -6125,7 +6771,7 @@ async function general(c) {
   const roots = await answer(text({
     message: "Folders that hold your repos",
     placeholder: "~/Repositories, ~/work",
-    initialValue: c.repoRoots.map((r) => r.replace(homedir4(), "~")).join(", "),
+    initialValue: c.repoRoots.map((r) => r.replace(homedir6(), "~")).join(", "),
     validate: (v) => list(v ?? "").length ? undefined : "At least one folder"
   }));
   c.repoRoots = list(roots).map(expandHome);
@@ -6395,9 +7041,9 @@ async function pairTelegram(tg, username, workspace) {
   throw new Error(`No message reached @${username}; run \`remy setup ${workspace}\` again.`);
 }
 function installShim() {
-  const bin = join13(homedir4(), ".local", "bin");
+  const bin = join15(homedir6(), ".local", "bin");
   mkdirSync4(bin, { recursive: true });
-  const shim = join13(bin, "remy");
+  const shim = join15(bin, "remy");
   writeFileSync4(shim, `#!/bin/sh
 # Installed by \`remy setup\`. Uses the installed remy plugin, falling back to the copy setup ran from.
 root=$(bun -e 'try{const p=require(process.env.HOME+"/.claude/plugins/installed_plugins.json").plugins["remy@remy"];console.log(p?.[p.length-1]?.installPath??"")}catch{}')
@@ -6422,10 +7068,18 @@ var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, 
   ["changes", "What changed since the last snapshot (updates it)"],
   ["spawn --repo <r> <task\u2026>", "Start a background agent. Also --name, --mode, --no-worktree, --slack-task <id>"],
   [
+    "resume <name>",
+    "Carry on an agent's own session in the background, stopping it first if it's stuck; keeps its history and worktree"
+  ],
+  [
     "factory [--json] | factory retry <pr> | factory check [repo]",
     "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts"
   ],
   ["report <step> pass|fail|fixed --pr <url> --summary <text>", "A factory agent's verdict on its step"],
+  [
+    "trace <pr|agent> [--calls] [--json]",
+    "What Remy's agents did for a PR, or one agent did: tools, skills, subagents, tokens, cost, verdicts; --calls lists each tool call"
+  ],
   ["post [--workspace <w>] <text>", "Send yourself a test message"],
   ["doctor", "Check requirements, tokens and scopes"],
   ["dir", "Print remy's state folder"]
@@ -6436,8 +7090,10 @@ var COMMANDS = {
   queue: waitingList,
   changes: () => changes(),
   spawn,
+  resume,
   factory,
   report,
+  trace,
   post,
   setup: async (args) => setup(parse(args, {}).positionals[0]),
   start,

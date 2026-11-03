@@ -67,7 +67,7 @@ test("ranks questions, then red CI, then reviews, then ready PRs, then agents wi
     "4:nopr",
   ]);
   expect(q[0]!.why).toBe('asks: "Should I drop the column?"');
-  expect(q[1]!.action).toBe("`claude attach perm`");
+  expect(q[1]!.action).toBe('reply "resume", or `claude attach perm`');
 });
 
 test("leaves out busy sessions, pending CI, closed PRs and interactive sessions with nothing to show", () => {
@@ -127,4 +127,24 @@ test("questionOf skips question marks in URLs and code, and keeps the wording", 
   );
   expect(questionOf("- Should I rename `snake_case` in C#?")).toBe("Should I rename `snake_case` in C#?");
   expect(questionOf('> Which one, "a" or "b?"')).toBe('Which one, "a" or "b?"');
+});
+
+test("a permission prompt offers resume for a background session, the terminal for a terminal one", () => {
+  const waiting = (kind: string) =>
+    session({ kind, status: "waiting", lastEvent: { event: "Notification", ts: 1, type: "permission_prompt" } });
+  const bgSession = waiting("background");
+  const bg = waitingListOf(snap(bgSession))[0];
+  expect(bg?.why).toBe("wants a permission");
+  expect(bg?.action).toBe(`reply "resume", or \`claude attach ${bgSession.name}\``);
+  expect(waitingListOf(snap(waiting("terminal")))[0]?.action).toBe("answer it in its terminal");
+});
+
+test("a permission prompt on a factory agent doesn't offer resume, which `remy resume` refuses", () => {
+  const factory = session({
+    kind: "background",
+    role: "verify",
+    status: "waiting",
+    lastEvent: { event: "Notification", ts: 1, type: "permission_prompt" },
+  });
+  expect(waitingListOf(snap(factory))[0]?.action).toBe(`\`claude attach ${factory.name}\``);
 });

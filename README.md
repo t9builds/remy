@@ -80,6 +80,14 @@ Everything else is on the list.
 
 You review and merge PRs like you always do. Once an agent's PR is merged, Remy closes that agent within about a minute and tells you: `claude rm` deletes the session and its worktree, or, if the worktree still has uncommitted or unpushed work, `claude stop` ends the session and the worktree stays. The agent then counts as merged: it's left out of `remy status`, and `remy status --merged` lists it. Remy only does this for agents it started (`remy spawn`), never for sessions you started yourself, and waits while an agent is mid-turn.
 
+An agent that can't go on gets resumed instead of abandoned. Say "resume pear" (or reply "resume" in its thread) and Remy runs `remy resume pear`: it stops the agent if it's stuck, say on a permission prompt, and continues the same session in the background with a prompt to carry on where it left off. The agent keeps its history, branch, worktree and uncommitted edits, its name and its thread, and runs in the permission mode it was started with (`spawnPermissionMode`, normally `auto`). `remy start` does this by itself for every agent Remy started that isn't finished (not closed, its PR neither merged nor closed) and whose process ended mid-task, as after a reboot, or that has waited over an hour on a permission prompt. It posts one message per workspace listing them:
+
+```
+♻️ Agents that stopped before finishing their task
+• pear · acme/api · it waited 3 days on a permission prompt; resumed
+• thyme · acme/api · its process had ended; resumed
+```
+
 Telegram works the same way, in your chat with your bot. Telegram has no threads there, so each agent's messages come as a reply chain: reply to any of them to talk to that agent. Right after an agent asks you something, a plain message works too. When the coordinator itself needs a permission, you get Allow / Deny buttons.
 
 ## Tips
@@ -107,6 +115,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | `src/messengers/slack/` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in |
 | `src/messengers/telegram/` | Telegram: your chat with your bot, read by long polling, with Slack-style formatting converted to Telegram's |
 | `remy spawn` | `claude --bg -n <kitchen-name> -w <repo-and-task> --permission-mode auto "<task>"` in the chosen repo |
+| `remy resume` (`src/sessions/resume.ts`) | `claude stop <id>` if it runs, then `claude --bg --resume <id> "<carry on>"`. No other options: with any, Claude Code starts a copy under a new id instead, so the session keeps the options it was spawned with |
 | `coordinator.md` | The coordinator's instructions, appended to its system prompt |
 
 Messages to other sessions go through Claude Code's built-in `SendMessage`.
@@ -261,7 +270,13 @@ In any channel the bot is in, mention it in a thread (`@bot fix this, it's in ap
 
 Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
 
-From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`, `remy factory`.
+From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy resume <name>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`, `remy factory`, `remy trace`.
+
+### Tracing what agents did
+
+`remy trace <pr>` shows every agent Remy started for a PR, in order, from Claude Code's own transcripts: how long each ran, its model requests, tokens and cost, the tools it called (and how many failed), the skills it used, its subagents and their tools, and the verdict it reported. `remy trace <agent>` shows one agent; a PR is its URL, or its number when that is unambiguous (`123`; quote it as `'#123'` in a shell). `--calls` lists every tool call in order, with its command, path or URL; `--json` gives all of it to a script.
+
+Remy keeps each agent's session id and transcript path in `~/.remy/spawned.json` from its first hook event, and `remy report` records the session that reported, so a verdict leads to its transcript. Claude Code deletes transcripts after `cleanupPeriodDays` (30 by default); raise it in Claude Code's settings to trace older runs.
 
 ## Config
 
@@ -283,7 +298,7 @@ From a terminal: `remy status` (`remy status <name>` for one session in detail, 
 | `extensions.packages` | `[]` | Extension packages installed in `~/.remy` |
 | `extensions.disabled` | `[]` | Extensions not to load, by name, built-in ones included |
 | `autonomy` | `notify` | The most you let the [factory](#factory) do with your changes: `notify`, `verify`, `merge`, `deploy-dev` or `deploy-prod` |
-| `maxFactoryAgents` | `5` | Factory agents (verifiers, checks) running at once on your subscription |
+| `maxFactoryAgents` | `5` | Factory agents (verifiers, checks, fixers) running at once on your subscription |
 
 Each workspace:
 
@@ -398,7 +413,7 @@ export default defineFactory({
 
 | Step | Done by | What it does |
 |---|---|---|
-| `agent(name, { skill })` | a fresh agent running the skill | Works on the PR in its own worktree and finishes with `remy report <name> pass\|fail\|fixed --pr <url> --summary "…"`. `fixed` with `repeat: "until-clean"` hands the step to another fresh agent once CI is green on the fixes. `fail` waits for you (`onFail: "hold"`), asks you whether to go on (`"ask-human"`, or `onHold`), or tells you at once and offers a fix (`"notify-author"`) |
+| `agent(name, { skill })` | a fresh agent running the skill | Works on the PR in its own worktree and finishes with `remy report <name> pass\|fail\|fixed --pr <url> --summary "…"`. `fixed` with `repeat: "until-clean"` hands the step to another fresh agent once CI is green on the fixes. `fail` goes to the fixer before the merge (`onFail: "fix"`, the default; after the merge it waits for you), waits for you (`"hold"`), asks you whether to go on (`"ask-human"`, or `onHold`), or tells you at once and offers a fix (`"notify-author"`) |
 | `wait("ci")`, `wait("deploy", { env })` | Remy | CI green on the PR's head; the merge commit deployed, seen by Cloud Build (`detector: "cloudbuild"`) or a `check` command that exits 0 |
 | `gate(name, { maxLines, protect })` | Remy | Changed lines, protected paths, CI, and that each verdict covers the PR's current head; new commits send the PR back to the step that hasn't seen them |
 | `action("merge" \| "deploy" \| "notify")` | Remy | Merges with `gh pr merge --match-head-commit`, runs the environment's `deploy` command, tells you the change is through |
@@ -407,10 +422,13 @@ Any skill can be an agent step: Remy adds the PR, the rules and the `remy report
 
 | Skill | What it does |
 |---|---|
-| `/remy:review` | Three reviewers in parallel, each through one lens: correctness (the claim, edge cases, security, what it breaks beyond the diff), design (the repo's own rules, root causes, structure, complexity) and proof (tests, and the app run for real). The verifier checks each finding against the code, hands the real ones to a fixer agent, pushes, and records the review on the PR. With `repeat: "until-clean"`, a fresh round reviews every fix |
+| `/remy:review` | Three reviewers in parallel, each through one lens: correctness (the claim, edge cases, security, what it breaks beyond the diff), design (the repo's own rules, root causes, structure, complexity) and proof (tests, and the app run for real). The verifier checks each finding against the code, hands the real ones to a fixer agent, pushes, and records the review on the PR: a summary, and a thread on each finding's line, resolved with how it was fixed or decided. With `repeat: "until-clean"`, a fresh round reviews every fix |
 | `/remy:verify` | Runs the change: on an environment after a deploy, or from the PR's checkout before the merge (an agent step without `env`) |
+| `/remy:fix` | The fixer, not a step: reproduces red CI or a step's failure, fixes the root cause with a test, runs every check, pushes, and records the fix on the PR |
 | `/remy:release-check` | Decides whether a verified change can go to production on its own |
 | `/remy:create-verification-skill` | Not a step: run it once in a repo to write the repo's own `verify-<app>` skill, which launches the app, drives it like a user and captures evidence. `/remy:review` and `/remy:verify` follow it when it's there |
+
+Before the merge, a failure doesn't wait for you. Red CI (at `wait("ci")`, a gate, or after an agent's fixes) and a step's `fail` go to a fixer agent, which fixes the cause, pushes, and the pipeline runs again from its first step, so a fresh review checks the fix. You're asked only when the fixer says the fix needs your call, or the run has used `maxRounds` fixes and still fails. Set it with `fixer` next to `steps`: `fixer: { skill: "/our-fix", instructions: "…", maxRounds: 3, timeoutMinutes: 60 }` (all optional), or `fixer: false` to hold every failure for you. An agent step can't be called `fix`: that is the name the fixer reports as.
 
 The defaults judge a change by the repo's own written rules (`AGENTS.md` or `CLAUDE.md`, ADRs, lint and dependency rules), so most teams shape them by writing those down. To steer one step, add `instructions` (`agent("review", { skill: "/remy:review", instructions: "Migrations need a rollback." })`). To replace one, name your own skill or a skill pack's: `agent("review", { skill: "/our-review" })`.
 
@@ -424,13 +442,14 @@ How far Remy goes on its own is the lower of the repo's `autonomy` and yours in 
 | `deploy-dev` | deploys verified changes to dev |
 | `deploy-prod` | promotes to production after dev verification |
 
-A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a `fail`, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
+A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a failure the fixer couldn't fix, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
 
-The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Step agents count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
+The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Step agents and fixers count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
 
 ## Limits
 
-- A message from another session can't approve a permission prompt. When an agent waits on one, remy tells you to `claude attach <name>`. Spawned agents run in auto mode, so this is rare.
+- A message from another session can't approve a permission prompt. When a background agent waits on one, reply "resume" to have it carry on in its own mode and find another way, or `claude attach <name>` to answer the prompt. Spawned agents run in auto mode, so this is rare.
+- A resumed agent keeps the permission mode it was started with: Claude Code can't change a session's options without starting a copy. A factory agent isn't resumed; `remy factory retry <pr>` runs its step again.
 - The coordinator's own permission prompts are relayed to the chat: reply `yes <id>` or `no <id>`, or tap the buttons in Telegram.
 - With `poll`, Slack replies arrive within about 4 seconds while you're chatting and 15 seconds when idle. Slack allows about 50 reads a minute per app, shared by everyone using it, which is enough for 3–4 active people. `socket` is instant.
 - The coordinator's own permission prompts go to the workspace you last wrote from (the catch-all until you've written).

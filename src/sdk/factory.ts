@@ -27,7 +27,12 @@ export const atLeast = (have: Level, need: Level) => LEVELS.indexOf(have) >= LEV
 
 /** What happens when an agent step reports `fail`. */
 export type OnFail =
-  /** Stop and wait for you: a judgment call on the waiting list (the default). */
+  /**
+   * The fixer fixes the cause and the pipeline runs again from its first step (the default, ADR-0010). After the merge
+   * there is no branch to push a fix to, so it holds.
+   */
+  | "fix"
+  /** Stop and wait for you: a judgment call on the waiting list. */
   | "hold"
   /** Ask you whether to go on anyway. */
   | "ask-human"
@@ -110,10 +115,27 @@ export type Environment = {
   url?: string;
 };
 
+/** The agent that fixes red CI, and a step's `fail` with `onFail: "fix"`, before the merge (ADR-0010). */
+export type Fixer = {
+  /** Default "/remy:fix". */
+  skill?: string;
+  /** What to tell the fixer besides the skill, e.g. how to reproduce a failure. */
+  instructions?: string;
+  /** Most fixes in one run before it waits for you. Default 3. */
+  maxRounds?: number;
+  /** Minutes the fixer may take before it counts as stuck. Default 60. */
+  timeoutMinutes?: number;
+};
+
+/** The step name the fixer reports as: `remy report fix …`. */
+export const FIXER = "fix";
+
 export type Factory = {
   /** The most the team allows Remy to do in this repo; your own `autonomy` may lower it. Default "notify". */
   autonomy?: Level;
   environments?: Record<string, Environment>;
+  /** How red CI and failed steps are fixed before the merge; `false` holds them for you instead. */
+  fixer?: Fixer | false;
   steps: Step[];
 };
 
@@ -152,6 +174,20 @@ export function validate(f: Factory): string[] {
   if (!Array.isArray(f?.steps) || !f.steps.length) return ["it has no steps"];
   if (f.autonomy && !LEVELS.includes(f.autonomy))
     errors.push(`autonomy "${f.autonomy}" isn't one of ${LEVELS.join(", ")}`);
+  const fx = f.fixer;
+  if (fx !== undefined && fx !== false) {
+    if (typeof fx !== "object" || fx === null) errors.push("fixer: an object, or false to turn it off");
+    else {
+      if (fx.maxRounds !== undefined && !(Number.isInteger(fx.maxRounds) && fx.maxRounds >= 1))
+        errors.push("fixer: maxRounds is a whole number of at least 1 (false turns the fixer off)");
+      if (fx.timeoutMinutes !== undefined && !(Number.isFinite(fx.timeoutMinutes) && fx.timeoutMinutes > 0))
+        errors.push("fixer: timeoutMinutes is a number above 0");
+      if (fx.skill !== undefined && (typeof fx.skill !== "string" || !fx.skill.trim()))
+        errors.push("fixer: skill is a skill name, like /remy:fix");
+      if (fx.instructions !== undefined && typeof fx.instructions !== "string")
+        errors.push("fixer: instructions is text");
+    }
+  }
   const names = new Set<string>();
   f.steps.forEach((s, i) => {
     const at = `step ${i + 1} (${s?.kind} ${s?.name})`;
@@ -162,6 +198,9 @@ export function validate(f: Factory): string[] {
     if (s.kind === "agent") {
       if (!s.skill) errors.push(`${at}: needs a skill`);
       if (names.has(s.name)) errors.push(`${at}: another agent step is called "${s.name}"`);
+      if (s.name === FIXER && f.fixer !== false) errors.push(`${at}: "${FIXER}" is the fixer's name`);
+      if (s.onFail !== undefined && !["fix", "hold", "ask-human", "notify-author"].includes(s.onFail))
+        errors.push(`${at}: onFail is "fix", "hold", "ask-human" or "notify-author"`);
       names.add(s.name);
     }
     if (s.kind === "wait" && !["ci", "deploy"].includes(s.name)) errors.push(`${at}: wait is "ci" or "deploy"`);
