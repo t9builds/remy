@@ -682,6 +682,7 @@ var exports_factory = {};
 __export(exports_factory, {
   FIXER: () => FIXER,
   LEVELS: () => LEVELS,
+  RESOLVER: () => RESOLVER,
   action: () => action,
   agent: () => agent,
   atLeast: () => atLeast,
@@ -696,6 +697,7 @@ var LEVELS = ["notify", "verify", "merge", "deploy-dev", "deploy-prod"];
 var lowerLevel = (a, b) => LEVELS.indexOf(a) <= LEVELS.indexOf(b) ? a : b;
 var atLeast = (have, need) => LEVELS.indexOf(have) >= LEVELS.indexOf(need);
 var FIXER = "fix";
+var RESOLVER = "resolve";
 var defineFactory = (f) => f;
 var agent = (name, opts) => ({
   kind: "agent",
@@ -724,27 +726,33 @@ function levelOf(step) {
     return "merge";
   return step.env === "dev" ? "deploy-dev" : "deploy-prod";
 }
+function helperErrors(key, c, skill, what) {
+  if (c === undefined || c === false)
+    return [];
+  if (typeof c !== "object" || c === null)
+    return [`${key}: an object, or false to turn it off`];
+  const errors = [];
+  if (c.maxRounds !== undefined && !(Number.isInteger(c.maxRounds) && c.maxRounds >= 1))
+    errors.push(`${key}: maxRounds is a whole number of at least 1 (false turns ${what} off)`);
+  if (c.timeoutMinutes !== undefined && !(Number.isFinite(c.timeoutMinutes) && c.timeoutMinutes > 0))
+    errors.push(`${key}: timeoutMinutes is a number above 0`);
+  if (c.skill !== undefined && (typeof c.skill !== "string" || !c.skill.trim()))
+    errors.push(`${key}: skill is a skill name, like ${skill}`);
+  if (c.instructions !== undefined && typeof c.instructions !== "string")
+    errors.push(`${key}: instructions is text`);
+  return errors;
+}
 function validate(f) {
   const errors = [];
   if (!Array.isArray(f?.steps) || !f.steps.length)
     return ["it has no steps"];
   if (f.autonomy && !LEVELS.includes(f.autonomy))
     errors.push(`autonomy "${f.autonomy}" isn't one of ${LEVELS.join(", ")}`);
-  const fx = f.fixer;
-  if (fx !== undefined && fx !== false) {
-    if (typeof fx !== "object" || fx === null)
-      errors.push("fixer: an object, or false to turn it off");
-    else {
-      if (fx.maxRounds !== undefined && !(Number.isInteger(fx.maxRounds) && fx.maxRounds >= 1))
-        errors.push("fixer: maxRounds is a whole number of at least 1 (false turns the fixer off)");
-      if (fx.timeoutMinutes !== undefined && !(Number.isFinite(fx.timeoutMinutes) && fx.timeoutMinutes > 0))
-        errors.push("fixer: timeoutMinutes is a number above 0");
-      if (fx.skill !== undefined && (typeof fx.skill !== "string" || !fx.skill.trim()))
-        errors.push("fixer: skill is a skill name, like /remy:fix");
-      if (fx.instructions !== undefined && typeof fx.instructions !== "string")
-        errors.push("fixer: instructions is text");
-    }
-  }
+  errors.push(...helperErrors("fixer", f.fixer, "/remy:fix", "the fixer"));
+  errors.push(...helperErrors("conflicts", f.conflicts, "/remy:resolve", "resolving"));
+  const cx = f.conflicts;
+  if (cx && typeof cx === "object" && cx.strategy !== undefined && !["merge", "rebase"].includes(cx.strategy))
+    errors.push('conflicts: strategy is "merge" or "rebase"');
   const names = new Set;
   f.steps.forEach((s, i) => {
     const at = `step ${i + 1} (${s?.kind} ${s?.name})`;
@@ -759,6 +767,8 @@ function validate(f) {
         errors.push(`${at}: another agent step is called "${s.name}"`);
       if (s.name === FIXER && f.fixer !== false)
         errors.push(`${at}: "${FIXER}" is the fixer's name`);
+      if (s.name === RESOLVER && f.conflicts !== false)
+        errors.push(`${at}: "${RESOLVER}" is the conflict resolver's name`);
       if (s.onFail !== undefined && !["fix", "hold", "ask-human", "notify-author"].includes(s.onFail))
         errors.push(`${at}: onFail is "fix", "hold", "ask-human" or "notify-author"`);
       names.add(s.name);
@@ -791,6 +801,7 @@ var STAGE = {
   agent: "agent at work",
   "awaiting-fix": "waiting for CI after fixes",
   fixing: "fixer at work",
+  resolving: "resolving conflicts with its base",
   asking: "asking you",
   held: "waits for you",
   done: "done"
@@ -843,7 +854,7 @@ async function prDetail(url) {
     "view",
     url,
     "--json",
-    "state,isDraft,reviewDecision,statusCheckRollup,headRefOid,additions,deletions,files,changedFiles,mergeCommit"
+    "state,isDraft,reviewDecision,statusCheckRollup,headRefOid,additions,deletions,files,changedFiles,mergeCommit,baseRefName,mergeable,mergeStateStatus"
   ]);
   if (!r.ok)
     return;
@@ -860,7 +871,10 @@ async function prDetail(url) {
     lines: (j.additions ?? 0) + (j.deletions ?? 0),
     files,
     allFiles: files.length >= (j.changedFiles ?? 0),
-    mergeSha: j.mergeCommit?.oid
+    mergeSha: j.mergeCommit?.oid,
+    base: j.baseRefName,
+    mergeable: j.mergeable,
+    mergeState: j.mergeStateStatus
   };
 }
 async function mergePr(url, head, method) {
@@ -983,16 +997,26 @@ async function loadFactory(root) {
 }
 
 // src/extensions/factory/pipeline.ts
+function mergeability(d) {
+  if (d.mergeable === "CONFLICTING" || d.mergeState === "DIRTY")
+    return "conflict";
+  if (d.mergeable === "UNKNOWN" || d.mergeState === "UNKNOWN")
+    return "unknown";
+  return "clean";
+}
 var GRACE_MS = 3 * 60000;
 var PUSH_WAIT_MS = 30 * 60000;
 var isActive = (r) => r.stage !== "held" && r.stage !== "done";
 var YES = /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approved?|lgtm|\uD83D\uDC4D[\u{1F3FB}-\u{1F3FF}]?|\u2705|:\+1:|:thumbsup:|:white_check_mark:)[\s.!]*$/iu;
+var conflictsWith = (base) => `it conflicts with ${base ? `\`${base}\`` : "its base"}`;
 function gateBlockers(d, gate) {
   const why = [];
   if (d.draft)
     why.push("it's a draft");
   if (d.review === "CHANGES_REQUESTED")
     why.push("changes were requested");
+  if (mergeability(d) === "conflict")
+    why.push(conflictsWith(d.base));
   if (gate.ci !== false && d.ci === "fail")
     why.push("CI fails");
   if (gate.ci !== false && d.ci === "pending")
@@ -1006,6 +1030,7 @@ function gateBlockers(d, gate) {
     why.push(`touches protected ${hit}`);
   return why;
 }
+var resync = (run) => `If the push is rejected because the branch moved, never force it: \`git fetch origin ${run.branch}\`, replay your own commits onto it (\`git rebase --onto origin/${run.branch} <the head you checked out> HEAD\`), run the checks again on the result, and push again.`;
 function agentPrompt(run, step, f) {
   const n = run.number;
   const env = step.env ? f.environments?.[step.env] : undefined;
@@ -1019,7 +1044,7 @@ function agentPrompt(run, step, f) {
     ...step.env ? [
       `It is deployed to ${step.env}${env?.url ? ` (${env.url})` : ""}${run.mergeSha ? ` as ${run.mergeSha}` : ""}: check it there.`
     ] : [],
-    afterMerge ? `Read the change with \`gh pr view ${n}\` and \`gh pr diff ${n}\`. Don't write code, push or open PRs.` : `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). If you fix something, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`.`,
+    afterMerge ? `Read the change with \`gh pr view ${n}\` and \`gh pr diff ${n}\`. Don't write code, push or open PRs.` : `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). If you fix something, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. ${resync(run)}`,
     "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
     "",
     "As the very last step, report your verdict with exactly one of:",
@@ -1051,13 +1076,45 @@ function fixPrompt(run, step, f) {
     "",
     `You are the fixer in Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}, fix ${run.fixes} of at most ${maxFixes(f)}. You didn't write this change. What failed: ${run.reason}.`,
     ...run.about ? [`What it is for: ${run.about}`] : [],
-    `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). Fix the cause, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. Once you push, the pipeline runs again from its first step.`,
+    `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). Fix the cause, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. ${resync(run)} Once you push, the pipeline runs again from its first step.`,
     "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
     "",
     "As the very last step, report with exactly one of:",
     report("fixed", "what was wrong and what you changed"),
     report("pass", "why nothing needed changing, e.g. a flaky check you re-ran"),
     report("fail", "the call a person has to make, or why you couldn't fix it")
+  ].join(`
+`);
+}
+var conflictsOf = (f) => f.conflicts || {};
+var maxResolves = (f) => conflictsOf(f).maxRounds ?? 3;
+var resolverStep = (f) => {
+  const c = conflictsOf(f);
+  return {
+    kind: "agent",
+    name: RESOLVER,
+    skill: c.skill ?? "/remy:resolve",
+    instructions: c.instructions,
+    timeoutMinutes: c.timeoutMinutes
+  };
+};
+function resolvePrompt(run, step, f) {
+  const n = run.number;
+  const base = run.base ?? "its base branch";
+  const report = (verdict, summary) => `  remy report ${RESOLVER} ${verdict} --pr ${run.pr} --summary "<one line: ${summary}>"`;
+  return [
+    `${step.skill}${step.instructions ? ` ${step.instructions}` : ""}`,
+    "",
+    `You are the conflict resolver in Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}, resolution ${run.resolves} of at most ${maxResolves(f)}. It conflicts with its base \`${base}\`, so it can't merge. You didn't write this change.`,
+    ...run.about ? [`What it is for: ${run.about}`] : [],
+    `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree), then \`git fetch origin ${base}\`.`,
+    conflictsOf(f).strategy === "rebase" ? `Rebase it onto \`origin/${base}\`, resolving each conflict by intent, run every check, then \`git push --force-with-lease=${run.branch}:${run.head} origin HEAD:${run.branch}\`: the lease refuses the push if anyone pushed after ${run.head.slice(0, 7)}. If it does, start over from the new head; never push with plain --force.` : `Merge \`origin/${base}\` into it, resolving each conflict by intent, run every check, then \`git push origin HEAD:${run.branch}\`. Don't rebase or force-push. ${resync(run)}`,
+    "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
+    "",
+    "As the very last step, report with exactly one of:",
+    report("fixed", "how you resolved the conflicts"),
+    report("pass", "why nothing needed changing, e.g. it no longer conflicts"),
+    report("fail", "the question a person has to answer, e.g. which of two behaviors the product wants")
   ].join(`
 `);
 }
@@ -1070,6 +1127,7 @@ var hold = (run, now, reason) => {
 };
 var approval = (run) => `${run.step}@${run.head}`;
 function next(run, now, to = run.step + 1) {
+  letGo(run);
   Object.assign(run, {
     step: to,
     round: 1,
@@ -1077,7 +1135,6 @@ function next(run, now, to = run.step + 1) {
     since: now,
     stepSince: now,
     reason: undefined,
-    agent: undefined,
     ask: undefined
   });
   return true;
@@ -1101,13 +1158,35 @@ ${run.pr}`).catch(() => {});
     return hold(run, now, `${cause} (after ${most} fixes)`);
   }
   run.fixes = round;
-  run.agent = undefined;
+  letGo(run);
   enter(run, "fixing", now, cause);
   await env.notify(run, `\uD83D\uDEE0\uFE0F ${on}; a fixer is on it (${round} of ${most})
 ${run.pr}`).catch(() => {});
   return true;
 }
 var ciFails = (run, f, env, d, what = "CI fails") => fixable(run, f) ? fix(run, f, env, what, d.failing.join(", ") || undefined) : hold(run, env.now(), what);
+var resolvable = (run, f) => f.conflicts !== false && !run.mergeSha;
+function conflicted(run, f, env, d) {
+  run.base = d.base ?? run.base;
+  if (mergeability(d) !== "conflict" || !resolvable(run, f))
+    return;
+  enter(run, "resolving", env.now(), `conflicts with ${run.base ? `\`${run.base}\`` : "its base"}`);
+  return Promise.resolve(true);
+}
+function letGo(run) {
+  if (run.agent)
+    run.earlier = [...run.earlier ?? [], { name: run.agent.name, id: run.agent.id }];
+  run.agent = undefined;
+}
+async function start(run, env, step, prompt) {
+  const agent = await env.spawn(run, step, prompt);
+  run.agent = { ...agent, startedAt: env.now() };
+}
+async function stillWorking(run, env) {
+  const seen = await Promise.all((run.earlier ?? []).map(async (a) => ({ a, status: await env.agentStatus(a) })));
+  run.earlier = seen.filter((x) => x.status !== undefined).map((x) => x.a);
+  return seen.filter((x) => x.status === "busy" || x.status === "waiting").map((x) => x.a.name);
+}
 var lastPass = (run, name) => run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
 async function advance(run, f, autonomy, env) {
   for (let i = 0;i < 50 && await stepOnce(run, f, autonomy, env); i++)
@@ -1122,6 +1201,7 @@ async function stepOnce(run, f, autonomy, env) {
     if (retry && retry.at > run.since) {
       run.urgent = false;
       run.fixes = 0;
+      run.resolves = 0;
       return next(run, now, run.step);
     }
     return mergedByHand(run, f, env);
@@ -1149,6 +1229,8 @@ async function stepOnce(run, f, autonomy, env) {
   }
   if (run.stage === "fixing")
     return fixing(run, f, env);
+  if (run.stage === "resolving")
+    return resolving(run, f, env);
   const step = f.steps[run.step];
   if (!step) {
     enter(run, "done", now, "through the pipeline");
@@ -1160,9 +1242,13 @@ async function stepOnce(run, f, autonomy, env) {
       return false;
     if (d.state !== "OPEN")
       return closed(run, d, f, env);
-    const by = run.reports.at(-1)?.step === FIXER ? "the fixer" : run.reports.at(-1)?.step ?? "an agent";
+    const last = run.reports.at(-1)?.step;
+    const by = last === FIXER ? "the fixer" : last === RESOLVER ? "the resolver" : last ?? "an agent";
     if (d.head === run.head)
       return now - run.since > PUSH_WAIT_MS ? hold(run, now, `${by} said it pushed fixes, but the PR didn't change`) : false;
+    const c = conflicted(run, f, env, d);
+    if (c)
+      return c;
     if (d.ci === "pending")
       return false;
     run.head = d.head;
@@ -1228,8 +1314,10 @@ async function fixing(run, f, env) {
     if (d.state !== "OPEN")
       return closed(run, d, f, env);
     run.head = d.head;
-    const agent = await env.spawn(run, step, fixPrompt(run, step, f));
-    run.agent = { ...agent, startedAt: env.now() };
+    const c = conflicted(run, f, env, d);
+    if (c)
+      return c;
+    await start(run, env, step, fixPrompt(run, step, f));
     return false;
   }
   const report = await reportOf(run, step, env);
@@ -1244,6 +1332,68 @@ async function fixing(run, f, env) {
     enter(run, "awaiting-fix", now);
   return report.verdict === "pass";
 }
+async function resolving(run, f, env) {
+  const step = resolverStep(f);
+  const now = env.now();
+  if (!run.agent) {
+    const d = await env.pr(run.pr);
+    if (!d)
+      return false;
+    if (d.state !== "OPEN")
+      return closed(run, d, f, env);
+    run.head = d.head;
+    run.base = d.base ?? run.base;
+    const m = mergeability(d);
+    if (m === "unknown")
+      return false;
+    if (m === "clean") {
+      enter(run, "running", now);
+      return true;
+    }
+    const below = env.runs().find((r) => r !== run && r.repo === run.repo && !!run.base && r.branch === run.base && isActive(r));
+    if (below) {
+      const b = below.stage === "resolving" ? undefined : await env.pr(below.pr);
+      if (!b || b.state === "OPEN" && mergeability(b) !== "clean") {
+        run.reason = `conflicts with \`${run.base}\`; waits for #${below.number} below it to be brought up to date first`;
+        return false;
+      }
+    }
+    const busy = await stillWorking(run, env);
+    if (busy.length) {
+      run.reason = `conflicts with \`${run.base}\`; waits for ${busy.join(", ")} to stop working on it`;
+      return false;
+    }
+    if (!env.canStartAgent())
+      return false;
+    const most = maxResolves(f);
+    const round = (run.resolves ?? 0) + 1;
+    const on = `*#${run.number} ${defang(run.title)}* conflicts with \`${run.base ?? "its base"}\``;
+    if (round > most) {
+      await env.notify(run, `\uD83D\uDED1 ${on}; the factory holds it after ${most} resolutions
+${run.pr}`).catch(() => {});
+      return hold(run, now, `conflicts with \`${run.base ?? "its base"}\` (after ${most} resolutions)`);
+    }
+    run.resolves = round;
+    run.reason = `conflicts with \`${run.base ?? "its base"}\``;
+    await start(run, env, step, resolvePrompt(run, step, f));
+    await env.notify(run, `\uD83D\uDD00 ${on}; a resolver brings it up to date (${round} of ${most})
+${run.pr}`).catch(() => {});
+    return false;
+  }
+  const report = await reportOf(run, step, env);
+  if (!report)
+    return false;
+  await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
+  if (report.verdict === "fail")
+    return hold(run, now, `conflicts with \`${run.base ?? "its base"}\` need your call: ${report.summary ?? ""}`);
+  if (report.verdict === "pass") {
+    enter(run, "running", now);
+    return true;
+  }
+  next(run, now, 0);
+  enter(run, "awaiting-fix", now);
+  return false;
+}
 async function agentStep(run, step, f, env) {
   const now = env.now();
   if (!run.agent) {
@@ -1256,9 +1406,11 @@ async function agentStep(run, step, f, env) {
       if (d.state !== "OPEN")
         return closed(run, d, f, env);
       run.head = d.head;
+      const c = conflicted(run, f, env, d);
+      if (c)
+        return c;
     }
-    const agent = await env.spawn(run, step, agentPrompt(run, step, f));
-    run.agent = { ...agent, startedAt: env.now() };
+    await start(run, env, step, agentPrompt(run, step, f));
     enter(run, "agent", env.now());
     return false;
   }
@@ -1303,6 +1455,9 @@ async function waitStep(run, step, f, env) {
       return false;
     if (d.state === "CLOSED")
       return closed(run, d, f, env);
+    const c = d.state === "OPEN" ? conflicted(run, f, env, d) : undefined;
+    if (c)
+      return c;
     if (d.ci === "pass" || d.ci === "none")
       return next(run, now);
     if (d.ci === "fail")
@@ -1333,6 +1488,9 @@ async function gateStep(run, step, f, env) {
     return next(run, now);
   if (d.state !== "OPEN")
     return closed(run, d, f, env);
+  const c = conflicted(run, f, env, d);
+  if (c)
+    return c;
   const names = step.verdicts ?? f.steps.slice(0, run.step).flatMap((s) => s.kind === "agent" ? [s.name] : []);
   const stale = names.find((n) => lastPass(run, n)?.head !== d.head);
   if (stale) {
@@ -1341,6 +1499,10 @@ async function gateStep(run, step, f, env) {
     next(run, now, back);
     run.reason = `new commits since ${stale} checked it`;
     return true;
+  }
+  if (mergeability(d) === "unknown") {
+    run.reason = "waits for GitHub to work out whether it merges cleanly";
+    return false;
   }
   if (d.ci === "pending" && step.ci !== false)
     return false;
@@ -1385,6 +1547,14 @@ async function actionStep(run, step, f, env) {
     run.head = d.head;
     return next(run, now, first < 0 ? run.step : first);
   }
+  const c = conflicted(run, f, env, d);
+  if (c)
+    return c;
+  const m = mergeability(d);
+  if (m === "conflict")
+    return hold(run, now, `merge: ${conflictsWith(d.base)}`);
+  if (m === "unknown")
+    return false;
   const r = await env.merge(run.pr, run.head, step.method ?? "squash");
   if (!r.ok)
     return hold(run, now, `merge failed: ${r.out.split(`
@@ -1465,7 +1635,7 @@ var createFactory = (world = {}) => (remy) => {
     merge: mergePr,
     deployed: (sha, e, run) => deployed(sha, e, run.repoDir),
     deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
-    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing") && r.agent).length < (remy.config.maxFactoryAgents ?? 5),
+    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing" || r.stage === "resolving") && r.agent).length < (remy.config.maxFactoryAgents ?? 5),
     spawn: async (run, step, prompt) => {
       try {
         const r = await remy.spawn({
@@ -1488,6 +1658,7 @@ var createFactory = (world = {}) => (remy) => {
     reports: readReports,
     ask,
     notify: async (run, text) => void await remy.post(text, { workspace: run.workspace, session: run.session }),
+    runs: () => Object.values(runs),
     ...world
   };
   function syncWaitingList(run) {
@@ -1536,7 +1707,11 @@ var createFactory = (world = {}) => (remy) => {
           since: now,
           stepSince: now,
           reports: [],
-          approved: []
+          approved: [],
+          earlier: had && [
+            ...had.earlier ?? [],
+            ...had.agent ? [{ name: had.agent.name, id: had.agent.id }] : []
+          ]
         };
         remy.log("factory run started", pr.url);
       }
@@ -4968,6 +5143,13 @@ import { join as join11 } from "path";
 var disabledNote = (what) => loadConfig().extensions?.disabled?.includes("factory") ? import_picocolors.default.yellow(`! The factory is disabled (extensions.disabled in ${PATHS.config}), so ${what}.`) : undefined;
 var say = (...lines) => console.log(lines.filter(Boolean).join(`
 `));
+function conflictsLine(f) {
+  const c = f.conflicts;
+  if (c === false)
+    return "conflicts with the base: held for you";
+  const how = c?.strategy === "rebase" ? "rebased onto the base, pushed with --force-with-lease" : "the base merged in";
+  return `conflicts with the base: ${how}, by ${c?.skill ?? "/remy:resolve"}`;
+}
 async function factory(args) {
   const { values, positionals } = parse(args, { json: { type: "boolean" } });
   const runs = readJson(PATHS.factory, {}).runs ?? {};
@@ -4983,7 +5165,7 @@ async function factory(args) {
     const trusted = trustedRepos(c).some((r) => r.root === root);
     say(f.steps.map((s, i) => `${i + 1}. ${s.kind} ${s.name}${"env" in s && s.env ? ` (${s.env})` : ""}`).join(`
 `), `
-autonomy: ${lowerLevel(f.autonomy ?? "notify", c.autonomy)} (repo ${f.autonomy ?? "notify"}, yours ${c.autonomy})`, trusted ? undefined : import_picocolors.default.yellow("! not in extensions.repos, so the factory doesn't run here"), disabledNote("it doesn't run anywhere"));
+autonomy: ${lowerLevel(f.autonomy ?? "notify", c.autonomy)} (repo ${f.autonomy ?? "notify"}, yours ${c.autonomy})`, conflictsLine(f), trusted ? undefined : import_picocolors.default.yellow("! not in extensions.repos, so the factory doesn't run here"), disabledNote("it doesn't run anywhere"));
     return;
   }
   if (positionals[0] === "retry") {
@@ -5298,7 +5480,7 @@ async function doctor() {
 }
 
 // src/cli/commands/start.ts
-async function start(extra) {
+async function start2(extra) {
   const { rows } = await doctor();
   const c = loadConfig();
   const problems = blocking(rows);
@@ -7559,7 +7741,7 @@ var COMMANDS = {
   trace,
   post,
   setup: async (args) => setup(parse(args, {}).positionals[0]),
-  start,
+  start: start2,
   daemon,
   doctor: async () => {
     const { ok, rows } = await doctor();

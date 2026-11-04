@@ -43,7 +43,7 @@ Then run every check the repo has, not only the one that failed. All of them pas
 
 ## 5. Push and record
 
-Commit with a message naming what failed and why, then `git push origin HEAD:<branch>`. If the push is rejected, don't force or rebase: report `fail`, saying the PR moved while you fixed it.
+Commit with a message naming what failed and why, then `git push origin HEAD:<branch>`. If the push is rejected because the branch moved while you worked, re-sync and push again as [pushing to a branch that moved](../review/references/push.md) says. Never force the push.
 
 Post a short record on the PR with `gh pr comment <n> --body-file <file>`:
 

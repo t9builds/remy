@@ -104,8 +104,9 @@ export const createFactory =
       deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
       canStartAgent: () =>
         Date.now() >= backoffUntil &&
-        Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing") && r.agent).length <
-          (remy.config.maxFactoryAgents ?? 5),
+        Object.values(runs).filter(
+          (r) => (r.stage === "agent" || r.stage === "fixing" || r.stage === "resolving") && r.agent,
+        ).length < (remy.config.maxFactoryAgents ?? 5),
       spawn: async (run, step, prompt) => {
         try {
           const r = await remy.spawn({
@@ -130,6 +131,7 @@ export const createFactory =
       reports: readReports,
       ask,
       notify: async (run, text) => void (await remy.post(text, { workspace: run.workspace, session: run.session })),
+      runs: () => Object.values(runs),
       ...world,
     };
 
@@ -179,6 +181,11 @@ export const createFactory =
             stepSince: now,
             reports: [],
             approved: [],
+            // Agents of the run before it may still work on the PR: a resolver waits for them.
+            earlier: had && [
+              ...(had.earlier ?? []),
+              ...(had.agent ? [{ name: had.agent.name, id: had.agent.id }] : []),
+            ],
           };
           remy.log("factory run started", pr.url);
         }

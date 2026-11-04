@@ -4,7 +4,8 @@
  * with `remy report`, which code reads; no verdict is read from an agent's text. Holds are judgment calls for a
  * person (ADR-0005). What a run may do on its own is capped by its autonomy level (ADR-0006); a step above it is
  * asked for, and the user's yes is the consent. Red CI and failed steps before the merge go to a fixer, and the
- * pipeline runs again from its first step on the fix (ADR-0010).
+ * pipeline runs again from its first step on the fix (ADR-0010). A PR that conflicts with its base goes to a resolver
+ * first, lowest in a stack first, and only once no other factory agent works on it (ADR-0012).
  *
  * Pure apart from `env`, so every path is tested with a fake world (pipeline.test.ts).
  */
@@ -13,6 +14,7 @@ import type { Ci } from "../../sdk/extension";
 import {
   type AgentStep,
   atLeast,
+  type Conflicts,
   type Environment,
   type Factory,
   FIXER,
@@ -20,6 +22,7 @@ import {
   type GateStep,
   type Level,
   levelOf,
+  RESOLVER,
   type Step,
 } from "../../sdk/factory";
 import { defang } from "../../shared/notices";
@@ -44,6 +47,7 @@ type Stage =
   | "agent" // an agent is on the current step
   | "awaiting-fix" // an agent pushed fixes; a fresh one takes the step once CI is green on the new head
   | "fixing" // the fixer is on red CI or a failed step; `reason` says which
+  | "resolving" // the PR conflicts with its base; a resolver brings it up to date once nothing else works on it
   | "asking" // waits for the user's answer to `ask`
   | "held" // waits for the user; `reason` says why
   | "done";
@@ -56,6 +60,8 @@ export type Run = {
   /** The main checkout, where step agents get their worktrees. */
   repoDir: string;
   branch: string;
+  /** The branch the PR merges into, as last seen: the trunk, or the branch of the PR below it in a stack. */
+  base?: string;
   /** The author's session, and the workspace it reports to. */
   session: string;
   workspace: string;
@@ -69,6 +75,8 @@ export type Run = {
   since: number;
   stepSince: number;
   agent?: { name: string; id?: string; startedAt: number };
+  /** Agents the run started before its current one, which may still work on the PR (one that timed out, say). */
+  earlier?: { name: string; id?: string }[];
   reports: Report[];
   ask?: { purpose: "approve" | "continue" | "fix"; question: string; answer?: string };
   /** Steps above the autonomy level the user said yes to, each for the head it was asked about (`step@head`). */
@@ -78,6 +86,8 @@ export type Run = {
   urgent?: boolean;
   /** Fixer rounds this run has used, out of the fixer's `maxRounds`. */
   fixes?: number;
+  /** Conflict resolutions this run has used, out of the resolver's `maxRounds`. */
+  resolves?: number;
   mergeSha?: string;
   mergeRequestedAt?: number;
 };
@@ -96,7 +106,23 @@ export type PrDetail = {
   /** False when GitHub listed only some of the changed files. */
   allFiles: boolean;
   mergeSha?: string;
+  /** The branch it merges into: the trunk, or the branch of the PR below it in a stack. */
+  base?: string;
+  /** GitHub's `mergeable`: MERGEABLE, CONFLICTING, or UNKNOWN while GitHub still works it out. */
+  mergeable?: string;
+  /** GitHub's `mergeStateStatus`, e.g. CLEAN, BLOCKED, BEHIND, DIRTY (it conflicts) or UNKNOWN. */
+  mergeState?: string;
 };
+
+/**
+ * Whether a PR merges cleanly into its base. GitHub works it out lazily, after a push to the PR or its base, so it is
+ * "unknown" for a moment: nothing that needs it known (the gate, the merge) goes on until it is.
+ */
+export function mergeability(d: PrDetail): "clean" | "conflict" | "unknown" {
+  if (d.mergeable === "CONFLICTING" || d.mergeState === "DIRTY") return "conflict";
+  if (d.mergeable === "UNKNOWN" || d.mergeState === "UNKNOWN") return "unknown";
+  return "clean";
+}
 
 export type Build = { status: "none" | "running" | "success" | "failed" | "error"; id?: string; detail?: string };
 
@@ -117,6 +143,8 @@ export type Env = {
   /** Ask the user; the answer lands in `run.ask.answer` and the run moves on at the next tick. */
   ask(run: Run, question: string): void;
   notify(run: Run, text: string): Promise<void>;
+  /** Every run the factory has: a stacked PR finds the run of the PR below it among them. */
+  runs(): Run[];
 };
 
 /** An agent that just started, or just stopped, gets this long before it counts as stopped without a report. */
@@ -129,11 +157,14 @@ export const isActive = (r: Run) => r.stage !== "held" && r.stage !== "done";
 export const YES =
   /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approved?|lgtm|👍[\u{1F3FB}-\u{1F3FF}]?|✅|:\+1:|:thumbsup:|:white_check_mark:)[\s.!]*$/iu;
 
+const conflictsWith = (base?: string) => `it conflicts with ${base ? `\`${base}\`` : "its base"}`;
+
 /** Why Remy won't let a change through a gate, if anything stops it. */
 export function gateBlockers(d: PrDetail, gate: Pick<GateStep, "maxLines" | "protect" | "ci">): string[] {
   const why: string[] = [];
   if (d.draft) why.push("it's a draft");
   if (d.review === "CHANGES_REQUESTED") why.push("changes were requested");
+  if (mergeability(d) === "conflict") why.push(conflictsWith(d.base));
   if (gate.ci !== false && d.ci === "fail") why.push("CI fails");
   if (gate.ci !== false && d.ci === "pending") why.push("CI is still running");
   if (gate.maxLines !== undefined && d.lines > gate.maxLines)
@@ -143,6 +174,10 @@ export function gateBlockers(d: PrDetail, gate: Pick<GateStep, "maxLines" | "pro
   if (hit) why.push(`touches protected ${hit}`);
   return why;
 }
+
+/** What an agent does when its push is rejected because someone else moved the branch (ADR-0012). */
+const resync = (run: Run) =>
+  `If the push is rejected because the branch moved, never force it: \`git fetch origin ${run.branch}\`, replay your own commits onto it (\`git rebase --onto origin/${run.branch} <the head you checked out> HEAD\`), run the checks again on the result, and push again.`;
 
 function agentPrompt(run: Run, step: AgentStep, f: Factory) {
   const n = run.number;
@@ -161,7 +196,7 @@ function agentPrompt(run: Run, step: AgentStep, f: Factory) {
       : []),
     afterMerge
       ? `Read the change with \`gh pr view ${n}\` and \`gh pr diff ${n}\`. Don't write code, push or open PRs.`
-      : `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). If you fix something, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`.`,
+      : `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). If you fix something, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. ${resync(run)}`,
     "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
     "",
     "As the very last step, report your verdict with exactly one of:",
@@ -200,13 +235,52 @@ function fixPrompt(run: Run, step: AgentStep, f: Factory) {
     "",
     `You are the fixer in Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}, fix ${run.fixes} of at most ${maxFixes(f)}. You didn't write this change. What failed: ${run.reason}.`,
     ...(run.about ? [`What it is for: ${run.about}`] : []),
-    `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). Fix the cause, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. Once you push, the pipeline runs again from its first step.`,
+    `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). Fix the cause, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. ${resync(run)} Once you push, the pipeline runs again from its first step.`,
     "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
     "",
     "As the very last step, report with exactly one of:",
     report("fixed", "what was wrong and what you changed"),
     report("pass", "why nothing needed changing, e.g. a flaky check you re-ran"),
     report("fail", "the call a person has to make, or why you couldn't fix it"),
+  ].join("\n");
+}
+
+/** The conflict resolver's settings; with `conflicts: false` it never runs (`resolvable`). */
+const conflictsOf = (f: Factory): Conflicts => f.conflicts || {};
+const maxResolves = (f: Factory) => conflictsOf(f).maxRounds ?? 3;
+
+/** The resolver's agent step: what it runs and the name it reports as. */
+const resolverStep = (f: Factory): AgentStep => {
+  const c = conflictsOf(f);
+  return {
+    kind: "agent",
+    name: RESOLVER,
+    skill: c.skill ?? "/remy:resolve",
+    instructions: c.instructions,
+    timeoutMinutes: c.timeoutMinutes,
+  };
+};
+
+function resolvePrompt(run: Run, step: AgentStep, f: Factory) {
+  const n = run.number;
+  const base = run.base ?? "its base branch";
+  const report = (verdict: string, summary: string) =>
+    `  remy report ${RESOLVER} ${verdict} --pr ${run.pr} --summary "<one line: ${summary}>"`;
+  return [
+    `${step.skill}${step.instructions ? ` ${step.instructions}` : ""}`,
+    "",
+    `You are the conflict resolver in Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}, resolution ${run.resolves} of at most ${maxResolves(f)}. It conflicts with its base \`${base}\`, so it can't merge. You didn't write this change.`,
+    ...(run.about ? [`What it is for: ${run.about}`] : []),
+    `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree), then \`git fetch origin ${base}\`.`,
+    conflictsOf(f).strategy === "rebase"
+      ? `Rebase it onto \`origin/${base}\`, resolving each conflict by intent, run every check, then \`git push --force-with-lease=${run.branch}:${run.head} origin HEAD:${run.branch}\`: the lease refuses the push if anyone pushed after ${run.head.slice(0, 7)}. If it does, start over from the new head; never push with plain --force.`
+      : `Merge \`origin/${base}\` into it, resolving each conflict by intent, run every check, then \`git push origin HEAD:${run.branch}\`. Don't rebase or force-push. ${resync(run)}`,
+    "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
+    "",
+    "As the very last step, report with exactly one of:",
+    report("fixed", "how you resolved the conflicts"),
+    report("pass", "why nothing needed changing, e.g. it no longer conflicts"),
+    report("fail", "the question a person has to answer, e.g. which of two behaviors the product wants"),
   ].join("\n");
 }
 
@@ -223,6 +297,7 @@ const hold = (run: Run, now: number, reason: string) => {
 const approval = (run: Run) => `${run.step}@${run.head}`;
 
 function next(run: Run, now: number, to = run.step + 1) {
+  letGo(run);
   Object.assign(run, {
     step: to,
     round: 1,
@@ -230,7 +305,6 @@ function next(run: Run, now: number, to = run.step + 1) {
     since: now,
     stepSince: now,
     reason: undefined,
-    agent: undefined,
     ask: undefined,
   });
   return true;
@@ -258,7 +332,7 @@ async function fix(run: Run, f: Factory, env: Env, what: string, detail?: string
     return hold(run, now, `${cause} (after ${most} fixes)`);
   }
   run.fixes = round;
-  run.agent = undefined;
+  letGo(run);
   enter(run, "fixing", now, cause);
   await env.notify(run, `🛠️ ${on}; a fixer is on it (${round} of ${most})\n${run.pr}`).catch(() => {});
   return true;
@@ -267,6 +341,40 @@ async function fix(run: Run, f: Factory, env: Env, what: string, detail?: string
 /** Red CI before the merge goes to the fixer; with the fixer off, or nowhere to push, it holds. */
 const ciFails = (run: Run, f: Factory, env: Env, d: PrDetail, what = "CI fails") =>
   fixable(run, f) ? fix(run, f, env, what, d.failing.join(", ") || undefined) : hold(run, env.now(), what);
+
+/** Whether the resolver may take a conflict: it's on, and there is still a PR branch to bring up to date. */
+const resolvable = (run: Run, f: Factory) => f.conflicts !== false && !run.mergeSha;
+
+/**
+ * A PR that conflicts with its base goes to the resolver before anything else runs on it (ADR-0012): CI doesn't run on
+ * a conflicting PR, and a review would check code about to change. Called with a fresh look at the open PR, while the
+ * run has no agent at work. Undefined when the run goes on as it was: no conflict, or resolving is off (the gate holds
+ * it then).
+ */
+function conflicted(run: Run, f: Factory, env: Env, d: PrDetail): Promise<boolean> | undefined {
+  run.base = d.base ?? run.base;
+  if (mergeability(d) !== "conflict" || !resolvable(run, f)) return undefined;
+  enter(run, "resolving", env.now(), `conflicts with ${run.base ? `\`${run.base}\`` : "its base"}`);
+  return Promise.resolve(true);
+}
+
+/** The run moves on without its agent, which may still be at work (one that timed out, say): keep it in `earlier`. */
+function letGo(run: Run) {
+  if (run.agent) run.earlier = [...(run.earlier ?? []), { name: run.agent.name, id: run.agent.id }];
+  run.agent = undefined;
+}
+
+async function start(run: Run, env: Env, step: AgentStep, prompt: string) {
+  const agent = await env.spawn(run, step, prompt);
+  run.agent = { ...agent, startedAt: env.now() };
+}
+
+/** The run's earlier agents that still work on the PR: busy or waiting. Ones that are gone are forgotten. */
+async function stillWorking(run: Run, env: Env) {
+  const seen = await Promise.all((run.earlier ?? []).map(async (a) => ({ a, status: await env.agentStatus(a) })));
+  run.earlier = seen.filter((x) => x.status !== undefined).map((x) => x.a);
+  return seen.filter((x) => x.status === "busy" || x.status === "waiting").map((x) => x.a.name);
+}
 
 /** The newest pass or fix each agent step reported in this run. */
 const lastPass = (run: Run, name: string) =>
@@ -287,6 +395,7 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
     if (retry && retry.at > run.since) {
       run.urgent = false;
       run.fixes = 0;
+      run.resolves = 0;
       return next(run, now, run.step);
     }
     return mergedByHand(run, f, env);
@@ -312,6 +421,7 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
   }
 
   if (run.stage === "fixing") return fixing(run, f, env);
+  if (run.stage === "resolving") return resolving(run, f, env);
 
   const step = f.steps[run.step];
   if (!step) {
@@ -322,11 +432,15 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
     const d = await env.pr(run.pr);
     if (!d) return false;
     if (d.state !== "OPEN") return closed(run, d, f, env);
-    const by = run.reports.at(-1)?.step === FIXER ? "the fixer" : (run.reports.at(-1)?.step ?? "an agent");
+    const last = run.reports.at(-1)?.step;
+    const by = last === FIXER ? "the fixer" : last === RESOLVER ? "the resolver" : (last ?? "an agent");
     if (d.head === run.head)
       return now - run.since > PUSH_WAIT_MS
         ? hold(run, now, `${by} said it pushed fixes, but the PR didn't change`)
         : false;
+    // A fix to the PR below it in a stack, or to the trunk, can make the new head conflict; CI won't run until it's resolved.
+    const c = conflicted(run, f, env, d);
+    if (c) return c;
     if (d.ci === "pending") return false;
     run.head = d.head;
     if (d.ci === "fail") return ciFails(run, f, env, d, `CI fails after ${by}'s fixes`);
@@ -410,8 +524,10 @@ async function fixing(run: Run, f: Factory, env: Env): Promise<boolean> {
     if (!d) return false;
     if (d.state !== "OPEN") return closed(run, d, f, env);
     run.head = d.head;
-    const agent = await env.spawn(run, step, fixPrompt(run, step, f));
-    run.agent = { ...agent, startedAt: env.now() };
+    // Red CI on a PR that conflicts may only be the conflict: resolve it first, then the pipeline runs again.
+    const c = conflicted(run, f, env, d);
+    if (c) return c;
+    await start(run, env, step, fixPrompt(run, step, f));
     return false;
   }
   const report = await reportOf(run, step, env);
@@ -425,6 +541,71 @@ async function fixing(run: Run, f: Factory, env: Env): Promise<boolean> {
   return report.verdict === "pass";
 }
 
+/**
+ * The resolver at work (ADR-0012). It starts only when the PR still conflicts, the PR below it in a stack doesn't
+ * (lowest first: bringing that one up to date changes this one's base), and none of the run's earlier agents still
+ * works on the PR, so nothing pushes to the branch while it is rewritten. A resolution sends the run back to the first
+ * step, on the new head, as a fix does.
+ */
+async function resolving(run: Run, f: Factory, env: Env): Promise<boolean> {
+  const step = resolverStep(f);
+  const now = env.now();
+  if (!run.agent) {
+    const d = await env.pr(run.pr);
+    if (!d) return false;
+    if (d.state !== "OPEN") return closed(run, d, f, env);
+    run.head = d.head;
+    run.base = d.base ?? run.base;
+    const m = mergeability(d);
+    if (m === "unknown") return false;
+    // Someone brought it up to date meanwhile: carry on with the step it was on.
+    if (m === "clean") {
+      enter(run, "running", now);
+      return true;
+    }
+    const below = env
+      .runs()
+      .find((r) => r !== run && r.repo === run.repo && !!run.base && r.branch === run.base && isActive(r));
+    if (below) {
+      const b = below.stage === "resolving" ? undefined : await env.pr(below.pr);
+      if (!b || (b.state === "OPEN" && mergeability(b) !== "clean")) {
+        run.reason = `conflicts with \`${run.base}\`; waits for #${below.number} below it to be brought up to date first`;
+        return false;
+      }
+    }
+    const busy = await stillWorking(run, env);
+    if (busy.length) {
+      run.reason = `conflicts with \`${run.base}\`; waits for ${busy.join(", ")} to stop working on it`;
+      return false;
+    }
+    if (!env.canStartAgent()) return false;
+    const most = maxResolves(f);
+    const round = (run.resolves ?? 0) + 1;
+    const on = `*#${run.number} ${defang(run.title)}* conflicts with \`${run.base ?? "its base"}\``;
+    if (round > most) {
+      await env.notify(run, `🛑 ${on}; the factory holds it after ${most} resolutions\n${run.pr}`).catch(() => {});
+      return hold(run, now, `conflicts with \`${run.base ?? "its base"}\` (after ${most} resolutions)`);
+    }
+    run.resolves = round;
+    run.reason = `conflicts with \`${run.base ?? "its base"}\``;
+    await start(run, env, step, resolvePrompt(run, step, f));
+    await env.notify(run, `🔀 ${on}; a resolver brings it up to date (${round} of ${most})\n${run.pr}`).catch(() => {});
+    return false;
+  }
+  const report = await reportOf(run, step, env);
+  if (!report) return false;
+  await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
+  if (report.verdict === "fail")
+    return hold(run, now, `conflicts with \`${run.base ?? "its base"}\` need your call: ${report.summary ?? ""}`);
+  if (report.verdict === "pass") {
+    enter(run, "running", now);
+    return true;
+  }
+  next(run, now, 0);
+  enter(run, "awaiting-fix", now);
+  return false;
+}
+
 async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
   if (!run.agent) {
@@ -434,9 +615,10 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
       if (!d) return false;
       if (d.state !== "OPEN") return closed(run, d, f, env);
       run.head = d.head;
+      const c = conflicted(run, f, env, d);
+      if (c) return c;
     }
-    const agent = await env.spawn(run, step, agentPrompt(run, step, f));
-    run.agent = { ...agent, startedAt: env.now() };
+    await start(run, env, step, agentPrompt(run, step, f));
     enter(run, "agent", env.now());
     return false;
   }
@@ -484,6 +666,9 @@ async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Fact
     const d = await env.pr(run.pr);
     if (!d) return false;
     if (d.state === "CLOSED") return closed(run, d, f, env);
+    // CI doesn't run on a PR that conflicts: waiting for it would only time out.
+    const c = d.state === "OPEN" ? conflicted(run, f, env, d) : undefined;
+    if (c) return c;
     if (d.ci === "pass" || d.ci === "none") return next(run, now);
     if (d.ci === "fail") return ciFails(run, f, env, d);
     return late ? hold(run, now, `CI still running after ${minutes} min`) : false;
@@ -517,6 +702,8 @@ async function gateStep(run: Run, step: GateStep, f: Factory, env: Env): Promise
   if (!d) return false;
   if (d.state === "MERGED") return next(run, now);
   if (d.state !== "OPEN") return closed(run, d, f, env);
+  const c = conflicted(run, f, env, d);
+  if (c) return c;
   // Each verdict must cover the head about to go through; new commits go back to the first step they skipped.
   const names = step.verdicts ?? f.steps.slice(0, run.step).flatMap((s) => (s.kind === "agent" ? [s.name] : []));
   const stale = names.find((n) => lastPass(run, n)?.head !== d.head);
@@ -526,6 +713,12 @@ async function gateStep(run: Run, step: GateStep, f: Factory, env: Env): Promise
     next(run, now, back);
     run.reason = `new commits since ${stale} checked it`;
     return true;
+  }
+  // A push to the PR, or to its base (the PR below it in a stack, say), leaves GitHub working out whether it still
+  // merges cleanly: let nothing through on the old answer.
+  if (mergeability(d) === "unknown") {
+    run.reason = "waits for GitHub to work out whether it merges cleanly";
+    return false;
   }
   if (d.ci === "pending" && step.ci !== false) return false;
   const blockers = gateBlockers(d, step);
@@ -572,6 +765,11 @@ async function actionStep(run: Run, step: Extract<Step, { kind: "action" }>, f: 
     run.head = d.head;
     return next(run, now, first < 0 ? run.step : first);
   }
+  const c = conflicted(run, f, env, d);
+  if (c) return c;
+  const m = mergeability(d);
+  if (m === "conflict") return hold(run, now, `merge: ${conflictsWith(d.base)}`);
+  if (m === "unknown") return false;
   const r = await env.merge(run.pr, run.head, step.method ?? "squash");
   if (!r.ok) return hold(run, now, `merge failed: ${r.out.split("\n")[0]}`);
   run.mergeRequestedAt = now;

@@ -83,6 +83,14 @@ _Avoid_: issue, comment
 An agent that fixes what was found in a change it didn't write. Inside a review, the verifier hands it the confirmed findings; it commits and the verifier pushes. In the factory, it takes red CI or a failed step before the merge, pushes, and the pipeline runs again from its first step.
 _Avoid_: author
 
+**Resolver**:
+An agent the factory starts when a PR conflicts with its base: it brings the PR up to date (merging the base in, or rebasing when the repo asks for it), resolves each conflict by what both sides meant, pushes, and the pipeline runs again from its first step.
+_Avoid_: merger, rebaser
+
+**Base**:
+The branch a PR merges into: the trunk, or the branch of the PR below it in a stack.
+_Avoid_: target, parent
+
 **Verification skill**:
 A skill a repo owns (`.claude/skills/verify-<app>/`) that launches the app in isolation, drives it the way a user does and captures evidence; the proof reviewer and `/remy:verify` follow it.
 _Avoid_: test script, e2e suite

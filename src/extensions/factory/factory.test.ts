@@ -247,32 +247,35 @@ test("a fixer that stops on a usage limit stays fixing, to restart later; a held
   expect(again.saved()[other.pr]!.agent).toMatchObject({ name: "fixer2" });
 });
 
-test("a fixer with its agent running counts against maxFactoryAgents", async () => {
-  const root = repo("api-count", GOOD);
-  const spawn = async (n: number) => {
-    const started: string[] = [];
-    const { h } = await hostWithRuns(
-      [savedRun(root, 7, "fixing", "fixer1"), savedRun(root, 8, "fixing")],
-      { maxFactoryAgents: n, extensions: { repos: ["api-count"] } },
-      {
-        pr: async () => ({
-          ...pr,
-          state: "OPEN",
-          ci: "fail",
-          failing: [],
-          head: "aaa",
-          lines: 1,
-          files: [],
-          allFiles: true,
-        }),
-        agentStatus: async () => "busy",
-        reports: () => [],
-        spawn: async (run) => (started.push(`#${run.number}`), { name: "fixer2" }),
-      },
-    );
-    await h.emit("tick", { at: 1 });
-    return started;
-  };
-  expect(await spawn(1)).toEqual([]);
-  expect(await spawn(2)).toEqual(["#8"]);
-});
+test.each(["fixing", "resolving"] as const)(
+  "a %s run with its agent running counts against maxFactoryAgents",
+  async (stage) => {
+    const root = repo(`api-count-${stage}`, GOOD);
+    const spawn = async (n: number) => {
+      const started: string[] = [];
+      const { h } = await hostWithRuns(
+        [savedRun(root, 7, stage, "agent1"), savedRun(root, 8, "fixing")],
+        { maxFactoryAgents: n, extensions: { repos: [`api-count-${stage}`] } },
+        {
+          pr: async () => ({
+            ...pr,
+            state: "OPEN",
+            ci: "fail",
+            failing: [],
+            head: "aaa",
+            lines: 1,
+            files: [],
+            allFiles: true,
+          }),
+          agentStatus: async () => "busy",
+          reports: () => [],
+          spawn: async (run) => (started.push(`#${run.number}`), { name: "fixer2" }),
+        },
+      );
+      await h.emit("tick", { at: 1 });
+      return started;
+    };
+    expect(await spawn(1)).toEqual([]);
+    expect(await spawn(2)).toEqual(["#8"]);
+  },
+);

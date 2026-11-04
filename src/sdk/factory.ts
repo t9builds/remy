@@ -130,12 +130,37 @@ export type Fixer = {
 /** The step name the fixer reports as: `remy report fix …`. */
 export const FIXER = "fix";
 
+/**
+ * The agent that brings a PR up to date when it conflicts with its base, before the merge (ADR-0012). The base is the
+ * trunk, or the branch of the PR below it in a stack.
+ */
+export type Conflicts = {
+  /**
+   * "merge" (default): merge the base into the PR's branch; no force-push, so a concurrent push is never lost.
+   * "rebase": rebase the branch onto the base and push with `--force-with-lease`.
+   */
+  strategy?: "merge" | "rebase";
+  /** Default "/remy:resolve". */
+  skill?: string;
+  /** What to tell the resolver besides the skill, e.g. how to run the checks. */
+  instructions?: string;
+  /** Most resolutions in one run before it waits for you. Default 3. */
+  maxRounds?: number;
+  /** Minutes the resolver may take before it counts as stuck. Default 60. */
+  timeoutMinutes?: number;
+};
+
+/** The step name the conflict resolver reports as: `remy report resolve …`. */
+export const RESOLVER = "resolve";
+
 export type Factory = {
   /** The most the team allows Remy to do in this repo; your own `autonomy` may lower it. Default "notify". */
   autonomy?: Level;
   environments?: Record<string, Environment>;
   /** How red CI and failed steps are fixed before the merge; `false` holds them for you instead. */
   fixer?: Fixer | false;
+  /** How a PR that conflicts with its base is brought up to date before the merge; `false` holds it for you instead. */
+  conflicts?: Conflicts | false;
   steps: Step[];
 };
 
@@ -168,26 +193,32 @@ export function levelOf(step: Step): Level {
   return step.env === "dev" ? "deploy-dev" : "deploy-prod";
 }
 
+/** What's wrong with the settings of a helper agent that isn't a step: the fixer or the conflict resolver. */
+function helperErrors(key: string, c: Fixer | Conflicts | false | undefined, skill: string, what: string): string[] {
+  if (c === undefined || c === false) return [];
+  if (typeof c !== "object" || c === null) return [`${key}: an object, or false to turn it off`];
+  const errors: string[] = [];
+  if (c.maxRounds !== undefined && !(Number.isInteger(c.maxRounds) && c.maxRounds >= 1))
+    errors.push(`${key}: maxRounds is a whole number of at least 1 (false turns ${what} off)`);
+  if (c.timeoutMinutes !== undefined && !(Number.isFinite(c.timeoutMinutes) && c.timeoutMinutes > 0))
+    errors.push(`${key}: timeoutMinutes is a number above 0`);
+  if (c.skill !== undefined && (typeof c.skill !== "string" || !c.skill.trim()))
+    errors.push(`${key}: skill is a skill name, like ${skill}`);
+  if (c.instructions !== undefined && typeof c.instructions !== "string") errors.push(`${key}: instructions is text`);
+  return errors;
+}
+
 /** What's wrong with a pipeline, so a broken factory.ts is reported instead of half run. */
 export function validate(f: Factory): string[] {
   const errors: string[] = [];
   if (!Array.isArray(f?.steps) || !f.steps.length) return ["it has no steps"];
   if (f.autonomy && !LEVELS.includes(f.autonomy))
     errors.push(`autonomy "${f.autonomy}" isn't one of ${LEVELS.join(", ")}`);
-  const fx = f.fixer;
-  if (fx !== undefined && fx !== false) {
-    if (typeof fx !== "object" || fx === null) errors.push("fixer: an object, or false to turn it off");
-    else {
-      if (fx.maxRounds !== undefined && !(Number.isInteger(fx.maxRounds) && fx.maxRounds >= 1))
-        errors.push("fixer: maxRounds is a whole number of at least 1 (false turns the fixer off)");
-      if (fx.timeoutMinutes !== undefined && !(Number.isFinite(fx.timeoutMinutes) && fx.timeoutMinutes > 0))
-        errors.push("fixer: timeoutMinutes is a number above 0");
-      if (fx.skill !== undefined && (typeof fx.skill !== "string" || !fx.skill.trim()))
-        errors.push("fixer: skill is a skill name, like /remy:fix");
-      if (fx.instructions !== undefined && typeof fx.instructions !== "string")
-        errors.push("fixer: instructions is text");
-    }
-  }
+  errors.push(...helperErrors("fixer", f.fixer, "/remy:fix", "the fixer"));
+  errors.push(...helperErrors("conflicts", f.conflicts, "/remy:resolve", "resolving"));
+  const cx = f.conflicts;
+  if (cx && typeof cx === "object" && cx.strategy !== undefined && !["merge", "rebase"].includes(cx.strategy))
+    errors.push('conflicts: strategy is "merge" or "rebase"');
   const names = new Set<string>();
   f.steps.forEach((s, i) => {
     const at = `step ${i + 1} (${s?.kind} ${s?.name})`;
@@ -199,6 +230,8 @@ export function validate(f: Factory): string[] {
       if (!s.skill) errors.push(`${at}: needs a skill`);
       if (names.has(s.name)) errors.push(`${at}: another agent step is called "${s.name}"`);
       if (s.name === FIXER && f.fixer !== false) errors.push(`${at}: "${FIXER}" is the fixer's name`);
+      if (s.name === RESOLVER && f.conflicts !== false)
+        errors.push(`${at}: "${RESOLVER}" is the conflict resolver's name`);
       if (s.onFail !== undefined && !["fix", "hold", "ask-human", "notify-author"].includes(s.onFail))
         errors.push(`${at}: onFail is "fix", "hold", "ask-human" or "notify-author"`);
       names.add(s.name);
