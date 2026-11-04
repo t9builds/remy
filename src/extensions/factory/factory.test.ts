@@ -330,3 +330,30 @@ test("an orphaned factory agent is closed; a run's current agent and sessions wi
   await h.emit("tick", { at: 2 });
   expect(closed.sort()).toEqual(["cabbage", "gone"]);
 });
+
+test("a fix offer nobody answers expires: the run ends and its question leaves the waiting list; a late reply is ignored", async () => {
+  const root = repo("api-expire", GOOD);
+  const day = 24 * 60 * 60_000;
+  const asking = (number: number, ageDays: number) => ({
+    ...savedRun(root, number, "asking"),
+    since: Date.now() - ageDays * day,
+    ask: { purpose: "fix" as const, question: "Start an agent on a fix? Reply yes." },
+  });
+  const old = asking(7, 4);
+  const fresh = asking(8, 1);
+  const { h, saved } = await hostWithRuns([old, fresh], { extensions: { repos: ["api-expire"] } });
+  const keys = () => h.waitingEntries().map((e) => e.key);
+  // Restarted with both questions pending again.
+  expect(keys()).toContain("ask:factory:api#7");
+  expect(keys()).toContain("ask:factory:api#8");
+  await h.emit("tick", { at: 1 });
+  expect(saved()[old.pr]).toMatchObject({ stage: "done", reason: "no answer to the fix offer in 3 days" });
+  expect(saved()[old.pr]!.ask).toBeUndefined();
+  expect(keys()).not.toContain("ask:factory:api#7");
+  expect(saved()[fresh.pr]).toMatchObject({ stage: "asking" });
+  expect(keys()).toContain("ask:factory:api#8");
+  // The user answers after the expiry: nothing breaks, and the run stays done.
+  h.answer("factory:api#7", "yes");
+  await new Promise((r) => setTimeout(r, 10));
+  expect(saved()[old.pr]).toMatchObject({ stage: "done", reason: "no answer to the fix offer in 3 days" });
+});

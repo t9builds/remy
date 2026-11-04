@@ -278,6 +278,80 @@ describe("the ADR-0004 pipeline", () => {
     ]);
   });
 
+  describe("an unanswered question", () => {
+    const DAY = 24 * 60 * 60_000;
+
+    test("a fix offer expires after 3 days and the run ends", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      Object.assign(run, { step: 8, mergeSha: "mmm" });
+      await go(run, env);
+      w.report("fail", "500 on /login");
+      await go(run, env);
+      expect(run.stage).toBe("asking");
+      expect(run.ask!.purpose).toBe("fix");
+      w.t += 3 * DAY - 1000;
+      await go(run, env);
+      expect(run.stage).toBe("asking");
+      w.t += 2000;
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      expect(run.reason).toBe("no answer to the fix offer in 3 days");
+      expect(run.ask).toBeUndefined();
+    });
+
+    test("a yes before the expiry still ends the run as before", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      Object.assign(run, { step: 8, mergeSha: "mmm" });
+      await go(run, env);
+      w.report("fail", "500 on /login");
+      await go(run, env);
+      w.t += 2 * DAY;
+      run.ask!.answer = "yes";
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      expect(run.reason).toBe("a fix was started");
+    });
+
+    test("an answer that lands after the expiry changes nothing", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      Object.assign(run, { step: 8, mergeSha: "mmm" });
+      await go(run, env);
+      w.report("fail", "500 on /login");
+      await go(run, env);
+      w.t += 4 * DAY;
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      expect(run.reason).toBe("no answer to the fix offer in 3 days");
+    });
+
+    test("an approval or a continue question waits however long it takes", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      await go(run, env, ADR, "verify");
+      w.report("pass", "all good");
+      await go(run, env, ADR, "verify");
+      expect(run.ask!.purpose).toBe("approve");
+      w.t += 30 * DAY;
+      await go(run, env, ADR, "verify");
+      expect(run.stage).toBe("asking");
+
+      const second = newRun();
+      Object.assign(second, { step: 5, mergeSha: "mmm" });
+      await go(second, env);
+      w.report("fail", "touches billing");
+      await go(second, env);
+      expect(second.ask!.purpose).toBe("continue");
+      w.t += 30 * DAY;
+      await go(second, env);
+      expect(second.stage).toBe("asking");
+    });
+  });
+
   test("a failure that asks or alerts posts only its own message", async () => {
     const { w, env } = world();
     const run = newRun();

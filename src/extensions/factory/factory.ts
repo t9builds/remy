@@ -140,7 +140,11 @@ export const createFactory =
     /** The waiting list: a run in progress keeps its session off it; a held one is a judgment call on it. */
     function syncWaitingList(run: Run) {
       const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
-      if (run.stage === "done") return remy.waitingList.remove(run.pr);
+      if (run.stage === "done") {
+        // An offer that lapsed unanswered leaves its question here too (the host keys it `ask:<session>`).
+        remy.waitingList.remove(`ask:${label(run)}`);
+        return remy.waitingList.remove(run.pr);
+      }
       if (run.stage === "held")
         return remy.waitingList.add({
           ...base,

@@ -984,6 +984,7 @@ async function loadFactory(root) {
 
 // src/extensions/factory/pipeline.ts
 var GRACE_MS = 3 * 60000;
+var FIX_OFFER_TTL_MS = 3 * 24 * 60 * 60000;
 var PUSH_WAIT_MS = 30 * 60000;
 var isActive = (r) => r.stage !== "held" && r.stage !== "done";
 var YES = /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approved?|lgtm|\uD83D\uDC4D[\u{1F3FB}-\u{1F3FF}]?|\u2705|:\+1:|:thumbsup:|:white_check_mark:)[\s.!]*$/iu;
@@ -1136,6 +1137,11 @@ async function stepOnce(run, f, autonomy, env) {
     if (await mergedByHand(run, f, env))
       return true;
     const a = run.ask;
+    if (a?.purpose === "fix" && a.answer === undefined && now - run.since > FIX_OFFER_TTL_MS) {
+      run.ask = undefined;
+      enter(run, "done", now, "no answer to the fix offer in 3 days");
+      return false;
+    }
     if (!a?.answer)
       return false;
     const yes = YES.test(a.answer);
@@ -1512,8 +1518,10 @@ var createFactory = (world = {}) => (remy) => {
   };
   function syncWaitingList(run) {
     const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
-    if (run.stage === "done")
+    if (run.stage === "done") {
+      remy.waitingList.remove(`ask:${label(run)}`);
       return remy.waitingList.remove(run.pr);
+    }
     if (run.stage === "held")
       return remy.waitingList.add({
         ...base,
