@@ -1001,6 +1001,7 @@ async function loadFactory(root) {
 // src/extensions/factory/pipeline.ts
 var GRACE_MS = 3 * 60000;
 var FIX_OFFER_TTL_MS = 3 * 24 * 60 * 60000;
+var fixOfferLapsed = (run, now) => run.ask?.purpose === "fix" && !run.ask.answer && now - run.since > FIX_OFFER_TTL_MS;
 var PUSH_WAIT_MS = 30 * 60000;
 var isActive = (r) => r.stage !== "held" && r.stage !== "done";
 var YES = /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approved?|lgtm|\uD83D\uDC4D[\u{1F3FB}-\u{1F3FF}]?|\u2705|:\+1:|:thumbsup:|:white_check_mark:)[\s.!]*$/iu;
@@ -1153,7 +1154,7 @@ async function stepOnce(run, f, autonomy, env) {
     if (await mergedByHand(run, f, env))
       return true;
     const a = run.ask;
-    if (a?.purpose === "fix" && !a.answer && now - run.since > FIX_OFFER_TTL_MS) {
+    if (fixOfferLapsed(run, now)) {
       run.ask = undefined;
       enter(run, "done", now, "no answer to the fix offer in 3 days");
       return false;
@@ -1637,7 +1638,7 @@ var createFactory = (world = {}) => (remy) => {
     run: (_, ctx) => formatRuns(Object.values(runs).filter((r) => r.workspace === ctx.workspace), (r) => loaded.get(r.repoDir)?.factory)
   });
   for (const run of Object.values(runs)) {
-    if (run.stage === "asking" && run.ask && run.ask.answer === undefined)
+    if (run.stage === "asking" && run.ask && run.ask.answer === undefined && !fixOfferLapsed(run, Date.now()))
       ask(run, run.ask.question);
     syncWaitingList(run);
   }

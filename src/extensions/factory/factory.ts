@@ -14,7 +14,7 @@ import { type Factory, lowerLevel } from "../../sdk/factory";
 import { formatRuns } from "./format";
 import { deploy, deployed, mergePr, prDetail, readReports, repoRootOf } from "./live";
 import { type Loaded, loadFactory } from "./load";
-import { advance, type Env, isActive, type Run, YES } from "./pipeline";
+import { advance, type Env, fixOfferLapsed, isActive, type Run, YES } from "./pipeline";
 
 /** Claude Code's own words for a reached limit, e.g. "You've hit your session limit · resets 8:10pm (Europe/Prague)". */
 const LIMIT_NOTICE =
@@ -251,9 +251,11 @@ export const createFactory =
         ),
     });
 
-    // Questions asked before a restart wait for their answers again.
+    // Questions asked before a restart wait for their answers again, except a fix offer that lapsed while the daemon
+    // was down: the next tick ends that run, and posting the question only to withdraw it would show a stale prompt.
     for (const run of Object.values(runs)) {
-      if (run.stage === "asking" && run.ask && run.ask.answer === undefined) ask(run, run.ask.question);
+      if (run.stage === "asking" && run.ask && run.ask.answer === undefined && !fixOfferLapsed(run, Date.now()))
+        ask(run, run.ask.question);
       syncWaitingList(run);
     }
   };

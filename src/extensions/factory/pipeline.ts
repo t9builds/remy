@@ -129,6 +129,9 @@ const GRACE_MS = 3 * 60_000;
  * would only turn one waiting-list item into another.
  */
 const FIX_OFFER_TTL_MS = 3 * 24 * 60 * 60_000;
+/** Whether `run` waits on a fix offer that has gone unanswered past its lifetime. */
+export const fixOfferLapsed = (run: Run, now: number) =>
+  run.ask?.purpose === "fix" && !run.ask.answer && now - run.since > FIX_OFFER_TTL_MS;
 /** GitHub may take a moment to show a pushed fix or a merge. */
 const PUSH_WAIT_MS = 30 * 60_000;
 
@@ -312,7 +315,7 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
   if (run.stage === "asking") {
     if (await mergedByHand(run, f, env)) return true;
     const a = run.ask;
-    if (a?.purpose === "fix" && !a.answer && now - run.since > FIX_OFFER_TTL_MS) {
+    if (fixOfferLapsed(run, now)) {
       run.ask = undefined;
       enter(run, "done", now, "no answer to the fix offer in 3 days");
       return false;

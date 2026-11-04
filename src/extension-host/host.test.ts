@@ -158,6 +158,38 @@ describe("extension host", () => {
     expect(await b).toBe("later");
   });
 
+  test("ask: a post that fails after the ask was aborted and replaced leaves the newer ask alone", async () => {
+    let failPost!: (e: Error) => void;
+    let calls = 0;
+    const { h } = host({
+      post: () => {
+        calls++;
+        if (calls > 1) return Promise.resolve("id");
+        return new Promise<string>((_, reject) => void (failPost = reject));
+      },
+    });
+    let remy!: Remy;
+    await h.load("factory", "test", (r) => void (remy = r));
+    const ctl = new AbortController();
+    // Its post is still pending, so the ask itself settles only when the post does.
+    const first = remy.ask("one", { session: "s", signal: ctl.signal });
+    const firstFailed = first.then(
+      () => undefined,
+      (e) => e,
+    );
+    await Bun.sleep(0);
+    ctl.abort();
+    const second = remy.ask("two", { session: "s" });
+    await Bun.sleep(0);
+    expect(h.waitingEntries()).toHaveLength(1);
+    failPost(new Error("slack down"));
+    await Bun.sleep(0);
+    expect(h.waitingEntries()).toHaveLength(1);
+    expect(h.answer("s", "yes")).toBeTrue();
+    expect(await second).toBe("yes");
+    expect((await firstFailed).message).toBe("slack down");
+  });
+
   test("waiting-list entries, coordinator.tell and state", async () => {
     const { h, told, waitingListChanges } = host();
     let remy!: Remy;
