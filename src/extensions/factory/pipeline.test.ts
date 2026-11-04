@@ -350,6 +350,21 @@ describe("the ADR-0004 pipeline", () => {
     );
   });
 
+  test("gcloud with no active account holds the deploy wait at once", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 3, mergeSha: "mmmmmmmm" });
+    w.builds.set("mmmmmmmm:cloudbuild", {
+      status: "error",
+      detail: "ERROR: (gcloud.builds.list) You do not currently have an active account selected.",
+    });
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe(
+      `couldn't check the dev deploy of mmmmmmm: gcloud's login expired; run \`gcloud auth login\`, then \`remy factory retry ${URL}\``,
+    );
+  });
+
   test("another check error waits out the timeout, then holds saying Remy couldn't check", async () => {
     const { w, env } = world();
     const run = newRun();
@@ -361,7 +376,7 @@ describe("the ADR-0004 pipeline", () => {
     await go(run, env);
     expect(run.stage).toBe("held");
     expect(run.reason).toBe(
-      `couldn't check the dev deploy of mmm for 60 min (ERROR: network unreachable); then \`remy factory retry ${URL}\``,
+      `couldn't check the dev deploy of mmm after 60 min (ERROR: network unreachable); then \`remy factory retry ${URL}\``,
     );
   });
 

@@ -477,7 +477,8 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
 }
 
 /** gcloud's wording when its login needs a person (reauthentication, refreshing tokens, no active account). */
-const LOGIN_EXPIRED = /reauthentication|problem refreshing your current auth tokens|gcloud auth login/i;
+const LOGIN_EXPIRED =
+  /reauthentication|problem refreshing your current auth tokens|do not currently have an active account|gcloud auth login/i;
 
 async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
@@ -520,7 +521,7 @@ async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Fact
       ? hold(
           run,
           now,
-          `couldn't check the ${step.env} deploy of ${sha} for ${minutes} min (${b.detail}); then ${retry}`,
+          `couldn't check the ${step.env} deploy of ${sha} after ${minutes} min${b.detail ? ` (${b.detail})` : ""}; then ${retry}`,
         )
       : false;
   }

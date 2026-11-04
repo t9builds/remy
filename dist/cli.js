@@ -1293,7 +1293,7 @@ ${run.pr}`);
     return fix(run, f, env, `${step.name} failed`, summary);
   return hold(run, now, `${step.name}: ${summary}`);
 }
-var LOGIN_EXPIRED = /reauthentication|problem refreshing your current auth tokens|gcloud auth login/i;
+var LOGIN_EXPIRED = /reauthentication|problem refreshing your current auth tokens|do not currently have an active account|gcloud auth login/i;
 async function waitStep(run, step, f, env) {
   const now = env.now();
   const minutes = step.timeoutMinutes ?? 60;
@@ -1327,7 +1327,7 @@ async function waitStep(run, step, f, env) {
     if (LOGIN_EXPIRED.test(b.detail ?? ""))
       return hold(run, now, `couldn't check the ${step.env} deploy of ${sha}: gcloud's login expired; run \`gcloud auth login\`, then ${retry}`);
     run.reason = b.detail;
-    return late ? hold(run, now, `couldn't check the ${step.env} deploy of ${sha} for ${minutes} min (${b.detail}); then ${retry}`) : false;
+    return late ? hold(run, now, `couldn't check the ${step.env} deploy of ${sha} after ${minutes} min${b.detail ? ` (${b.detail})` : ""}; then ${retry}`) : false;
   }
   return late ? hold(run, now, `no ${step.env} deploy of ${sha} after ${minutes} min`) : false;
 }
