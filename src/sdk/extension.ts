@@ -100,6 +100,8 @@ export type PostOptions = {
   thread?: string;
   /** The message asks the user something: Remy watches its thread closely, and the reply reaches the coordinator as the answer. */
   expectReply?: boolean;
+  /** `text` is standard Markdown, such as an agent's own words, rather than mrkdwn: Slack renders it as rich text. */
+  markdown?: boolean;
 };
 
 /** One line of the waiting list. Rank 0 is the most urgent: 0 question, 1 red CI, 2 changes requested, 3 ready, 4 stopped. */

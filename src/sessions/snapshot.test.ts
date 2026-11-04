@@ -2,8 +2,19 @@ import { expect, test } from "bun:test";
 import { ciOf } from "../shared/ci";
 import { diff } from "./changes";
 import { formatSession } from "./format";
-import { findSession, type SessionView, type Snapshot } from "./snapshot";
+import { findSession, latestEvents, type SessionView, type Snapshot } from "./snapshot";
 import { spawnedEntry } from "./spawned";
+
+test("latestEvents keeps a picker's event over the permission prompt about it", () => {
+  const ev = (event: string, type?: string) => ({ ts: 1, event, type, session_id: "s" });
+  const picker = ev("PermissionRequest", "AskUserQuestion");
+  expect(latestEvents([picker, ev("Notification", "permission_prompt")]).get("s")).toBe(picker);
+  expect(latestEvents([picker, ev("PostToolUse", "AskUserQuestion")]).get("s")?.event).toBe("PostToolUse");
+  expect(latestEvents([picker, ev("PostToolUseFailure", "AskUserQuestion")]).get("s")?.event).toBe(
+    "PostToolUseFailure",
+  );
+  expect(latestEvents([ev("Stop"), ev("Notification", "permission_prompt")]).get("s")?.event).toBe("Notification");
+});
 
 const session = (over: Partial<SessionView> = {}): SessionView => ({
   sessionId: "s1",

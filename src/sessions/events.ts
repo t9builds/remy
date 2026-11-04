@@ -4,13 +4,14 @@ import { ensureDir } from "../shared/json-file";
 import { PATHS } from "../shared/paths";
 
 /**
- * One line of ~/.remy/events.jsonl, written by the Stop/Notification/SessionEnd hooks of every session.
- * The UserPromptSubmit hook only names the session (cli/hook.ts) and writes no event.
+ * One line of ~/.remy/events.jsonl, written by the Stop/Notification/SessionEnd hooks of every session, and by the
+ * PermissionRequest/PostToolUse/PostToolUseFailure hooks around a picker (AskUserQuestion). The UserPromptSubmit hook only names the
+ * session (cli/hook.ts) and writes no event.
  */
 export type RemyEvent = {
   ts: number;
-  event: string; // Stop | Notification | SessionEnd
-  type?: string; // notification_type for Notification, reason for SessionEnd
+  event: string; // Stop | Notification | SessionEnd | PermissionRequest | PostToolUse | PostToolUseFailure
+  type?: string; // notification_type for Notification, reason for SessionEnd, the tool for the other two
   session_id: string;
   cwd?: string;
   message?: string;

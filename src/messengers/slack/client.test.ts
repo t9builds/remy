@@ -84,3 +84,25 @@ test("a message is the user's when they post it, or an app they trust posts it a
   // The bot's own posts never count, trusted app or not.
   expect(fromUser({ ...msg, user: "UBOT", bot_id: "BBOT", app_id: "AVERIFY" }, "UME", ["AVERIFY"])).toBe(false);
 });
+
+test("Markdown goes in a markdown block, with the text as the fallback; too long for one goes as plain text", async () => {
+  const { Slack } = await import("./client");
+  const sent: URLSearchParams[] = [];
+  const prev = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init: RequestInit) => {
+    sent.push(new URLSearchParams(await new Request(url, init).text()));
+    return Response.json({ ok: true, ts: "1.2" });
+  }) as any;
+  try {
+    const slack = new Slack("xoxb-test");
+    await slack.post("C1", "**flan** finished its turn", "1.1", true);
+    await slack.post("C1", "*flan* opened #1");
+    await slack.post("C1", "x".repeat(12_001), undefined, true);
+  } finally {
+    globalThis.fetch = prev;
+  }
+  expect(sent[0]!.get("text")).toBe("**flan** finished its turn");
+  expect(JSON.parse(sent[0]!.get("blocks")!)).toEqual([{ type: "markdown", text: "**flan** finished its turn" }]);
+  expect(sent[1]!.has("blocks")).toBe(false);
+  expect(sent[2]!.has("blocks")).toBe(false);
+});
