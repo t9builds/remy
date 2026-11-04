@@ -1435,6 +1435,7 @@ var createFactory = (world = {}) => (remy) => {
   const loaded = new Map;
   const runs = remy.state.get("runs", {});
   let backoffUntil = remy.state.get("backoffUntil", 0);
+  const tried = new Set;
   const save = () => {
     remy.state.set("runs", runs);
     remy.state.set("backoffUntil", backoffUntil);
@@ -1569,7 +1570,8 @@ var createFactory = (world = {}) => (remy) => {
         syncWaitingList(run);
       }
       const current = new Set(Object.values(runs).flatMap((r) => r.agent ? [r.agent.name] : []));
-      for (const s of remy.sessions().filter((s) => isOrphan(s, current))) {
+      for (const s of remy.sessions().filter((s) => isOrphan(s, current) && !tried.has(s.sessionId))) {
+        tried.add(s.sessionId);
         remy.log("closing orphaned factory agent", s.name);
         await env.close({ name: s.name, id: s.sessionId });
       }

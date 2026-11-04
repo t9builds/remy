@@ -326,4 +326,7 @@ test("an orphaned factory agent is closed; a run's current agent and sessions wi
   );
   await h.emit("tick", { at: 1 });
   expect(closed.sort()).toEqual(["cabbage", "gone"]);
+  // Still listed (stopped, not removed): the next tick doesn't try them again.
+  await h.emit("tick", { at: 2 });
+  expect(closed.sort()).toEqual(["cabbage", "gone"]);
 });

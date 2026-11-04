@@ -59,6 +59,7 @@ export const createFactory =
     const loaded = new Map<string, Loaded>();
     const runs = remy.state.get<Record<string, Run>>("runs", {});
     let backoffUntil = remy.state.get("backoffUntil", 0);
+    const tried = new Set<string>();
     const save = () => {
       remy.state.set("runs", runs);
       remy.state.set("backoffUntil", backoffUntil);
@@ -203,7 +204,10 @@ export const createFactory =
         // went on, or is gone. Its PR isn't on the session (it works detached, or on a branch of its own), so the
         // test is whether any run has it as its current agent; one that does is never closed here.
         const current = new Set(Object.values(runs).flatMap((r) => (r.agent ? [r.agent.name] : [])));
-        for (const s of remy.sessions().filter((s) => isOrphan(s, current))) {
+        // Each is tried once per daemon run: a worktree with unpushed work is stopped rather than removed and stays
+        // listed, and a close that fails would fail again, so retrying every tick would only respawn `claude`.
+        for (const s of remy.sessions().filter((s) => isOrphan(s, current) && !tried.has(s.sessionId))) {
+          tried.add(s.sessionId);
           remy.log("closing orphaned factory agent", s.name);
           await env.close({ name: s.name, id: s.sessionId });
         }
