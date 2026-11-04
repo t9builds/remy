@@ -714,6 +714,71 @@ describe("conflicts with the base (ADR-0012)", () => {
     expect(w.merges).toEqual(["aaa squash"]);
   });
 
+  test("an UNKNOWN that lasts past 15 minutes holds the gate; a brief one after a long CI wait doesn't", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("pass");
+    await pre(run, env);
+    w.pr = detail({ ci: "pending" });
+    w.report("pass");
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("running:gate merge");
+    // CI took two hours: the wait on GitHub starts only with its own UNKNOWN.
+    w.t += 2 * 60 * 60_000;
+    w.pr = detail({ mergeable: "UNKNOWN" });
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("running:gate merge");
+    w.t += 60_000;
+    w.pr = detail({ mergeable: "MERGEABLE", mergeState: "CLEAN" });
+    await pre(run, env);
+    expect(w.merges).toEqual(["aaa squash"]);
+
+    const stuck = world();
+    const run2 = newRun();
+    await pre(run2, stuck.env);
+    stuck.w.report("pass");
+    await pre(run2, stuck.env);
+    stuck.w.pr = detail({ mergeable: "UNKNOWN" });
+    stuck.w.report("pass");
+    await pre(run2, stuck.env);
+    stuck.w.t += 16 * 60_000;
+    await pre(run2, stuck.env);
+    expect(run2.stage).toBe("held");
+    expect(run2.reason).toBe("GitHub hasn't worked out whether it merges cleanly after 15 min");
+    expect(stuck.w.merges).toEqual([]);
+  });
+
+  test("a resolver that waits on GitHub's UNKNOWN past 15 minutes holds the run", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    run.earlier = [{ name: "old", id: "old" }];
+    w.status.set("old", "busy");
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    w.status.delete("old");
+    w.pr = detail({ mergeable: "UNKNOWN" });
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    expect(run.reason).toBe("waits for GitHub to work out whether it merges cleanly");
+    w.t += 16 * 60_000;
+    await pre(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toContain("hasn't worked out whether it merges cleanly");
+    expect(w.spawned).toEqual([]);
+  });
+
+  test("the merge-strategy resolver re-syncs by merging the moved branch in, never by rebasing", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    const prompt = w.spawned[0]!.prompt;
+    expect(prompt).toContain("`git merge origin/fix-login`");
+    expect(prompt).not.toContain("rebase --onto");
+    expect(prompt).toContain("After three rejected tries, stop and report `fail`");
+  });
+
   test("a resolver waits for GitHub's answer, and isn't started once the conflict is gone", async () => {
     const { w, env } = world();
     const run = newRun();
@@ -912,7 +977,9 @@ describe("conflicts with the base (ADR-0012)", () => {
     for (const a of [review!, fixer!]) {
       expect(a.prompt).toContain("If the push is rejected because the branch moved, never force it");
       expect(a.prompt).toContain("`git fetch origin fix-login`");
-      expect(a.prompt).toContain("git rebase --onto origin/fix-login <the head you checked out> HEAD");
+      expect(a.prompt).toContain("git rebase --onto origin/fix-login <the head you noted> HEAD");
+      expect(a.prompt).toContain("git rev-parse HEAD");
+      expect(a.prompt).toContain("After three rejected tries, stop and report `fail`");
     }
     // After the merge there is nothing to push.
     const after = world();

@@ -74,6 +74,8 @@ export type Run = {
   stage: Stage;
   since: number;
   stepSince: number;
+  /** When GitHub's answer on whether the PR merges cleanly turned UNKNOWN, while it still is (see `unknownWait`). */
+  unknownSince?: number;
   agent?: { name: string; id?: string; startedAt: number };
   /** Agents the run started before its current one, which may still work on the PR (one that timed out, say). */
   earlier?: { name: string; id?: string }[];
@@ -151,6 +153,8 @@ export type Env = {
 const GRACE_MS = 3 * 60_000;
 /** GitHub may take a moment to show a pushed fix or a merge. */
 const PUSH_WAIT_MS = 30 * 60_000;
+/** GitHub normally works out whether a PR merges within seconds; past this it is stuck, and a person looks. */
+const UNKNOWN_WAIT_MS = 15 * 60_000;
 
 export const isActive = (r: Run) => r.stage !== "held" && r.stage !== "done";
 /** A reply that is only a yes: "ok but don't" or "go away" is not consent. Slack sends emoji as `:+1:`. */
@@ -175,9 +179,26 @@ export function gateBlockers(d: PrDetail, gate: Pick<GateStep, "maxLines" | "pro
   return why;
 }
 
+/**
+ * Whether to keep waiting for GitHub to work out if the PR merges cleanly (it answers UNKNOWN for a moment after a
+ * push). True while it does, with the reason set, or once it has taken too long, when the run holds. The clock starts
+ * at the first UNKNOWN of a stretch and stops at the first answer, so a wait on CI before doesn't count.
+ */
+function unknownWait(run: Run, d: PrDetail, now: number): boolean {
+  if (mergeability(d) !== "unknown") {
+    run.unknownSince = undefined;
+    return false;
+  }
+  run.unknownSince ??= now;
+  if (now - run.unknownSince > UNKNOWN_WAIT_MS)
+    hold(run, now, `GitHub hasn't worked out whether it merges cleanly after ${UNKNOWN_WAIT_MS / 60_000} min`);
+  else run.reason = "waits for GitHub to work out whether it merges cleanly";
+  return true;
+}
+
 /** What an agent does when its push is rejected because someone else moved the branch (ADR-0012). */
 const resync = (run: Run) =>
-  `If the push is rejected because the branch moved, never force it: \`git fetch origin ${run.branch}\`, replay your own commits onto it (\`git rebase --onto origin/${run.branch} <the head you checked out> HEAD\`), run the checks again on the result, and push again.`;
+  `If the push is rejected because the branch moved, never force it. Right after you check out, note the head (\`git rev-parse HEAD\`). Then \`git fetch origin ${run.branch}\`, replay your own commits onto it (\`git rebase --onto origin/${run.branch} <the head you noted> HEAD\`), run the checks again on the result, and push again. After three rejected tries, stop and report \`fail\`, saying the branch keeps moving.`;
 
 function agentPrompt(run: Run, step: AgentStep, f: Factory) {
   const n = run.number;
@@ -274,7 +295,7 @@ function resolvePrompt(run: Run, step: AgentStep, f: Factory) {
     `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree), then \`git fetch origin ${base}\`.`,
     conflictsOf(f).strategy === "rebase"
       ? `Rebase it onto \`origin/${base}\`, resolving each conflict by intent, run every check, then \`git push --force-with-lease=${run.branch}:${run.head} origin HEAD:${run.branch}\`: the lease refuses the push if anyone pushed after ${run.head.slice(0, 7)}. If it does, start over from the new head; never push with plain --force.`
-      : `Merge \`origin/${base}\` into it, resolving each conflict by intent, run every check, then \`git push origin HEAD:${run.branch}\`. Don't rebase or force-push. ${resync(run)}`,
+      : `Merge \`origin/${base}\` into it, resolving each conflict by intent, run every check, then \`git push origin HEAD:${run.branch}\`. Don't rebase or force-push. If the push is rejected because the branch moved, merge it in too, never rebase (that would drop your merge commit): \`git fetch origin ${run.branch}\`, \`git merge origin/${run.branch}\` (resolving by intent), run the checks again, and push again. After three rejected tries, stop and report \`fail\`, saying the branch keeps moving.`,
     "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
     "",
     "As the very last step, report with exactly one of:",
@@ -285,7 +306,7 @@ function resolvePrompt(run: Run, step: AgentStep, f: Factory) {
 }
 
 function enter(run: Run, stage: Stage, now: number, reason?: string) {
-  Object.assign(run, { stage, since: now, reason });
+  Object.assign(run, { stage, since: now, reason, unknownSince: undefined });
 }
 
 const hold = (run: Run, now: number, reason: string) => {
@@ -304,6 +325,7 @@ function next(run: Run, now: number, to = run.step + 1) {
     stage: "running",
     since: now,
     stepSince: now,
+    unknownSince: undefined,
     reason: undefined,
     ask: undefined,
   });
@@ -556,8 +578,8 @@ async function resolving(run: Run, f: Factory, env: Env): Promise<boolean> {
     if (d.state !== "OPEN") return closed(run, d, f, env);
     run.head = d.head;
     run.base = d.base ?? run.base;
+    if (unknownWait(run, d, now)) return false;
     const m = mergeability(d);
-    if (m === "unknown") return false;
     // Someone brought it up to date meanwhile: carry on with the step it was on.
     if (m === "clean") {
       enter(run, "running", now);
@@ -716,10 +738,7 @@ async function gateStep(run: Run, step: GateStep, f: Factory, env: Env): Promise
   }
   // A push to the PR, or to its base (the PR below it in a stack, say), leaves GitHub working out whether it still
   // merges cleanly: let nothing through on the old answer.
-  if (mergeability(d) === "unknown") {
-    run.reason = "waits for GitHub to work out whether it merges cleanly";
-    return false;
-  }
+  if (unknownWait(run, d, now)) return false;
   if (d.ci === "pending" && step.ci !== false) return false;
   const blockers = gateBlockers(d, step);
   // Red CI alone is the fixer's; anything else the gate stops waits for a person, and fixing CI first wouldn't help.
@@ -767,9 +786,8 @@ async function actionStep(run: Run, step: Extract<Step, { kind: "action" }>, f: 
   }
   const c = conflicted(run, f, env, d);
   if (c) return c;
-  const m = mergeability(d);
-  if (m === "conflict") return hold(run, now, `merge: ${conflictsWith(d.base)}`);
-  if (m === "unknown") return false;
+  if (unknownWait(run, d, now)) return false;
+  if (mergeability(d) === "conflict") return hold(run, now, `merge: ${conflictsWith(d.base)}`);
   const r = await env.merge(run.pr, run.head, step.method ?? "squash");
   if (!r.ok) return hold(run, now, `merge failed: ${r.out.split("\n")[0]}`);
   run.mergeRequestedAt = now;

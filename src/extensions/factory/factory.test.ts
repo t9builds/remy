@@ -247,6 +247,24 @@ test("a fixer that stops on a usage limit stays fixing, to restart later; a held
   expect(again.saved()[other.pr]!.agent).toMatchObject({ name: "fixer2" });
 });
 
+test("a held run that restarts on new commits remembers its agents as earlier, so a resolver waits for them", async () => {
+  const root = repo("api-earlier", GOOD);
+  const held = { ...savedRun(root, 7, "held", "old-agent"), earlier: [{ name: "older", id: "o1" }] };
+  const stateDir = join(dir, `state-${Math.random()}`);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "builtin_factory.json"), JSON.stringify({ runs: { [held.pr]: held } }));
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-earlier"] } };
+  const sessions = [ref({ cwd: root, pr: { ...pr, url: held.pr, head: "bbb" } })];
+  const { h } = await hostWith(config, sessions, { pr: async () => undefined }, stateDir);
+  await h.emit("tick", { at: 1 });
+  const run = JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs[held.pr] as Run;
+  expect(run.head).toBe("bbb");
+  expect(run.earlier).toEqual([
+    { name: "older", id: "o1" },
+    { name: "old-agent", id: undefined },
+  ]);
+});
+
 test.each(["fixing", "resolving"] as const)(
   "a %s run with its agent running counts against maxFactoryAgents",
   async (stage) => {

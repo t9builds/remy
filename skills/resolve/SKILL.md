@@ -48,7 +48,7 @@ Run the repo's tests, typecheck, lint and build (they're in `AGENTS.md` or `CLAU
 
 ## 5. Push and record
 
-- **Merge.** Commit the merge with a message that names the base and how you resolved the conflicts, then `git push origin HEAD:<branch>`. If the push is rejected, follow [pushing to a branch that moved](../review/references/push.md).
+- **Merge.** Commit the merge with a message that names the base and how you resolved the conflicts, then `git push origin HEAD:<branch>`. If the push is rejected, the branch moved: never force it, and don't rebase (that would drop your merge commit). Fetch the branch (`git fetch origin <branch>`), merge it in (`git merge origin/<branch>`), resolving by intent, run every check again, and push again. After three rejected tries, stop and report `fail`, saying the branch keeps moving.
 - **Rebase.** Push with the lease from the factory prompt: `git push --force-with-lease=<branch>:<head you checked out> origin HEAD:<branch>`. If the lease refuses it, someone pushed while you worked: start again from step 1 on the new head. Never push with plain `--force`.
 
 Post a short record on the PR with `gh pr comment <n> --body-file <file>`:
