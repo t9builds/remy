@@ -1184,8 +1184,23 @@ function conflicted(run, f, env, d) {
   run.base = d.base ?? run.base;
   if (mergeability(d) !== "conflict" || !resolvable(run, f))
     return;
-  enter(run, "resolving", env.now(), `conflicts with ${run.base ? `\`${run.base}\`` : "its base"}`);
-  return Promise.resolve(true);
+  return resolve4(run, f, env);
+}
+async function resolve4(run, f, env) {
+  const now = env.now();
+  const most = maxResolves(f);
+  const round = (run.resolves ?? 0) + 1;
+  const on = `*#${run.number} ${defang(run.title)}* conflicts with \`${run.base ?? "its base"}\``;
+  if (round > most) {
+    await env.notify(run, `\uD83D\uDED1 ${on}; the factory holds it after ${most} resolutions
+${run.pr}`).catch(() => {});
+    return hold(run, now, `conflicts with \`${run.base ?? "its base"}\` (after ${most} resolutions)`);
+  }
+  run.resolves = round;
+  enter(run, "resolving", now, `conflicts with ${run.base ? `\`${run.base}\`` : "its base"}`);
+  await env.notify(run, `\uD83D\uDD00 ${on}; a resolver brings it up to date (${round} of ${most})
+${run.pr}`).catch(() => {});
+  return true;
 }
 function letGo(run) {
   if (run.agent)
@@ -1379,19 +1394,8 @@ async function resolving(run, f, env) {
     }
     if (!env.canStartAgent())
       return false;
-    const most = maxResolves(f);
-    const round = (run.resolves ?? 0) + 1;
-    const on = `*#${run.number} ${defang(run.title)}* conflicts with \`${run.base ?? "its base"}\``;
-    if (round > most) {
-      await env.notify(run, `\uD83D\uDED1 ${on}; the factory holds it after ${most} resolutions
-${run.pr}`).catch(() => {});
-      return hold(run, now, `conflicts with \`${run.base ?? "its base"}\` (after ${most} resolutions)`);
-    }
-    run.resolves = round;
     run.reason = `conflicts with \`${run.base ?? "its base"}\``;
     await start(run, env, step, resolvePrompt(run, step, f));
-    await env.notify(run, `\uD83D\uDD00 ${on}; a resolver brings it up to date (${round} of ${most})
-${run.pr}`).catch(() => {});
     return false;
   }
   const report = await reportOf(run, step, env);

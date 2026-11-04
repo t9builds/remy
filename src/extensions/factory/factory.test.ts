@@ -247,6 +247,15 @@ test("a fixer that stops on a usage limit stays fixing, to restart later; a held
   expect(again.saved()[other.pr]!.agent).toMatchObject({ name: "fixer2" });
 });
 
+test("a resolver that stops on a usage limit stays resolving with the same resolutions, to restart later", async () => {
+  const root = repo("api-limit-resolve", GOOD);
+  const resolving = { ...savedRun(root, 7, "resolving", "resolver1"), resolves: 1 };
+  const { h, saved } = await hostWithRuns([resolving]);
+  await h.emit("session.stopped", { session: ref({ name: "resolver1" }), last: LIMIT });
+  expect(saved()[resolving.pr]).toMatchObject({ stage: "resolving", resolves: 1 });
+  expect(saved()[resolving.pr]!.agent).toBeUndefined();
+});
+
 test("a held run that restarts on new commits remembers its agents as earlier, so a resolver waits for them", async () => {
   const root = repo("api-earlier", GOOD);
   const held = { ...savedRun(root, 7, "held", "old-agent"), earlier: [{ name: "older", id: "o1" }] };

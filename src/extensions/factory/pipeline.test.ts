@@ -798,6 +798,50 @@ describe("conflicts with the base (ADR-0012)", () => {
     expect(steps(w)).toEqual(["review"]);
   });
 
+  test("a conflict found at wait(ci) goes to the resolver while CI is pending", async () => {
+    const waiting = world();
+    const f = defineFactory({ steps: [wait("ci"), agent("review", { skill: "/review" }), action("merge")] });
+    const run = newRun();
+    waiting.w.pr = detail({ ...CONFLICT, ci: "pending" });
+    await pre(run, waiting.env, f);
+    expect(run.stage).toBe("resolving");
+    expect(steps(waiting.w)).toEqual(["resolve"]);
+  });
+
+  test("red CI on a conflicting PR goes to the resolver, not the fixer", async () => {
+    const fixer = world();
+    const fixing: Run = { ...newRun(), stage: "fixing" };
+    fixer.w.pr = detail({ ...CONFLICT, ci: "fail", failing: ["e2e"] });
+    await pre(fixing, fixer.env);
+    expect(fixing.stage).toBe("resolving");
+    expect(steps(fixer.w)).toEqual(["resolve"]);
+  });
+
+  test("a conflict found at the merge action goes to the resolver, and no merge is attempted", async () => {
+    const merging = world();
+    const merge = newRun();
+    merge.step = 3;
+    merging.w.pr = detail(CONFLICT);
+    await pre(merge, merging.env);
+    expect(merge.stage).toBe("resolving");
+    expect(merging.w.merges).toEqual([]);
+  });
+
+  test("a resolver that is started again after a usage limit is the same resolution: no new round, no new notice", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(run.resolves).toBe(1);
+    expect(w.notices).toHaveLength(1);
+    // The usage-limit handler drops the agent and leaves the stage as it was.
+    run.agent = undefined;
+    await pre(run, env);
+    expect(steps(w)).toEqual(["resolve", "resolve"]);
+    expect(run.resolves).toBe(1);
+    expect(w.notices).toHaveLength(1);
+  });
+
   test("no resolver starts while an earlier agent of the run still works on the PR", async () => {
     const { w, env } = world();
     const run = newRun();

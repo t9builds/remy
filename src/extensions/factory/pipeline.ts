@@ -376,8 +376,23 @@ const resolvable = (run: Run, f: Factory) => f.conflicts !== false && !run.merge
 function conflicted(run: Run, f: Factory, env: Env, d: PrDetail): Promise<boolean> | undefined {
   run.base = d.base ?? run.base;
   if (mergeability(d) !== "conflict" || !resolvable(run, f)) return undefined;
-  enter(run, "resolving", env.now(), `conflicts with ${run.base ? `\`${run.base}\`` : "its base"}`);
-  return Promise.resolve(true);
+  return resolve(run, f, env);
+}
+
+/** Counts the resolution when the run enters `resolving`, as `fix` does for `fixing`: a restarted resolver is the same round. */
+async function resolve(run: Run, f: Factory, env: Env) {
+  const now = env.now();
+  const most = maxResolves(f);
+  const round = (run.resolves ?? 0) + 1;
+  const on = `*#${run.number} ${defang(run.title)}* conflicts with \`${run.base ?? "its base"}\``;
+  if (round > most) {
+    await env.notify(run, `🛑 ${on}; the factory holds it after ${most} resolutions\n${run.pr}`).catch(() => {});
+    return hold(run, now, `conflicts with \`${run.base ?? "its base"}\` (after ${most} resolutions)`);
+  }
+  run.resolves = round;
+  enter(run, "resolving", now, `conflicts with ${run.base ? `\`${run.base}\`` : "its base"}`);
+  await env.notify(run, `🔀 ${on}; a resolver brings it up to date (${round} of ${most})\n${run.pr}`).catch(() => {});
+  return true;
 }
 
 /** The run moves on without its agent, which may still be at work (one that timed out, say): keep it in `earlier`. */
@@ -601,17 +616,8 @@ async function resolving(run: Run, f: Factory, env: Env): Promise<boolean> {
       return false;
     }
     if (!env.canStartAgent()) return false;
-    const most = maxResolves(f);
-    const round = (run.resolves ?? 0) + 1;
-    const on = `*#${run.number} ${defang(run.title)}* conflicts with \`${run.base ?? "its base"}\``;
-    if (round > most) {
-      await env.notify(run, `🛑 ${on}; the factory holds it after ${most} resolutions\n${run.pr}`).catch(() => {});
-      return hold(run, now, `conflicts with \`${run.base ?? "its base"}\` (after ${most} resolutions)`);
-    }
-    run.resolves = round;
     run.reason = `conflicts with \`${run.base ?? "its base"}\``;
     await start(run, env, step, resolvePrompt(run, step, f));
-    await env.notify(run, `🔀 ${on}; a resolver brings it up to date (${round} of ${most})\n${run.pr}`).catch(() => {});
     return false;
   }
   const report = await reportOf(run, step, env);
