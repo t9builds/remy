@@ -115,8 +115,10 @@ async function hostWith(
   stateDir = join(dir, `state-${Math.random()}`),
 ) {
   const hidden: string[] = [];
+  const posts: string[] = [];
+  const logs: string[] = [];
   const h = new ExtensionHost({
-    post: async () => "id",
+    post: async (text) => (posts.push(text), "id"),
     spawn: async () => ({ name: "x", label: "x", id: "x", cwd: "/", worktree: true, output: "" }),
     close: async () => "",
     tell: () => {},
@@ -124,12 +126,12 @@ async function hostWith(
     config,
     waitingListChanged: () => {},
     waitingListText: async () => "",
-    log: () => {},
+    log: (...a) => void logs.push(a.join(" ")),
     stateDir,
   });
   // By default offline: the PR can't be looked up, so the run stays at its first step.
   await h.load("builtin:factory", "test", createFactory(world));
-  return { h, hidden };
+  return { h, hidden, posts, logs };
 }
 
 test("a ready PR in a listed repo starts a run; an unlisted repo's or a notify-level one doesn't", async () => {
@@ -222,10 +224,10 @@ async function hostWithRuns(runs: Run[], over: Partial<Config> = {}, world: Part
     JSON.stringify({ runs: Object.fromEntries(runs.map((r) => [r.pr, r])) }),
   );
   const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api"] }, ...over };
-  const { h } = await hostWith(config, [], world, stateDir);
+  const { h, posts, logs } = await hostWith(config, [], world, stateDir);
   const saved = () =>
     JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs as Record<string, Run>;
-  return { h, saved };
+  return { h, saved, posts, logs };
 }
 
 const LIMIT = "You've hit your session limit · resets 8:10pm (Europe/Prague)";
@@ -329,4 +331,53 @@ test("an orphaned factory agent is closed; a run's current agent and sessions wi
   // Still listed (stopped, not removed): the next tick doesn't try them again.
   await h.emit("tick", { at: 2 });
   expect(closed.sort()).toEqual(["cabbage", "gone"]);
+});
+
+test("a fix offer nobody answers expires: the run ends and its question leaves the waiting list; a late reply is ignored", async () => {
+  const root = repo("api-expire", GOOD);
+  const day = 24 * 60 * 60_000;
+  const asking = (number: number, ageDays: number) => ({
+    ...savedRun(root, number, "asking"),
+    since: Date.now() - ageDays * day,
+    ask: { purpose: "fix" as const, question: "Start an agent on a fix? Reply yes." },
+  });
+  const old = asking(7, 4);
+  const fresh = asking(8, 1);
+  const { h, saved, posts } = await hostWithRuns([old, fresh], { extensions: { repos: ["api-expire"] } });
+  const keys = () => h.waitingEntries().map((e) => e.key);
+  // Restarted: the lapsed offer is not posted again, the 1-day-old one waits for its answer again.
+  await Bun.sleep(0);
+  expect(posts).toEqual(["Start an agent on a fix? Reply yes."]);
+  expect(keys()).not.toContain("ask:factory:api#7");
+  expect(keys()).toContain("ask:factory:api#8");
+  await h.emit("tick", { at: 1 });
+  expect(saved()[old.pr]).toMatchObject({ stage: "done", reason: "no answer to the fix offer in 3 days" });
+  expect(saved()[old.pr]!.ask).toBeUndefined();
+  expect(keys()).not.toContain("ask:factory:api#7");
+  expect(saved()[fresh.pr]).toMatchObject({ stage: "asking" });
+  expect(keys()).toContain("ask:factory:api#8");
+  // The user answers after the expiry: the reply is not consumed (it reaches the coordinator), nothing starts.
+  expect(h.answer("factory:api#7", "yes")).toBe(false);
+  await new Promise((r) => setTimeout(r, 10));
+  expect(saved()[old.pr]).toMatchObject({ stage: "done", reason: "no answer to the fix offer in 3 days" });
+});
+
+test("a fix offer that lapses while it is on the waiting list is withdrawn without logging a failed ask", async () => {
+  const root = repo("api-lapse", GOOD);
+  const day = 24 * 60 * 60_000;
+  // Just inside the 3 days: asked again on restart, lapsed by the tick.
+  const run = {
+    ...savedRun(root, 7, "asking"),
+    since: Date.now() - 3 * day + 50,
+    ask: { purpose: "fix" as const, question: "Start an agent on a fix? Reply yes." },
+  };
+  const { h, saved, logs } = await hostWithRuns([run], { extensions: { repos: ["api-lapse"] } });
+  expect(h.waitingEntries().map((e) => e.key)).toContain("ask:factory:api#7");
+  await Bun.sleep(100);
+  await h.emit("tick", { at: 1 });
+  await Bun.sleep(10);
+  expect(saved()[run.pr]).toMatchObject({ stage: "done" });
+  expect(h.waitingEntries().map((e) => e.key)).not.toContain("ask:factory:api#7");
+  // Withdrawing the question is not a failure to log.
+  expect(logs.filter((l) => l.includes("ask failed"))).toEqual([]);
 });

@@ -121,6 +121,17 @@ export type Env = {
 
 /** An agent that just started, or just stopped, gets this long before it counts as stopped without a report. */
 const GRACE_MS = 3 * 60_000;
+/**
+ * An offer to start a fix lapses after this long unanswered (ADR-0012). The author was told of the failure when it
+ * happened, so a lapsed offer loses nothing. Three days, not hours: it must outlive a weekend away. Only `"fix"`
+ * lapses. An `"approve"` or `"continue"` question stays until answered: approving above the autonomy level is a
+ * person's call (ADR-0005, ADR-0006), so Remy never goes on without it, and the run is stuck on the question anyway:
+ * holding it would only turn one waiting-list item into another.
+ */
+const FIX_OFFER_TTL_MS = 3 * 24 * 60 * 60_000;
+/** Whether `run` waits on a fix offer that has gone unanswered past its lifetime. */
+export const fixOfferLapsed = (run: Run, now: number) =>
+  run.ask?.purpose === "fix" && !run.ask.answer && now - run.since > FIX_OFFER_TTL_MS;
 /** GitHub may take a moment to show a pushed fix or a merge. */
 const PUSH_WAIT_MS = 30 * 60_000;
 
@@ -304,6 +315,11 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
   if (run.stage === "asking") {
     if (await mergedByHand(run, f, env)) return true;
     const a = run.ask;
+    if (fixOfferLapsed(run, now)) {
+      run.ask = undefined;
+      enter(run, "done", now, "no answer to the fix offer in 3 days");
+      return false;
+    }
     if (!a?.answer) return false;
     const yes = YES.test(a.answer);
     if (a.purpose === "approve") {
