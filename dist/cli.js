@@ -1110,8 +1110,14 @@ ${run.pr}`).catch(() => {});
 var ciFails = (run, f, env, d, what = "CI fails") => fixable(run, f) ? fix(run, f, env, what, d.failing.join(", ") || undefined) : hold(run, env.now(), what);
 var lastPass = (run, name) => run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
 async function advance(run, f, autonomy, env) {
-  for (let i = 0;i < 50 && await stepOnce(run, f, autonomy, env); i++)
-    ;
+  for (let i = 0;i < 50; i++) {
+    const had = run.agent;
+    const again = await stepOnce(run, f, autonomy, env);
+    if (had && run.agent !== had)
+      await env.close(had);
+    if (!again)
+      break;
+  }
 }
 async function stepOnce(run, f, autonomy, env) {
   const now = env.now();
@@ -1212,10 +1218,15 @@ async function reportOf(run, step, env) {
       hold(run, now, `${step.name} (${agent.name}) stopped without reporting`);
     return;
   }
-  await env.close(agent);
   run.agent = undefined;
   run.reports.push(report);
   return report;
+}
+async function overtaken(run, f, env) {
+  if (run.stage === "held" || run.mergeSha)
+    return;
+  const d = await env.pr(run.pr);
+  return d && d.state !== "OPEN" ? closed(run, d, f, env) : undefined;
 }
 async function fixing(run, f, env) {
   const step = fixerStep(f);
@@ -1234,7 +1245,7 @@ async function fixing(run, f, env) {
   }
   const report = await reportOf(run, step, env);
   if (!report)
-    return false;
+    return await overtaken(run, f, env) ?? false;
   const now = env.now();
   await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "fail")
@@ -1264,7 +1275,7 @@ async function agentStep(run, step, f, env) {
   }
   const report = await reportOf(run, step, env);
   if (!report)
-    return false;
+    return await overtaken(run, f, env) ?? false;
   const summary = report.summary ?? "";
   const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "fix");
   const holds = onFail === "hold" || onFail === "fix" && !fixable(run, f);
@@ -1402,6 +1413,7 @@ function closed(run, d, f, env) {
     run.mergeSha = d.mergeSha;
     return next(run, env.now(), merge + 1);
   }
+  run.agent = undefined;
   enter(run, "done", env.now(), d.state === "MERGED" ? "merged" : "the PR was closed");
   return false;
 }
@@ -1416,6 +1428,7 @@ var spawnHitUsageLimit = (message = "") => message.split(/\n|: /).some((part) =>
 var BACKOFF_MS = 30 * 60000;
 var KEEP_MS = 7 * 24 * 3600000;
 var isReady = (s) => !s.role && !!s.pr?.head && s.pr.state === "OPEN" && !s.pr.draft && s.pr.ci !== "fail" && s.pr.review !== "CHANGES_REQUESTED" && s.status !== "busy";
+var isOrphan = (s, current) => s.role === "factory" && !current.has(s.name);
 var factory_default = (remy) => createFactory()(remy);
 var createFactory = (world = {}) => (remy) => {
   const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo]));
@@ -1554,6 +1567,11 @@ var createFactory = (world = {}) => (remy) => {
           remy.log("factory step failed", url, e?.message ?? e);
         }
         syncWaitingList(run);
+      }
+      const current = new Set(Object.values(runs).flatMap((r) => r.agent ? [r.agent.name] : []));
+      for (const s of remy.sessions().filter((s) => isOrphan(s, current))) {
+        remy.log("closing orphaned factory agent", s.name);
+        await env.close({ name: s.name, id: s.sessionId });
       }
     } finally {
       save();

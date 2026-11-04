@@ -46,6 +46,9 @@ export const isReady = (s: SessionRef) =>
   s.pr.review !== "CHANGES_REQUESTED" &&
   s.status !== "busy";
 
+/** A step agent or fixer that no run has as its current agent. Sessions without the factory's role are never one. */
+const isOrphan = (s: SessionRef, current: Set<string>) => s.role === "factory" && !current.has(s.name);
+
 export default (remy: Remy) => createFactory()(remy);
 
 /** The factory extension; `world` replaces parts of the real gh/gcloud/claude world, for tests. */
@@ -195,6 +198,14 @@ export const createFactory =
             remy.log("factory step failed", url, e?.message ?? e);
           }
           syncWaitingList(run);
+        }
+        // A factory agent no run is waiting on has nothing left to do: the PR was merged or closed by hand, or the run
+        // went on, or is gone. Its PR isn't on the session (it works detached, or on a branch of its own), so the
+        // test is whether any run has it as its current agent; one that does is never closed here.
+        const current = new Set(Object.values(runs).flatMap((r) => (r.agent ? [r.agent.name] : [])));
+        for (const s of remy.sessions().filter((s) => isOrphan(s, current))) {
+          remy.log("closing orphaned factory agent", s.name);
+          await env.close({ name: s.name, id: s.sessionId });
         }
       } finally {
         save();

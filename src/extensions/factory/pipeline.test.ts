@@ -714,3 +714,50 @@ test("validate reports a broken pipeline", () => {
     'gate g: no agent step "nope"',
   ]);
 });
+
+describe("agents a run lets go of", () => {
+  test("a PR merged by hand while an agent is on the step closes that agent", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env);
+    expect(w.closed).toEqual([]);
+    w.pr = { ...w.pr, state: "MERGED", mergeSha: "mmm" };
+    // The agent is still working and never reports.
+    await go(run, env);
+    expect(w.closed).toEqual(["agent1"]);
+    expect(run.agent?.name).not.toBe("agent1");
+  });
+
+  test("a PR closed by hand closes the agent too", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env);
+    w.pr = { ...w.pr, state: "CLOSED" };
+    await go(run, env);
+    expect(run.stage).toBe("done");
+    expect(w.closed).toEqual(["agent1"]);
+  });
+
+  test("a retry of a run held on a stuck agent closes it", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env);
+    w.t += 61 * 60_000;
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(w.closed).toEqual([]);
+    w.t += 1000;
+    w.reports.push({ pr: URL, at: w.t, step: "", kind: "retry" });
+    await go(run, env);
+    expect(w.closed).toContain("agent1");
+  });
+
+  test("an agent that reported is closed once", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env);
+    w.report("pass");
+    await go(run, env);
+    expect(w.closed.filter((n) => n === "agent1")).toEqual(["agent1"]);
+  });
+});

@@ -276,3 +276,54 @@ test("a fixer with its agent running counts against maxFactoryAgents", async () 
   expect(await spawn(1)).toEqual([]);
   expect(await spawn(2)).toEqual(["#8"]);
 });
+
+test("an orphaned factory agent is closed; a run's current agent and sessions without the role are left alone", async () => {
+  const root = repo("api-orphans", GOOD);
+  const config: Config = {
+    ...DEFAULTS,
+    repoRoots: [dir],
+    autonomy: "merge",
+    extensions: { repos: ["api-orphans"] },
+  };
+  const stateDir = join(dir, `state-${Math.random()}`);
+  mkdirSync(stateDir, { recursive: true });
+  const active = savedRun(root, 7, "agent", "current");
+  const done = savedRun(root, 8, "done");
+  writeFileSync(
+    join(stateDir, "builtin_factory.json"),
+    JSON.stringify({ runs: { [active.pr]: active, [done.pr]: done } }),
+  );
+  const closed: string[] = [];
+  const sessions = [
+    ref({ name: "current", sessionId: "c1", role: "factory", pr: undefined }),
+    // cabbage's run is done; nothing has it as its agent.
+    ref({ name: "cabbage", sessionId: "c2", role: "factory", pr: undefined, status: "waiting" }),
+    ref({ name: "gone", sessionId: "c3", role: "factory", pr: undefined }),
+    ref({ name: "mine", sessionId: "c4", pr: undefined }),
+    ref({ name: "basil", sessionId: "c5", role: undefined, spawned: true }),
+  ];
+  const h = new ExtensionHost({
+    post: async () => "id",
+    spawn: async () => ({ name: "x", label: "x", id: "x", cwd: "/", worktree: true, output: "" }),
+    close: async () => "",
+    tell: () => {},
+    sessions: () => sessions,
+    config,
+    waitingListChanged: () => {},
+    waitingListText: async () => "",
+    log: () => {},
+    stateDir,
+  });
+  await h.load(
+    "builtin:factory",
+    "test",
+    createFactory({
+      pr: async () => undefined,
+      agentStatus: async () => "busy",
+      reports: () => [],
+      close: async (a) => void closed.push(a.name),
+    }),
+  );
+  await h.emit("tick", { at: 1 });
+  expect(closed.sort()).toEqual(["cabbage", "gone"]);
+});
