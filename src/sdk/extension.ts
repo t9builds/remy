@@ -27,6 +27,8 @@ export type Pr = {
   failing: string[];
   /** Commit at the head of the PR branch. */
   head?: string;
+  /** The PR's branch. */
+  branch?: string;
 };
 
 /** A started agent: its name, its worktree label, the session id `claude --bg` printed, and its folder. */
@@ -42,6 +44,7 @@ export type SessionRef = {
   cwd: string;
   /** GitHub "owner/name" when the checkout has a GitHub origin. */
   repo?: string;
+  /** The branch checked out; `gitbutler/workspace` in a GitButler workspace, whose PRs are its applied branches'. */
   branch?: string;
   /** Remy started it (an agent), rather than you. */
   spawned: boolean;
@@ -51,8 +54,10 @@ export type SessionRef = {
   role?: string;
   /** As last seen: idle, busy, waiting, or ended (a background session whose process is gone). */
   status: string;
-  /** Its branch's PR, as last seen. */
+  /** Its branch's PR, as last seen; the first of `prs` when it has several. */
   pr?: Pr;
+  /** Every PR it works on, as last seen: its branch's, or one per applied branch in a GitButler workspace (ADR-0012). */
+  prs: Pr[];
   /** The workspace it reports to. */
   workspace: string;
 };
@@ -115,7 +120,8 @@ export type WaitingEntry = {
   label: string;
   /**
    * Which workspace's list: by session, else this workspace, else every workspace. An entry with a session replaces
-   * that session's own line, unless that line is a question (rank 0).
+   * that session's own lines, unless a line is a question (rank 0); when `url` is one of the session's PRs, only its
+   * line about that PR.
    */
   session?: string;
   workspace?: string;

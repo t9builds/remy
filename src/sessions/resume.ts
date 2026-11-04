@@ -10,8 +10,7 @@ import { readJson } from "../shared/json-file";
 import { PATHS } from "../shared/paths";
 import { type AgentRow, listAgents } from "./agents";
 import { type RemyEvent, readEvents } from "./events";
-import { gitInfo, prInfo } from "./git";
-import { DEFAULT_BRANCHES } from "./snapshot";
+import { checkoutPrs, gitInfo } from "./git";
 import { agentEnv } from "./spawn";
 import { type Spawned, spawnedEntry } from "./spawned";
 
@@ -97,7 +96,7 @@ export type ToResumeWorld = {
   /** The newest hook event of each session, by session id. */
   latest: () => Map<string, RemyEvent>;
   exists: (path: string) => boolean;
-  /** The repo a folder belongs to and the PR of its branch, if it has one. */
+  /** The repo a folder belongs to and the PR of its branch, if it has one (an open one first, when it has several). */
   lookup: (cwd: string) => Promise<{ repo?: string; pr?: Pick<Pr, "state"> }>;
 };
 
@@ -108,7 +107,8 @@ const realToResumeWorld: ToResumeWorld = {
   exists: existsSync,
   lookup: async (cwd) => {
     const { branch, repo } = await gitInfo(cwd);
-    return { repo, pr: branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
+    const prs = await checkoutPrs(cwd, branch);
+    return { repo, pr: prs.find((p) => p.state === "OPEN") ?? prs[0] };
   },
 };
 

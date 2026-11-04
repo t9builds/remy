@@ -246,6 +246,7 @@ async function refOf(sessionId: string, cwd?: string): Promise<SessionRef> {
     spawned: s.spawned,
     role: s.role,
     status: s.status ?? "",
+    prs: [],
     workspace: workspaceOf(cwd),
   };
 }

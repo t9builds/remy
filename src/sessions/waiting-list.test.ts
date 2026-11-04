@@ -82,6 +82,20 @@ test("leaves out busy sessions, pending CI, closed PRs and interactive sessions 
   expect(q).toEqual([]);
 });
 
+test("a GitButler session has a line per PR that waits, each naming its PR, unless it asks something", () => {
+  const red = pr({ number: 822, url: "https://github.com/o/r/pull/822", ci: "fail", failing: ["e2e"] });
+  const ready = pr({ number: 823, url: "https://github.com/o/r/pull/823" });
+  const merged = pr({ number: 821, state: "MERGED" });
+  const prs = [merged, red, ready];
+  const burger = session({ name: "burger", spawned: false, kind: "interactive", branch: "gitbutler/workspace", prs });
+  expect(waitingListOf(snap(burger)).map((i) => [i.rank, i.why, i.pr])).toEqual([
+    [1, "#822 CI failing: e2e", red.url],
+    [3, "#823 PR ready for you", ready.url],
+  ]);
+  const asking = { ...burger, lastEvent: stop("Which branch first?") };
+  expect(waitingListOf(snap(asking)).map((i) => i.why)).toEqual(['asks: "Which branch first?"']);
+});
+
 test("formats one line per item and counts the busy ones", () => {
   const busy = session({ status: "busy" });
   const red = session({ name: "risotto", about: "fix login timeout", pr: pr({ ci: "fail", failing: ["unit"] }) });

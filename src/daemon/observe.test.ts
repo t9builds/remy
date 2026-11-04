@@ -62,6 +62,23 @@ describe("events from snapshots", () => {
     expect(names(snap(view({ pr: pr({ ci: "fail" }) })), snap(view({ pr: pr({ ci: "pending" }) })))).toEqual([]);
   });
 
+  test("a GitButler session's PRs each raise their own events", () => {
+    const a = pr({ draft: false });
+    const b = pr({ number: 8, url: "https://github.com/acme-corp/api/pull/8", draft: false });
+    const gb = (prs: Pr[]) => view({ branch: "gitbutler/workspace", pr: prs[0], prs });
+    const events = (prev: Snapshot, next: Snapshot) =>
+      snapshotEvents(prev, next, () => "work").map((e) => [e.name, "pr" in e.payload ? e.payload.pr.number : 0]);
+    expect(events(snap(gb([a])), snap(gb([a, b])))).toEqual([
+      ["pr.opened", 8],
+      ["pr.ready", 8],
+    ]);
+    expect(events(snap(gb([a, b])), snap(gb([a, { ...b, ci: "pass" }])))).toEqual([["pr.ci", 8]]);
+    expect(events(snap(gb([a, b])), snap(gb([{ ...a, state: "MERGED" }, b])))).toEqual([["pr.merged", 7]]);
+    expect(sessionRef(gb([a, b]), "work").prs.map((p) => p.number)).toEqual([7, 8]);
+    // A snapshot stored before `prs` reads its one PR.
+    expect(sessionRef(view({ pr: a }), "work").prs).toEqual([a]);
+  });
+
   test("hook events: a stop, a stop on a question, an exit", () => {
     const ref = sessionRef(view(), "work");
     const ev = (over: Partial<RemyEvent>): RemyEvent => ({ ts: 1, event: "Stop", session_id: "s1", ...over });

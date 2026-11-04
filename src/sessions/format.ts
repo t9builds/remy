@@ -1,7 +1,7 @@
 /** Sessions as text: one line each for `remy status`, or one in detail. */
 import type { Ci, Pr } from "../sdk/extension";
 import { aboutOf } from "./nicknames";
-import type { SessionView, Snapshot } from "./snapshot";
+import { prsOf, type SessionView, type Snapshot } from "./snapshot";
 
 /** Optional styling for `formatTable`; the CLI passes colors, the coordinator gets plain text. */
 export type Paint = {
@@ -19,7 +19,9 @@ export function formatTable(s: Snapshot, paint: Paint = PLAIN): string {
     .sort((a, b) => b.startedAt - a.startedAt)
     .map((x) => {
       const where = x.repo ? `${x.repo}${x.branch ? `@${x.branch}` : ""}` : x.cwd;
-      const pr = x.pr ? ` · PR ${prLabel(x.pr, paint)} ${paint.dim(x.pr.url)}` : "";
+      const pr = prsOf(x)
+        .map((p) => ` · PR ${prLabel(p, paint)} ${paint.dim(p.url)}`)
+        .join("");
       const about = x.about ? paint.dim(` — ${aboutOf(x.about, 80)}`) : "";
       return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}${about}`;
     })
@@ -46,9 +48,12 @@ function ago(ms: number) {
 export function formatSession(x: SessionView, now = Date.now(), paint: Paint = PLAIN): string {
   const lines = [formatTable({ takenAt: now, sessions: [{ ...x, about: undefined }] }, paint), `  folder: ${x.cwd}`];
   if (x.about) lines.push(`  about: ${aboutOf(x.about, 300)}`);
-  if (x.pr) {
-    lines.push(`  PR title: ${x.pr.title}`);
-    if (x.pr.failing.length) lines.push(`  failing: ${x.pr.failing.join(", ")}`);
+  const prs = prsOf(x);
+  for (const pr of prs) {
+    // Several PRs (a GitButler workspace): each says which it is and its branch.
+    const which = prs.length > 1 ? ` #${pr.number}${pr.branch ? ` (${pr.branch})` : ""}` : "";
+    lines.push(`  PR${which} title: ${pr.title}`);
+    if (pr.failing.length) lines.push(`  failing${which}: ${pr.failing.join(", ")}`);
   }
   const e = x.lastEvent;
   if (e)

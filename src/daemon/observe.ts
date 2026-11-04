@@ -5,7 +5,7 @@
 
 import type { EventName, Events, SessionRef } from "../sdk/extension";
 import type { RemyEvent } from "../sessions/events";
-import type { SessionView, Snapshot } from "../sessions/snapshot";
+import { prsOf, type SessionView, type Snapshot } from "../sessions/snapshot";
 import { questionOf } from "../sessions/waiting-list";
 
 export type Emitted = { [E in EventName]: { name: E; payload: Events[E] } }[EventName];
@@ -20,7 +20,8 @@ export const sessionRef = (s: SessionView, workspace: string): SessionRef => ({
   about: s.about,
   role: s.role,
   status: s.status,
-  pr: s.pr,
+  pr: prsOf(s)[0],
+  prs: prsOf(s),
   workspace,
 });
 
@@ -38,21 +39,22 @@ export function snapshotEvents(
     const session = sessionRef(s, workspaceOf(s));
     const p = before.get(s.sessionId);
     if (!p) out.push({ name: "session.started", payload: { session } });
-    const was = p?.pr?.number === s.pr?.number ? p?.pr : undefined;
-    const pr = s.pr;
-    if (!pr) continue;
-    if (!was) {
-      // A PR first seen: opened, and maybe already further along.
-      out.push({ name: "pr.opened", payload: { session, pr } });
-      if (pr.state === "OPEN" && !pr.draft) out.push({ name: "pr.ready", payload: { session, pr } });
-      if (p && pr.state === "MERGED") out.push({ name: "pr.merged", payload: { session, pr } });
-      continue;
+    // Each PR on its own: a GitButler workspace has one per applied branch (ADR-0012).
+    for (const pr of session.prs) {
+      const was = p && prsOf(p).find((x) => x.number === pr.number);
+      if (!was) {
+        // A PR first seen: opened, and maybe already further along.
+        out.push({ name: "pr.opened", payload: { session, pr } });
+        if (pr.state === "OPEN" && !pr.draft) out.push({ name: "pr.ready", payload: { session, pr } });
+        if (p && pr.state === "MERGED") out.push({ name: "pr.merged", payload: { session, pr } });
+        continue;
+      }
+      if (pr.state === "OPEN" && !pr.draft && (was.draft || was.state !== "OPEN"))
+        out.push({ name: "pr.ready", payload: { session, pr } });
+      if (pr.ci !== was.ci && (pr.ci === "pass" || pr.ci === "fail"))
+        out.push({ name: "pr.ci", payload: { session, pr } });
+      if (pr.state === "MERGED" && was.state !== "MERGED") out.push({ name: "pr.merged", payload: { session, pr } });
     }
-    if (pr.state === "OPEN" && !pr.draft && (was.draft || was.state !== "OPEN"))
-      out.push({ name: "pr.ready", payload: { session, pr } });
-    if (pr.ci !== was.ci && (pr.ci === "pass" || pr.ci === "fail"))
-      out.push({ name: "pr.ci", payload: { session, pr } });
-    if (pr.state === "MERGED" && was.state !== "MERGED") out.push({ name: "pr.merged", payload: { session, pr } });
   }
   for (const p of prev.sessions)
     if (!after.has(p.sessionId))

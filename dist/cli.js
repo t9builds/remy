@@ -996,6 +996,9 @@ function gateBlockers(d, gate) {
     why.push(`touches protected ${hit}`);
   return why;
 }
+var gitbutlerRule = (run) => run.gitbutler ? [
+  `The author works in a GitButler workspace at ${run.repoDir} (on \`gitbutler/workspace\`, with ${run.branch} applied). Never run git or \`but\` there: don't check out, switch, commit, stash, reset or push from it, and never push \`gitbutler/workspace\`. Work in your own worktree, and push only with \`git push origin HEAD:${run.branch}\`, never with force.`
+] : [];
 function agentPrompt(run, step, f) {
   const n = run.number;
   const env = step.env ? f.environments?.[step.env] : undefined;
@@ -1010,6 +1013,7 @@ function agentPrompt(run, step, f) {
       `It is deployed to ${step.env}${env?.url ? ` (${env.url})` : ""}${run.mergeSha ? ` as ${run.mergeSha}` : ""}: check it there.`
     ] : [],
     afterMerge ? `Read the change with \`gh pr view ${n}\` and \`gh pr diff ${n}\`. Don't write code, push or open PRs.` : `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). If you fix something, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`.`,
+    ...gitbutlerRule(run),
     "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
     "",
     "As the very last step, report your verdict with exactly one of:",
@@ -1042,6 +1046,7 @@ function fixPrompt(run, step, f) {
     `You are the fixer in Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}, fix ${run.fixes} of at most ${maxFixes(f)}. You didn't write this change. What failed: ${run.reason}.`,
     ...run.about ? [`What it is for: ${run.about}`] : [],
     `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). Fix the cause, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. Once you push, the pipeline runs again from its first step.`,
+    ...gitbutlerRule(run),
     "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
     "",
     "As the very last step, report with exactly one of:",
@@ -1185,7 +1190,9 @@ async function mergedByHand(run, f, env) {
 }
 function verdictText(run, step, r) {
   const what = r.verdict === "pass" ? `\u2705 ${step} passed` : r.verdict === "fixed" ? `\uD83D\uDD27 ${step} fixed what it found` : `\uD83D\uDED1 ${step} failed; the factory holds it`;
-  return `${what} on *#${run.number} ${defang(run.title)}*${r.summary ? `: ${defang(r.summary)}` : ""}
+  const gitbutler = r.verdict === "fixed" && run.gitbutler ? `
+The fix is pushed to \`${run.branch}\`: in GitButler, integrate its upstream commits before you push that branch again.` : "";
+  return `${what} on *#${run.number} ${defang(run.title)}*${r.summary ? `: ${defang(r.summary)}` : ""}${gitbutler}
 ${run.pr}`;
 }
 async function reportOf(run, step, env) {
@@ -1405,7 +1412,8 @@ var endedOnUsageLimit = (last = "") => {
 var spawnHitUsageLimit = (message = "") => message.split(/\n|: /).some((part) => LIMIT_NOTICE.test(part.trim()));
 var BACKOFF_MS = 30 * 60000;
 var KEEP_MS = 7 * 24 * 3600000;
-var isReady = (s) => !s.role && !!s.pr?.head && s.pr.state === "OPEN" && !s.pr.draft && s.pr.ci !== "fail" && s.pr.review !== "CHANGES_REQUESTED" && s.status !== "busy";
+var readyPrs = (s) => s.role || s.status === "busy" ? [] : s.prs.filter((pr) => !!pr.head && pr.state === "OPEN" && !pr.draft && pr.ci !== "fail" && pr.review !== "CHANGES_REQUESTED");
+var GITBUTLER_WORKSPACE = "gitbutler/workspace";
 var factory_default = (remy) => createFactory()(remy);
 var createFactory = (world = {}) => (remy) => {
   const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo]));
@@ -1481,7 +1489,8 @@ var createFactory = (world = {}) => (remy) => {
     ...world
   };
   function syncWaitingList(run) {
-    const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
+    const name = run.gitbutler ? `${run.session} #${run.number}` : run.session;
+    const base = { key: run.pr, label: name, session: run.session, workspace: run.workspace, url: run.pr };
     if (run.stage === "done")
       return remy.waitingList.remove(run.pr);
     if (run.stage === "held")
@@ -1499,8 +1508,7 @@ var createFactory = (world = {}) => (remy) => {
       return;
     ticking = true;
     try {
-      for (const s of remy.sessions().filter(isReady)) {
-        const pr = s.pr;
+      for (const [s, pr] of remy.sessions().flatMap((s) => readyPrs(s).map((pr) => [s, pr]))) {
         const had = runs[pr.url];
         if (had && (isActive(had) || had.head === pr.head))
           continue;
@@ -1509,13 +1517,17 @@ var createFactory = (world = {}) => (remy) => {
         if (!f || autonomy(f) === "notify")
           continue;
         const now = Date.now();
+        const gitbutler = s.branch === GITBUTLER_WORKSPACE;
+        if (gitbutler && !pr.branch)
+          continue;
         runs[pr.url] = {
           pr: pr.url,
           number: pr.number,
           title: pr.title,
           repo: s.repo ?? trusted.get(root),
           repoDir: root,
-          branch: s.branch ?? "",
+          branch: (gitbutler ? pr.branch : s.branch) ?? "",
+          gitbutler: gitbutler || undefined,
           session: s.name,
           workspace: s.workspace,
           about: s.about,
@@ -1573,7 +1585,7 @@ var createFactory = (world = {}) => (remy) => {
 };
 
 // src/extensions/merged-cleanup.ts
-var shouldClose = (s) => s.spawned && s.pr?.state === "MERGED" && s.status !== "busy";
+var shouldClose = (s) => s.spawned && s.prs.length > 0 && s.prs.every((p) => p.state === "MERGED") && s.status !== "busy";
 function mergedCleanup(remy) {
   const closing = new Set;
   const closeIfMerged = async (s) => {
@@ -1581,7 +1593,7 @@ function mergedCleanup(remy) {
       return;
     closing.add(s.sessionId);
     try {
-      const pr = s.pr;
+      const pr = s.prs.at(-1);
       const cleanup = await remy.close(s.name, { merged: pr });
       const text = formatNotice([
         { session: s.name, repo: s.repo, what: "merged", detail: `PR #${pr.number} merged; ${cleanup}`, pr: pr.url }
@@ -3380,44 +3392,6 @@ async function nameSession(input, live) {
   return name;
 }
 
-// src/sessions/format.ts
-var same = (s) => s;
-var PLAIN = { name: same, status: (_, s) => s, ci: (_, s) => s, dim: same };
-function formatTable(s, paint = PLAIN) {
-  if (!s.sessions.length)
-    return "No sessions running.";
-  return s.sessions.sort((a, b) => b.startedAt - a.startedAt).map((x) => {
-    const where = x.repo ? `${x.repo}${x.branch ? `@${x.branch}` : ""}` : x.cwd;
-    const pr = x.pr ? ` \xB7 PR ${prLabel(x.pr, paint)} ${paint.dim(x.pr.url)}` : "";
-    const about = x.about ? paint.dim(` \u2014 ${aboutOf(x.about, 80)}`) : "";
-    return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}${about}`;
-  }).join(`
-`);
-}
-function prLabel(pr, paint = PLAIN) {
-  const state = pr.state === "OPEN" ? pr.draft ? "draft" : "open" : pr.state.toLowerCase();
-  return `#${pr.number} ${state}, ${paint.ci(pr.ci, `CI ${pr.ci}`)}${pr.review ? `, ${pr.review.toLowerCase().replace(/_/g, " ")}` : ""}`;
-}
-function ago(ms) {
-  const m = Math.round(ms / 60000);
-  return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 48 * 60 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
-}
-function formatSession(x, now = Date.now(), paint = PLAIN) {
-  const lines = [formatTable({ takenAt: now, sessions: [{ ...x, about: undefined }] }, paint), `  folder: ${x.cwd}`];
-  if (x.about)
-    lines.push(`  about: ${aboutOf(x.about, 300)}`);
-  if (x.pr) {
-    lines.push(`  PR title: ${x.pr.title}`);
-    if (x.pr.failing.length)
-      lines.push(`  failing: ${x.pr.failing.join(", ")}`);
-  }
-  const e = x.lastEvent;
-  if (e)
-    lines.push(`  last: ${e.event}${e.type ? ` ${e.type}` : ""} ${ago(now - e.ts)}${e.text ? ` \u2014 ${aboutOf(e.text, 800)}` : ""}`);
-  return lines.join(`
-`);
-}
-
 // src/sessions/events.ts
 import { appendFileSync as appendFileSync2, readFileSync as readFileSync4, statSync as statSync6, writeFileSync as writeFileSync3 } from "fs";
 var MAX_BYTES = 5 * 1024 * 1024;
@@ -3455,6 +3429,8 @@ function readEvents() {
 }
 
 // src/sessions/git.ts
+var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
+var GITBUTLER_WORKSPACE2 = "gitbutler/workspace";
 var GITHUB_REMOTE = /github\.com[:/](.+?)(\.git)?$/;
 var repoCache = new Map;
 function githubRepoOf(cwd) {
@@ -3488,7 +3464,7 @@ async function prInfo(cwd, branch) {
     "view",
     branch,
     "--json",
-    "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid"
+    "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid,headRefName"
   ], cwd);
   if (!out)
     return;
@@ -3501,8 +3477,42 @@ async function prInfo(cwd, branch) {
     draft: !!j.isDraft,
     review: j.reviewDecision ?? "",
     ...ciOf(j.statusCheckRollup),
-    head: j.headRefOid
+    head: j.headRefOid,
+    branch: j.headRefName
   };
+}
+async function checkoutPrs(cwd, branch) {
+  if (!branch || DEFAULT_BRANCHES.has(branch))
+    return [];
+  const branches = branch === GITBUTLER_WORKSPACE2 ? await appliedBranches(cwd) : [branch];
+  const prs = await Promise.all(branches.map((b) => prInfo(cwd, b)));
+  return prs.filter((p) => !!p);
+}
+async function appliedBranches(cwd) {
+  const listed = appliedOfStatus(await run2(["but", "status", "--json"], cwd));
+  if (listed)
+    return listed;
+  const parents = await run2(["git", "log", "-1", "--format=%P", GITBUTLER_WORKSPACE2], cwd);
+  const heads = await run2(["git", "for-each-ref", "--format=%(objectname) %(refname:short)", "refs/heads"], cwd);
+  return branchesAt(parents?.split(" ") ?? [], heads ?? "");
+}
+function appliedOfStatus(json) {
+  try {
+    const stacks = JSON.parse(json ?? "").stacks;
+    if (!Array.isArray(stacks))
+      return;
+    return stacks.flatMap((s) => s.branches ?? []).filter((b) => b.name && b.branchStatus !== "completelyUnpushed").map((b) => b.name);
+  } catch {
+    return;
+  }
+}
+function branchesAt(commits, heads) {
+  const at = new Set(commits.filter(Boolean));
+  return heads.split(`
+`).flatMap((line) => {
+    const [sha, name] = line.trim().split(" ");
+    return sha && name && at.has(sha) && !name.startsWith("gitbutler/") && !DEFAULT_BRANCHES.has(name) ? [name] : [];
+  });
 }
 
 // src/sessions/spawned.ts
@@ -3523,7 +3533,7 @@ function noteSession(spawned, sessionId, transcript) {
 }
 
 // src/sessions/snapshot.ts
-var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
+var prsOf = (s) => s.prs ?? (s.pr ? [s.pr] : []);
 async function takeSnapshot() {
   const config = loadConfig();
   const spawned = readJson(PATHS.spawned, {});
@@ -3536,7 +3546,7 @@ async function takeSnapshot() {
     const ev = latest.get(a.sessionId);
     const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
     const { branch, repo } = await gitInfo(cwd);
-    const pr = branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
+    const prs = await checkoutPrs(cwd, branch);
     const spawn = spawnedEntry(spawned, a.name, a.sessionId);
     return {
       sessionId: a.sessionId,
@@ -3550,7 +3560,8 @@ async function takeSnapshot() {
       about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
       repo,
       branch,
-      pr,
+      pr: prs[0],
+      prs,
       lastEvent: ev && { event: ev.event, type: ev.type, ts: ev.ts, text: ev.message ?? ev.last }
     };
   }));
@@ -3566,6 +3577,46 @@ function findSession(sessions, name) {
   throw new Error(hits.length ? `"${name}" matches ${hits.map((x) => x.name).join(", ")}; give the full name` : `no running session "${name}"; \`remy status\` lists them`);
 }
 
+// src/sessions/format.ts
+var same = (s) => s;
+var PLAIN = { name: same, status: (_, s) => s, ci: (_, s) => s, dim: same };
+function formatTable(s, paint = PLAIN) {
+  if (!s.sessions.length)
+    return "No sessions running.";
+  return s.sessions.sort((a, b) => b.startedAt - a.startedAt).map((x) => {
+    const where = x.repo ? `${x.repo}${x.branch ? `@${x.branch}` : ""}` : x.cwd;
+    const pr = prsOf(x).map((p) => ` \xB7 PR ${prLabel(p, paint)} ${paint.dim(p.url)}`).join("");
+    const about = x.about ? paint.dim(` \u2014 ${aboutOf(x.about, 80)}`) : "";
+    return `${paint.name(x.name)} ${paint.status(x.status, `[${x.status}${x.spawned ? ", spawned" : ""}]`)} ${where}${pr}${about}`;
+  }).join(`
+`);
+}
+function prLabel(pr, paint = PLAIN) {
+  const state = pr.state === "OPEN" ? pr.draft ? "draft" : "open" : pr.state.toLowerCase();
+  return `#${pr.number} ${state}, ${paint.ci(pr.ci, `CI ${pr.ci}`)}${pr.review ? `, ${pr.review.toLowerCase().replace(/_/g, " ")}` : ""}`;
+}
+function ago(ms) {
+  const m = Math.round(ms / 60000);
+  return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 48 * 60 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+}
+function formatSession(x, now = Date.now(), paint = PLAIN) {
+  const lines = [formatTable({ takenAt: now, sessions: [{ ...x, about: undefined }] }, paint), `  folder: ${x.cwd}`];
+  if (x.about)
+    lines.push(`  about: ${aboutOf(x.about, 300)}`);
+  const prs = prsOf(x);
+  for (const pr of prs) {
+    const which = prs.length > 1 ? ` #${pr.number}${pr.branch ? ` (${pr.branch})` : ""}` : "";
+    lines.push(`  PR${which} title: ${pr.title}`);
+    if (pr.failing.length)
+      lines.push(`  failing${which}: ${pr.failing.join(", ")}`);
+  }
+  const e = x.lastEvent;
+  if (e)
+    lines.push(`  last: ${e.event}${e.type ? ` ${e.type}` : ""} ${ago(now - e.ts)}${e.text ? ` \u2014 ${aboutOf(e.text, 800)}` : ""}`);
+  return lines.join(`
+`);
+}
+
 // src/sessions/changes.ts
 function diff(prev, next) {
   if (!prev)
@@ -3573,7 +3624,7 @@ function diff(prev, next) {
   const changes = [];
   const before = new Map(prev.sessions.map((s) => [s.sessionId, s]));
   const after = new Map(next.sessions.map((s) => [s.sessionId, s]));
-  const add = (s, what, detail) => changes.push({ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what, detail, pr: s.pr?.url });
+  const add = (s, what, detail, pr = prsOf(s)[0]) => changes.push({ session: s.name, sessionId: s.sessionId, cwd: s.cwd, repo: s.repo, what, detail, pr: pr?.url });
   for (const s of next.sessions) {
     const p = before.get(s.sessionId);
     if (!p) {
@@ -3582,20 +3633,28 @@ function diff(prev, next) {
     }
     if (p.status !== s.status)
       add(s, "status", `${p.status} \u2192 ${s.status}`);
-    if (!p.pr && s.pr)
-      add(s, "pr_opened", prLabel(s.pr));
-    else if (p.pr && s.pr) {
-      if (p.pr.state !== s.pr.state || p.pr.draft !== s.pr.draft)
-        add(s, "pr_state", `${prLabel(p.pr)} \u2192 ${prLabel(s.pr)}`);
-      if (p.pr.ci !== s.pr.ci && s.pr.ci !== "pending")
-        add(s, "ci", `CI ${s.pr.ci}${s.pr.failing.length ? `: ${s.pr.failing.join(", ")}` : ""}`);
-      if (p.pr.review !== s.pr.review && s.pr.review)
-        add(s, "review", s.pr.review.toLowerCase().replace(/_/g, " "));
+    const prsBefore = prsOf(p);
+    const prs = prsOf(s);
+    for (const pr of prs) {
+      const was = prsBefore.length === 1 && prs.length === 1 ? prsBefore[0] : prsBefore.find((x) => x.url === pr.url);
+      if (!was) {
+        add(s, "pr_opened", prLabel(pr), pr);
+        continue;
+      }
+      if (was.state !== pr.state || was.draft !== pr.draft)
+        add(s, "pr_state", `${prLabel(was)} \u2192 ${prLabel(pr)}`, pr);
+      if (was.ci !== pr.ci && pr.ci !== "pending")
+        add(s, "ci", `CI ${pr.ci}${pr.failing.length ? `: ${pr.failing.join(", ")}` : ""}`, pr);
+      if (was.review !== pr.review && pr.review)
+        add(s, "review", pr.review.toLowerCase().replace(/_/g, " "), pr);
     }
   }
-  for (const p of prev.sessions)
-    if (!after.has(p.sessionId) && !p.role)
-      add(p, "ended", p.pr ? `last PR ${prLabel(p.pr)}` : "session closed");
+  for (const p of prev.sessions) {
+    if (after.has(p.sessionId) || p.role)
+      continue;
+    const last = prsOf(p).map((x) => prLabel(x));
+    add(p, "ended", last.length ? `last PR ${last.join("; ")}` : "session closed");
+  }
   return changes;
 }
 async function snapshotDiff() {
@@ -3719,48 +3778,54 @@ function questionOf(last) {
   const q = end && !asks(end) && asksThenYou(end) || lines.findLast(asks);
   return q ? short(q) : undefined;
 }
-function itemOf(s) {
-  const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
+function prItemOf(pr) {
+  if (pr.ci === "fail")
+    return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
+  if (pr.review === "CHANGES_REQUESTED")
+    return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
+  if (pr.ci !== "pending")
+    return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };
+  return;
+}
+function itemsOf(s) {
+  const prs = prsOf(s);
+  const one = (it) => it ? [{ ...it, pr: prs[0]?.url }] : [];
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
-    return {
+    return one({
       rank: 0,
       why: "wants a permission",
       action: s.kind !== "background" ? "answer it in its terminal" : s.role ? `\`claude attach ${s.name}\`` : `reply "resume", or \`claude attach ${s.name}\``
-    };
+    });
   if (s.status === "busy")
-    return;
+    return [];
   if (asked)
-    return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
+    return one({ rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" });
   if (s.status === "waiting")
-    return { rank: 0, why: "waits for your answer", action: "reply to its thread" };
+    return one({ rank: 0, why: "waits for your answer", action: "reply to its thread" });
   if (s.role)
-    return;
-  if (pr?.ci === "fail")
-    return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
-  if (pr?.review === "CHANGES_REQUESTED")
-    return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
-  if (pr && pr.ci !== "pending")
-    return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };
-  if (s.spawned && !s.pr)
-    return { rank: 4, why: "stopped without a PR", action: "check what it did" };
-  return;
+    return [];
+  if (s.spawned && !prs.length)
+    return one({ rank: 4, why: "stopped without a PR", action: "check what it did" });
+  return prs.flatMap((pr) => {
+    const it = pr.state === "OPEN" ? prItemOf(pr) : undefined;
+    if (!it)
+      return [];
+    return [{ ...it, why: prs.length > 1 ? `#${pr.number} ${it.why}` : it.why, pr: pr.url }];
+  });
 }
 function waitingListOf(snapshot) {
   const items = [];
-  for (const s of snapshot.sessions) {
-    const it = itemOf(s);
-    if (it)
+  for (const s of snapshot.sessions)
+    for (const it of itemsOf(s))
       items.push({
         ...it,
         session: s.name,
         sessionId: s.sessionId,
         cwd: s.cwd,
         repo: s.repo,
-        pr: s.pr?.url,
         since: s.lastEvent?.ts ?? s.startedAt
       });
-  }
   return items.sort((a, b) => a.rank - b.rank || a.since - b.since).map(({ since, ...it }) => it);
 }
 function formatWaitingList(items, sessions = [], plain = false) {
@@ -3834,7 +3899,8 @@ var sessionRef = (s, workspace) => ({
   about: s.about,
   role: s.role,
   status: s.status,
-  pr: s.pr,
+  pr: prsOf(s)[0],
+  prs: prsOf(s),
   workspace
 });
 function snapshotEvents(prev, next, workspaceOf) {
@@ -3848,24 +3914,23 @@ function snapshotEvents(prev, next, workspaceOf) {
     const p = before.get(s.sessionId);
     if (!p)
       out.push({ name: "session.started", payload: { session } });
-    const was = p?.pr?.number === s.pr?.number ? p?.pr : undefined;
-    const pr = s.pr;
-    if (!pr)
-      continue;
-    if (!was) {
-      out.push({ name: "pr.opened", payload: { session, pr } });
-      if (pr.state === "OPEN" && !pr.draft)
+    for (const pr of session.prs) {
+      const was = p && prsOf(p).find((x) => x.number === pr.number);
+      if (!was) {
+        out.push({ name: "pr.opened", payload: { session, pr } });
+        if (pr.state === "OPEN" && !pr.draft)
+          out.push({ name: "pr.ready", payload: { session, pr } });
+        if (p && pr.state === "MERGED")
+          out.push({ name: "pr.merged", payload: { session, pr } });
+        continue;
+      }
+      if (pr.state === "OPEN" && !pr.draft && (was.draft || was.state !== "OPEN"))
         out.push({ name: "pr.ready", payload: { session, pr } });
-      if (p && pr.state === "MERGED")
+      if (pr.ci !== was.ci && (pr.ci === "pass" || pr.ci === "fail"))
+        out.push({ name: "pr.ci", payload: { session, pr } });
+      if (pr.state === "MERGED" && was.state !== "MERGED")
         out.push({ name: "pr.merged", payload: { session, pr } });
-      continue;
     }
-    if (pr.state === "OPEN" && !pr.draft && (was.draft || was.state !== "OPEN"))
-      out.push({ name: "pr.ready", payload: { session, pr } });
-    if (pr.ci !== was.ci && (pr.ci === "pass" || pr.ci === "fail"))
-      out.push({ name: "pr.ci", payload: { session, pr } });
-    if (pr.state === "MERGED" && was.state !== "MERGED")
-      out.push({ name: "pr.merged", payload: { session, pr } });
   }
   for (const p of prev.sessions)
     if (!after.has(p.sessionId))
@@ -3909,7 +3974,13 @@ async function showWaitingList(m, prev, text, log) {
 var MESSAGE_GONE = /message to edit not found|message can't be edited|message_not_found|cant_update_message/i;
 function composeWaitingList(snap, workspace, entries, workspaceOf) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s) === workspace);
-  const claimed = new Set(entries.flatMap((e) => e.session ? [e.session] : []));
+  const claimed = new Set(entries.flatMap((e) => {
+    if (!e.session)
+      return [];
+    const of = sessions.find((s) => s.name === e.session);
+    return of && prsOf(of).some((p) => p.url === e.url) ? [`${e.session} ${e.url}`] : [e.session];
+  }));
+  const isClaimed = (it) => claimed.has(it.session) || claimed.has(`${it.session} ${it.pr}`);
   const fromExtensions = entries.flatMap((e) => {
     if (e.hide)
       return [];
@@ -3929,7 +4000,7 @@ function composeWaitingList(snap, workspace, entries, workspaceOf) {
       }
     ];
   });
-  const own = waitingListOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
+  const own = waitingListOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !isClaimed(it));
   const items = [...own, ...fromExtensions].sort((a, b) => a.rank - b.rank);
   return formatWaitingList(items, sessions);
 }
@@ -4141,6 +4212,7 @@ async function refOf(sessionId, cwd) {
     spawned: s.spawned,
     role: s.role,
     status: s.status ?? "",
+    prs: [],
     workspace: workspaceOf(cwd)
   };
 }
@@ -4655,7 +4727,8 @@ var realToResumeWorld = {
   exists: existsSync9,
   lookup: async (cwd) => {
     const { branch, repo } = await gitInfo(cwd);
-    return { repo, pr: branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
+    const prs = await checkoutPrs(cwd, branch);
+    return { repo, pr: prs.find((p) => p.state === "OPEN") ?? prs[0] };
   }
 };
 async function toResume(now = Date.now(), world = {}) {

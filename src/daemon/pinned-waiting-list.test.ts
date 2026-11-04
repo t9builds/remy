@@ -85,6 +85,21 @@ test("composeWaitingList: an extension's entry about a session replaces its line
   expect(composeWaitingList(asking, "work", [entry({ session: "basil" })], byCwd)).toContain('asks: "Which table?"');
 });
 
+test("composeWaitingList: an entry about one PR of a GitButler session replaces only that PR's line", () => {
+  const other = { ...openPr, number: 8, url: "https://github.com/o/r/pull/8" };
+  const snap: Snapshot = {
+    takenAt: 0,
+    sessions: [view("burger", { branch: "gitbutler/workspace", pr: openPr, prs: [openPr, other] })],
+  };
+  const text = composeWaitingList(snap, "work", [entry({ session: "burger", url: openPr.url, hide: true })], byCwd);
+  expect(text).not.toContain("#7 PR ready");
+  expect(text).toContain("#8 PR ready for you");
+  // An entry about something else of the session still replaces all its lines.
+  expect(composeWaitingList(snap, "work", [entry({ session: "burger", hide: true })], byCwd)).toContain(
+    "Nothing waits on you",
+  );
+});
+
 test("composeWaitingList: a hidden entry only keeps the session's own line off the list", () => {
   const snap: Snapshot = { takenAt: 0, sessions: [view("basil", { pr: openPr })] };
   expect(composeWaitingList(snap, "work", [entry({ session: "basil", hide: true })], byCwd)).toContain(

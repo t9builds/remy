@@ -3,7 +3,8 @@
  * its repo defines in `.remy/factory.ts`, for repos listed in `extensions.repos` only.
  *
  * On every tick it starts a run for each ready PR of a session on this machine (each person's Remy acts on its own
- * machine's PRs), moves every run on (pipeline.ts), and keeps the waiting list in step: a run in progress
+ * machine's PRs; a GitButler workspace has one per applied branch, ADR-0012), moves every run on (pipeline.ts), and
+ * keeps the waiting list in step: a run in progress
  * keeps its session off the list, a held one is a judgment call on it. Autonomy is the lower of the repo's and
  * yours (ADR-0006). Step agents count against `maxFactoryAgents`, and a usage limit pauses new ones for a while.
  */
@@ -36,15 +37,19 @@ const BACKOFF_MS = 30 * 60_000;
 /** Runs that need nothing more are dropped after this long. */
 const KEEP_MS = 7 * 24 * 3_600_000;
 
-/** A PR the factory takes on: open, out of draft, not red, no changes requested, its author not mid-turn. */
-export const isReady = (s: SessionRef) =>
-  !s.role &&
-  !!s.pr?.head &&
-  s.pr.state === "OPEN" &&
-  !s.pr.draft &&
-  s.pr.ci !== "fail" &&
-  s.pr.review !== "CHANGES_REQUESTED" &&
-  s.status !== "busy";
+/**
+ * The PRs of a session the factory takes on: open, out of draft, not red, no changes requested, their author not
+ * mid-turn. A session in a GitButler workspace has one per applied branch, and each is a run of its own (ADR-0012).
+ */
+export const readyPrs = (s: SessionRef) =>
+  s.role || s.status === "busy"
+    ? []
+    : s.prs.filter(
+        (pr) => !!pr.head && pr.state === "OPEN" && !pr.draft && pr.ci !== "fail" && pr.review !== "CHANGES_REQUESTED",
+      );
+
+/** The branch a GitButler workspace keeps its checkout on (sessions/git.ts). */
+const GITBUTLER_WORKSPACE = "gitbutler/workspace";
 
 export default (remy: Remy) => createFactory()(remy);
 
@@ -135,7 +140,9 @@ export const createFactory =
 
     /** The waiting list: a run in progress keeps its session off it; a held one is a judgment call on it. */
     function syncWaitingList(run: Run) {
-      const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
+      // A GitButler session has a run per applied branch: the number says which.
+      const name = run.gitbutler ? `${run.session} #${run.number}` : run.session;
+      const base = { key: run.pr, label: name, session: run.session, workspace: run.workspace, url: run.pr };
       if (run.stage === "done") return remy.waitingList.remove(run.pr);
       if (run.stage === "held")
         return remy.waitingList.add({
@@ -152,8 +159,7 @@ export const createFactory =
       if (ticking) return;
       ticking = true;
       try {
-        for (const s of remy.sessions().filter(isReady)) {
-          const pr = s.pr!;
+        for (const [s, pr] of remy.sessions().flatMap((s) => readyPrs(s).map((pr) => [s, pr] as const))) {
           const had = runs[pr.url];
           // A held or finished run starts over once its PR has new commits.
           if (had && (isActive(had) || had.head === pr.head)) continue;
@@ -161,13 +167,17 @@ export const createFactory =
           const f = await factoryAt(root);
           if (!f || autonomy(f) === "notify") continue;
           const now = Date.now();
+          // In a GitButler workspace the checkout is on GitButler's branch; agents push to the PR's own.
+          const gitbutler = s.branch === GITBUTLER_WORKSPACE;
+          if (gitbutler && !pr.branch) continue;
           runs[pr.url] = {
             pr: pr.url,
             number: pr.number,
             title: pr.title,
             repo: s.repo ?? trusted.get(root)!,
             repoDir: root,
-            branch: s.branch ?? "",
+            branch: (gitbutler ? pr.branch : s.branch) ?? "",
+            gitbutler: gitbutler || undefined,
             session: s.name,
             workspace: s.workspace,
             about: s.about,

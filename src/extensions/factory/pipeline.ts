@@ -55,7 +55,10 @@ export type Run = {
   repo: string;
   /** The main checkout, where step agents get their worktrees. */
   repoDir: string;
+  /** The PR's branch, which agents push fixes to. */
   branch: string;
+  /** The author works in a GitButler workspace: `repoDir` is on `gitbutler/workspace`, with this branch applied (ADR-0012). */
+  gitbutler?: boolean;
   /** The author's session, and the workspace it reports to. */
   session: string;
   workspace: string;
@@ -144,6 +147,17 @@ export function gateBlockers(d: PrDetail, gate: Pick<GateStep, "maxLines" | "pro
   return why;
 }
 
+/**
+ * For a PR applied in the author's GitButler workspace: its checkout belongs to GitButler, which rewrites branches
+ * there, so an agent works only in its own worktree and pushes only the PR's branch.
+ */
+const gitbutlerRule = (run: Run) =>
+  run.gitbutler
+    ? [
+        `The author works in a GitButler workspace at ${run.repoDir} (on \`gitbutler/workspace\`, with ${run.branch} applied). Never run git or \`but\` there: don't check out, switch, commit, stash, reset or push from it, and never push \`gitbutler/workspace\`. Work in your own worktree, and push only with \`git push origin HEAD:${run.branch}\`, never with force.`,
+      ]
+    : [];
+
 function agentPrompt(run: Run, step: AgentStep, f: Factory) {
   const n = run.number;
   const env = step.env ? f.environments?.[step.env] : undefined;
@@ -162,6 +176,7 @@ function agentPrompt(run: Run, step: AgentStep, f: Factory) {
     afterMerge
       ? `Read the change with \`gh pr view ${n}\` and \`gh pr diff ${n}\`. Don't write code, push or open PRs.`
       : `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). If you fix something, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`.`,
+    ...gitbutlerRule(run),
     "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
     "",
     "As the very last step, report your verdict with exactly one of:",
@@ -201,6 +216,7 @@ function fixPrompt(run: Run, step: AgentStep, f: Factory) {
     `You are the fixer in Remy's factory for ${run.pr} ("${run.title}") in ${run.repo}, fix ${run.fixes} of at most ${maxFixes(f)}. You didn't write this change. What failed: ${run.reason}.`,
     ...(run.about ? [`What it is for: ${run.about}`] : []),
     `Get the code with \`gh pr checkout ${n} --detach\` (the branch is checked out in another worktree). Fix the cause, keep to the PR's scope, commit, and \`git push origin HEAD:${run.branch}\`. Once you push, the pipeline runs again from its first step.`,
+    ...gitbutlerRule(run),
     "Don't merge, approve or close the PR, and don't post to Slack or Telegram.",
     "",
     "As the very last step, report with exactly one of:",
@@ -367,14 +383,19 @@ async function mergedByHand(run: Run, f: Factory, env: Env) {
 }
 
 /** An agent step's verdict, for the PR author's thread. */
-function verdictText(run: Pick<Run, "number" | "title" | "pr">, step: string, r: Report) {
+function verdictText(run: Pick<Run, "number" | "title" | "pr" | "branch" | "gitbutler">, step: string, r: Report) {
   const what =
     r.verdict === "pass"
       ? `✅ ${step} passed`
       : r.verdict === "fixed"
         ? `🔧 ${step} fixed what it found`
         : `🛑 ${step} failed; the factory holds it`;
-  return `${what} on *#${run.number} ${defang(run.title)}*${r.summary ? `: ${defang(r.summary)}` : ""}\n${run.pr}`;
+  // GitButler shows the pushed fix as upstream commits; pushing the branch again before taking them in would drop it.
+  const gitbutler =
+    r.verdict === "fixed" && run.gitbutler
+      ? `\nThe fix is pushed to \`${run.branch}\`: in GitButler, integrate its upstream commits before you push that branch again.`
+      : "";
+  return `${what} on *#${run.number} ${defang(run.title)}*${r.summary ? `: ${defang(r.summary)}` : ""}${gitbutler}\n${run.pr}`;
 }
 
 /** The report of the run's agent on `step`, once it has one; holds the run if the agent is stuck or stopped without one. */

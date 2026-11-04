@@ -181,6 +181,24 @@ describe("the ADR-0004 pipeline", () => {
     expect(w.notices[0]).toBe(`✅ review passed on *#7 Fix login*: ask <\u200b!channel> and <\u200b@U123>\n${URL}`);
   });
 
+  test("a PR applied in a GitButler workspace: agents keep out of its checkout, and a pushed fix says to integrate it", async () => {
+    const { w, env } = world();
+    const run = { ...newRun(), branch: "tomas/oauth-callback-states", gitbutler: true };
+    await go(run, env);
+    const prompt = w.spawned[0]!.prompt;
+    expect(prompt).toContain("GitButler workspace at /r/api");
+    expect(prompt).toContain("never push `gitbutler/workspace`");
+    expect(prompt).toContain("git push origin HEAD:tomas/oauth-callback-states");
+    w.report("fixed", "added a missing null check");
+    await go(run, env);
+    expect(w.notices[0]).toContain("in GitButler, integrate its upstream commits");
+
+    // A plain checkout's prompt is as it was.
+    const plain = world();
+    await go(newRun(), plain.env);
+    expect(plain.w.spawned[0]!.prompt).not.toContain("GitButler");
+  });
+
   test("fixes get a fresh agent once CI is green on the new head, up to maxRounds", async () => {
     const { w, env } = world();
     const run = newRun();

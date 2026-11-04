@@ -1,11 +1,11 @@
-/** What Remy sees when it looks at the sessions: each with its repo, branch and PR, and what changed since last time. */
+/** What Remy sees when it looks at the sessions: each with its repo, branch and PRs, and what changed since last time. */
 import { loadConfig } from "../config/config";
 import type { Pr } from "../sdk/extension";
 import { readJson } from "../shared/json-file";
 import { PATHS } from "../shared/paths";
 import { listAgents } from "./agents";
 import { readEvents } from "./events";
-import { gitInfo, prInfo } from "./git";
+import { checkoutPrs, gitInfo } from "./git";
 import { aboutOf, type Nicknames } from "./nicknames";
 import { type Spawned, spawnedEntry } from "./spawned";
 
@@ -23,13 +23,17 @@ export type SessionView = {
   about?: string;
   repo?: string;
   branch?: string;
+  /** The first of `prs`, as snapshots kept it before a session could have several. */
   pr?: Pr;
+  /** Its branch's PR, or one per applied branch in a GitButler workspace (ADR-0012). */
+  prs?: Pr[];
   lastEvent?: { event: string; type?: string; ts: number; text?: string };
 };
 
 export type Snapshot = { takenAt: number; sessions: SessionView[] };
 
-export const DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
+/** A session's PRs, also from a snapshot stored before `prs`. */
+export const prsOf = (s: Pick<SessionView, "pr" | "prs">): Pr[] => s.prs ?? (s.pr ? [s.pr] : []);
 
 export async function takeSnapshot(): Promise<Snapshot> {
   const config = loadConfig();
@@ -48,7 +52,7 @@ export async function takeSnapshot(): Promise<Snapshot> {
       const ev = latest.get(a.sessionId);
       const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
       const { branch, repo } = await gitInfo(cwd);
-      const pr = branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
+      const prs = await checkoutPrs(cwd, branch);
       const spawn = spawnedEntry(spawned, a.name, a.sessionId);
       return {
         sessionId: a.sessionId,
@@ -62,7 +66,8 @@ export async function takeSnapshot(): Promise<Snapshot> {
         about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
         repo,
         branch,
-        pr,
+        pr: prs[0],
+        prs,
         lastEvent: ev && { event: ev.event, type: ev.type, ts: ev.ts, text: ev.message ?? ev.last },
       };
     }),

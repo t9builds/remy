@@ -3,8 +3,9 @@
  * snapshot, so it holds only what is true now; the daemon keeps it as one message per workspace, edited in place
  * (daemon/pinned-waiting-list.ts).
  */
+import type { Pr } from "../sdk/extension";
 import { aboutOf } from "./nicknames";
-import type { SessionView, Snapshot } from "./snapshot";
+import { prsOf, type SessionView, type Snapshot } from "./snapshot";
 
 export type WaitingItem = {
   session: string;
@@ -67,14 +68,30 @@ export function questionOf(last: string | undefined): string | undefined {
   return q ? short(q) : undefined;
 }
 
-/** Why `s` waits on the user, if it does. A session counts once, under its most urgent reason. */
-function itemOf(s: SessionView): Omit<WaitingItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
-  const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
+type Item = Pick<WaitingItem, "rank" | "why" | "action">;
+
+/** Why an open PR waits on the user, if it does. */
+function prItemOf(pr: Pr): Item | undefined {
+  if (pr.ci === "fail")
+    return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
+  if (pr.review === "CHANGES_REQUESTED")
+    return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
+  if (pr.ci !== "pending") return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };
+  return undefined;
+}
+
+/**
+ * Why `s` waits on the user, if it does. A session counts once, under its most urgent reason; one with several open
+ * PRs (a GitButler workspace, ADR-0012) once per PR that waits, when nothing else about it does.
+ */
+function itemsOf(s: SessionView): (Item & { pr?: string })[] {
+  const prs = prsOf(s);
+  const one = (it: Item | undefined) => (it ? [{ ...it, pr: prs[0]?.url }] : []);
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
   // A message can't approve a permission; a background session can be resumed instead (`remy resume`), except a
   // factory agent, which `remy resume` refuses.
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
-    return {
+    return one({
       rank: 0,
       why: "wants a permission",
       action:
@@ -83,37 +100,32 @@ function itemOf(s: SessionView): Omit<WaitingItem, "session" | "sessionId" | "cw
           : s.role
             ? `\`claude attach ${s.name}\``
             : `reply "resume", or \`claude attach ${s.name}\``,
-    };
-  if (s.status === "busy") return undefined;
-  if (asked) return { rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" };
-  if (s.status === "waiting") return { rank: 0, why: "waits for your answer", action: "reply to its thread" };
+    });
+  if (s.status === "busy") return [];
+  if (asked) return one({ rank: 0, why: `asks: "${asked}"`, action: "reply to its thread" });
+  if (s.status === "waiting") return one({ rank: 0, why: "waits for your answer", action: "reply to its thread" });
   // A factory agent reports through `remy report`, not its own PR state.
-  if (s.role) return undefined;
-  if (pr?.ci === "fail")
-    return { rank: 1, why: `CI failing: ${pr.failing.join(", ") || "checks"}`, action: 'reply "fix CI"' };
-  if (pr?.review === "CHANGES_REQUESTED")
-    return { rank: 2, why: "changes requested", action: 'reply "address the review"' };
-  if (pr && pr.ci !== "pending")
-    return { rank: 3, why: `${pr.draft ? "draft " : ""}PR ready for you`, action: "review it" };
-  if (s.spawned && !s.pr) return { rank: 4, why: "stopped without a PR", action: "check what it did" };
-  return undefined;
+  if (s.role) return [];
+  if (s.spawned && !prs.length) return one({ rank: 4, why: "stopped without a PR", action: "check what it did" });
+  return prs.flatMap((pr) => {
+    const it = pr.state === "OPEN" ? prItemOf(pr) : undefined;
+    if (!it) return [];
+    return [{ ...it, why: prs.length > 1 ? `#${pr.number} ${it.why}` : it.why, pr: pr.url }];
+  });
 }
 
 export function waitingListOf(snapshot: Snapshot): WaitingItem[] {
   const items: (WaitingItem & { since: number })[] = [];
-  for (const s of snapshot.sessions) {
-    const it = itemOf(s);
-    if (it)
+  for (const s of snapshot.sessions)
+    for (const it of itemsOf(s))
       items.push({
         ...it,
         session: s.name,
         sessionId: s.sessionId,
         cwd: s.cwd,
         repo: s.repo,
-        pr: s.pr?.url,
         since: s.lastEvent?.ts ?? s.startedAt,
       });
-  }
   // Within a rank, whoever has waited longest first.
   return items.sort((a, b) => a.rank - b.rank || a.since - b.since).map(({ since, ...it }) => it);
 }

@@ -7,7 +7,9 @@
 import type { Remy, SessionRef } from "../sdk/extension";
 import { formatNotice } from "../shared/notices";
 
-export const shouldClose = (s: SessionRef) => s.spawned && s.pr?.state === "MERGED" && s.status !== "busy";
+/** A spawned agent whose PRs all merged (it has one, or one per applied branch in a GitButler workspace), and not mid-turn. */
+export const shouldClose = (s: SessionRef) =>
+  s.spawned && s.prs.length > 0 && s.prs.every((p) => p.state === "MERGED") && s.status !== "busy";
 
 export default function mergedCleanup(remy: Remy) {
   const closing = new Set<string>();
@@ -15,7 +17,7 @@ export default function mergedCleanup(remy: Remy) {
     if (!shouldClose(s) || closing.has(s.sessionId)) return;
     closing.add(s.sessionId);
     try {
-      const pr = s.pr!;
+      const pr = s.prs.at(-1)!;
       const cleanup = await remy.close(s.name, { merged: pr });
       const text = formatNotice([
         { session: s.name, repo: s.repo, what: "merged", detail: `PR #${pr.number} merged; ${cleanup}`, pr: pr.url },

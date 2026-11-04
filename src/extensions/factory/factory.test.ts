@@ -7,7 +7,7 @@ import { ExtensionHost } from "../../extension-host/host";
 import type { Config } from "../../sdk/config";
 import type { SessionRef } from "../../sdk/extension";
 import { PLUGIN_ROOT } from "../../shared/paths";
-import { createFactory, endedOnUsageLimit, isReady, spawnHitUsageLimit } from "./factory";
+import { createFactory, endedOnUsageLimit, readyPrs, spawnHitUsageLimit } from "./factory";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
 import { type Env, gateBlockers, type PrDetail, type Run } from "./pipeline";
@@ -85,20 +85,24 @@ const pr = {
   failing: [],
   head: "aaa",
 };
-const ref = (over: Partial<SessionRef> = {}): SessionRef => ({
-  name: "basil",
-  sessionId: "s1",
-  cwd: "/r",
-  spawned: true,
-  status: "idle",
-  workspace: "work",
-  repo: "acme-corp/api",
-  branch: "fix",
-  pr,
-  ...over,
-});
+const ref = (over: Partial<SessionRef> = {}): SessionRef => {
+  const r = {
+    name: "basil",
+    sessionId: "s1",
+    cwd: "/r",
+    spawned: true,
+    status: "idle",
+    workspace: "work",
+    repo: "acme-corp/api",
+    branch: "fix",
+    pr,
+    ...over,
+  };
+  return { ...r, prs: over.prs ?? (r.pr ? [r.pr] : []) };
+};
 
 test("which PRs the factory takes on", () => {
+  const isReady = (s: SessionRef) => readyPrs(s).length === 1;
   expect(isReady(ref())).toBeTrue();
   expect(isReady(ref({ status: "busy" }))).toBeFalse();
   expect(isReady(ref({ role: "factory" }))).toBeFalse();
@@ -106,6 +110,13 @@ test("which PRs the factory takes on", () => {
   expect(isReady(ref({ pr: { ...pr, ci: "fail" } }))).toBeFalse();
   expect(isReady(ref({ pr: { ...pr, ci: "pending" } }))).toBeTrue();
   expect(isReady(ref({ pr: undefined }))).toBeFalse();
+});
+
+test("a GitButler session's ready PRs are each taken on, the others left", () => {
+  const second = { ...pr, number: 8, url: "https://github.com/acme-corp/api/pull/8", head: "bbb" };
+  const s = ref({ branch: "gitbutler/workspace", prs: [pr, second, { ...second, number: 9, draft: true }] });
+  expect(readyPrs(s).map((p) => p.number)).toEqual([7, 8]);
+  expect(readyPrs({ ...s, status: "busy" })).toEqual([]);
 });
 
 async function hostWith(
@@ -153,6 +164,28 @@ test("a ready PR in a listed repo starts a run; an unlisted repo's or a notify-l
   const notify = await hostWith({ ...config, autonomy: "notify" }, sessions);
   await notify.h.emit("tick", { at: 1 });
   expect(notify.h.waitingEntries()).toEqual([]);
+});
+
+test("a GitButler session's two ready PRs are two runs, each pushing to its own branch", async () => {
+  const root = repo("api-gitbutler", GOOD);
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-gitbutler"] } };
+  const second = { ...pr, number: 8, url: "https://github.com/acme-corp/api/pull/8", head: "bbb", branch: "tomas/b" };
+  const session = ref({ cwd: root, branch: "gitbutler/workspace", prs: [{ ...pr, branch: "tomas/a" }, second] });
+  const stateDir = join(dir, `state-${Math.random()}`);
+  const { h } = await hostWith(config, [session], { pr: async () => undefined }, stateDir);
+  await h.emit("tick", { at: 1 });
+  const runs = JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs as Record<string, Run>;
+  expect(Object.values(runs).map((r) => [r.number, r.branch, r.gitbutler, r.session])).toEqual([
+    [7, "tomas/a", true, "basil"],
+    [8, "tomas/b", true, "basil"],
+  ]);
+  // A plain checkout's run pushes to the branch it has checked out, as before.
+  const plainDir = join(dir, `state-${Math.random()}`);
+  const plain = await hostWith(config, [ref({ cwd: root })], { pr: async () => undefined }, plainDir);
+  await plain.h.emit("tick", { at: 1 });
+  const plainRuns = JSON.parse(readFileSync(join(plainDir, "builtin_factory.json"), "utf8")).runs;
+  expect(plainRuns[pr.url]).toMatchObject({ branch: "fix" });
+  expect(plainRuns[pr.url].gitbutler).toBeUndefined();
 });
 
 test("formatRuns", () => {

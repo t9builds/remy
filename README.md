@@ -105,7 +105,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 |---|---|
 | Plugin hooks (`Stop`, `Notification`, `SessionEnd`) | Every session appends its events to `~/.remy/events.jsonl` |
 | Plugin hook (`UserPromptSubmit`) | Names a session that has no name yet after a dish or ingredient (`src/sessions/kitchen-names.ts`), on its first prompt, and keeps that prompt in `~/.remy/nicknames.json` as what the session is about |
-| `remy status` (`src/sessions/`) | Joins `claude agents --json`, each session's git branch and `gh pr view` |
+| `remy status` (`src/sessions/`) | Joins `claude agents --json`, each session's git branch and `gh pr view`; in a GitButler workspace, `but status` for its applied branches and `gh pr view` for each |
 | `src/sessions/waiting-list.ts` | Ranks what waits on you from that snapshot; the daemon keeps it as one message per workspace (`~/.remy/queue.json`) |
 | `remy daemon` (`src/daemon/`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, posts the merged/ended notices itself (`src/shared/notices.ts`), runs extensions and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
 | `src/sdk/` | What extensions and a repo's `.remy/factory.ts` import: the extension API (`extension.ts`) and the pipeline helpers (`factory.ts`, imported as `remy/factory`) |
@@ -356,7 +356,7 @@ export default (remy: Remy) => {
 | Events | |
 |---|---|
 | `session.started`, `session.asks`, `session.stopped`, `session.ended` | A session appeared, waits for you (a question, or blocked on input), ended its turn (with its last message, and the question if it ended on one), is gone |
-| `pr.opened`, `pr.ready`, `pr.ci`, `pr.merged` | A session's PR opened, left draft, finished CI (pass or fail), merged |
+| `pr.opened`, `pr.ready`, `pr.ci`, `pr.merged` | A session's PR opened, left draft, finished CI (pass or fail), merged; for each PR of a session that has several ([GitButler](#gitbutler)) |
 | `message` | You wrote in a workspace, or started a task from a Slack thread |
 | `tick` | Every `tickSeconds`, after Remy looked at the sessions again |
 
@@ -369,7 +369,7 @@ export default (remy: Remy) => {
 | `coordinator.tell(text)` | Hand something to the coordinator for a turn |
 | `registerCommand(name, { description, run })` | Answer `/name` in any workspace, without the coordinator |
 | `state.get` / `state.set` | A small JSON store of the extension's own (`~/.remy/state/`) |
-| `sessions()`, `trustedRepos()`, `log(…)` | Sessions as last seen; the repos in `extensions.repos` that were found; write to the daemon's log |
+| `sessions()`, `trustedRepos()`, `log(…)` | Sessions as last seen, each with `prs` (every PR it works on) and `pr` (the first); the repos in `extensions.repos` that were found; write to the daemon's log |
 
 Extensions load from three places:
 
@@ -444,7 +444,13 @@ How far Remy goes on its own is the lower of the repo's `autonomy` and yours in 
 
 A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a failure the fixer couldn't fix, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
 
-The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Step agents and fixers count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
+The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine (each applied branch's, in a [GitButler](#gitbutler) workspace), so two teammates' Remys never act on each other's changes. Step agents and fixers count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
+
+### GitButler
+
+A repo managed by [GitButler](https://gitbutler.com) keeps its checkout on `gitbutler/workspace` and applies several branches at once, each with its own PR. Remy sees that by itself, for sessions you started too: the session owns the PR of every applied branch that was pushed, read with `but status` (or, without the `but` CLI, the top branch of each stack). `remy status` lists them all on the session's line, the waiting list has a line per PR that waits (`burger · #823 PR ready for you`), and the factory takes each ready PR on as a run of its own ([ADR-0012](docs/adr/0012-a-gitbutler-session-owns-a-pr-per-applied-branch.md)).
+
+The factory leaves your workspace alone: its agents work in worktrees of their own, never run git or `but` in your checkout, and push a fix only to the PR's branch. GitButler then shows the fix as upstream commits; integrate them before you push that branch again, or a force push drops the fix. The notice in the session's thread reminds you.
 
 ## Limits
 

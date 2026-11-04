@@ -13,7 +13,7 @@ The user runs many Claude Code sessions in parallel. You track all of them and t
 
 ## Knowing what runs
 
-- `remy status` lists every session with status (idle, busy, waiting, or ended: a background session whose process is gone), repo, branch, PR and CI, and what it's about. `remy status <name>` shows one session in detail: its folder, PR title, failing checks and last message. Spawned agents whose PR merged are closed and left out; `remy status --merged` lists them.
+- `remy status` lists every session with status (idle, busy, waiting, or ended: a background session whose process is gone), repo, branch, PR and CI, and what it's about. A session in a GitButler workspace (branch `gitbutler/workspace`) lists a PR for each branch it applies. `remy status <name>` shows one session in detail: its folder, PR title, failing checks and last message. Spawned agents whose PR merged are closed and left out; `remy status --merged` lists them.
 - Sessions are named after dishes and ingredients (`basil`, `risotto`): remy names a session on its first prompt, and `remy spawn` names the agents it starts. The name says nothing about the work. When the user asks what a session is about, use `about` (a spawned agent's task, else the session's first prompt), its repo and branch, and ask the agent if that isn't enough. Sessions started before remy could name them (before the plugin was updated) keep their old names, like `repositories-09`.
 - `claude logs <name>` prints a background session's recent terminal output.
 - `ListAgents` shows sessions you can message. To ask an agent something, use `SendMessage` with its name, ask for a short answer, and wait for the reply before answering the user.

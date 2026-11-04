@@ -1,7 +1,7 @@
 /** The pinned "waiting on you" message the daemon keeps in each workspace. */
 import type { Messenger } from "../messengers/messenger";
 import type { WaitingEntry } from "../sdk/extension";
-import type { SessionView, Snapshot } from "../sessions/snapshot";
+import { prsOf, type SessionView, type Snapshot } from "../sessions/snapshot";
 import { formatWaitingList, type WaitingItem, waitingListOf } from "../sessions/waiting-list";
 
 /**
@@ -45,8 +45,16 @@ export function composeWaitingList(
   workspaceOf: (s: SessionView) => string,
 ) {
   const sessions = snap.sessions.filter((s) => workspaceOf(s) === workspace);
-  // An extension's entry about a session replaces the session's own line.
-  const claimed = new Set(entries.flatMap((e) => (e.session ? [e.session] : [])));
+  // An extension's entry about a session replaces the session's own lines; one about a PR of the session, only its line
+  // about that PR (a GitButler workspace has several, ADR-0012).
+  const claimed = new Set(
+    entries.flatMap((e) => {
+      if (!e.session) return [];
+      const of = sessions.find((s) => s.name === e.session);
+      return of && prsOf(of).some((p) => p.url === e.url) ? [`${e.session} ${e.url}`] : [e.session];
+    }),
+  );
+  const isClaimed = (it: WaitingItem) => claimed.has(it.session) || claimed.has(`${it.session} ${it.pr}`);
   const fromExtensions: WaitingItem[] = entries.flatMap((e) => {
     if (e.hide) return [];
     const of = e.session ? sessions.find((s) => s.name === e.session) : undefined;
@@ -66,7 +74,7 @@ export function composeWaitingList(
   });
   // Stable: within a rank, sessions first, then extensions' entries in the order they came. A session's own
   // question stays even when an extension speaks for its PR.
-  const own = waitingListOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !claimed.has(it.session));
+  const own = waitingListOf({ ...snap, sessions }).filter((it) => it.rank === 0 || !isClaimed(it));
   const items = [...own, ...fromExtensions].sort((a, b) => a.rank - b.rank);
   return formatWaitingList(items, sessions);
 }

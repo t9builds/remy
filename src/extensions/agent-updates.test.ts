@@ -9,6 +9,7 @@ const ref = (over: Partial<SessionRef> = {}): SessionRef => ({
   spawned: true,
   status: "idle",
   workspace: "work",
+  prs: [],
   ...over,
 });
 

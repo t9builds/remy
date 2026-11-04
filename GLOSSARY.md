@@ -23,6 +23,10 @@ Any Claude Code session on the user's machine, whoever started it.
 A background session Remy started for a task.
 _Avoid_: worker, bot
 
+**GitButler workspace**:
+A checkout GitButler manages: it sits on `gitbutler/workspace` and applies several branches at once. A session in one owns the PR of each applied branch (ADR-0012).
+_Avoid_: virtual branch (GitButler's old name for an applied branch), stack (a set of applied branches built on each other)
+
 **Resume**:
 Continue an agent's own session in the background after it got stuck or its process ended, with its history, branch, worktree and uncommitted edits, under the same id and name. `remy resume` does it for one agent; `remy start` for every unfinished one.
 _Avoid_: restart, respawn (Claude Code's `respawn` restarts a process on a new version), retry (the factory's, which starts a new agent)
