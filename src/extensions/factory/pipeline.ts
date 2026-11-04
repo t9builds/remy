@@ -272,9 +272,18 @@ const ciFails = (run: Run, f: Factory, env: Env, d: PrDetail, what = "CI fails")
 const lastPass = (run: Run, name: string) =>
   run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
 
-/** Move a run on as far as it can go now. */
+/**
+ * Move a run on as far as it can go now. An agent the run lets go of is closed here, whichever way it went: it
+ * reported, or the PR was merged or closed by hand, or the run was retried or moved on without it. Closing it where
+ * the run drops it keeps the many paths out of a step from each having to remember to.
+ */
 export async function advance(run: Run, f: Factory, autonomy: Level, env: Env): Promise<void> {
-  for (let i = 0; i < 50 && (await stepOnce(run, f, autonomy, env)); i++);
+  for (let i = 0; i < 50; i++) {
+    const had = run.agent;
+    const again = await stepOnce(run, f, autonomy, env);
+    if (had && run.agent !== had) await env.close(had);
+    if (!again) break;
+  }
 }
 
 /** One move. True when the run went on to another step and may move again right away. */
@@ -395,10 +404,20 @@ async function reportOf(run: Run, step: AgentStep, env: Env): Promise<Report | u
       hold(run, now, `${step.name} (${agent.name}) stopped without reporting`);
     return undefined;
   }
-  await env.close(agent);
+  // `advance` closes the agent now that the run has let go of it.
   run.agent = undefined;
   run.reports.push(report);
   return report;
+}
+
+/**
+ * While an agent works, whether the PR was merged or closed by hand and left it with nothing to do: the run goes on
+ * (or ends) and `advance` closes the agent. Undefined while the PR is open, or once the merge is the pipeline's own.
+ */
+async function overtaken(run: Run, f: Factory, env: Env): Promise<boolean | undefined> {
+  if (run.stage === "held" || run.mergeSha) return undefined;
+  const d = await env.pr(run.pr);
+  return d && d.state !== "OPEN" ? closed(run, d, f, env) : undefined;
 }
 
 /** The fixer at work: start it, then read its report. A fix sends the run back to the first step, on the new head. */
@@ -415,7 +434,7 @@ async function fixing(run: Run, f: Factory, env: Env): Promise<boolean> {
     return false;
   }
   const report = await reportOf(run, step, env);
-  if (!report) return false;
+  if (!report) return (await overtaken(run, f, env)) ?? false;
   const now = env.now();
   await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "fail") return hold(run, now, `${step.name}: ${report.summary ?? ""}`);
@@ -441,7 +460,7 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
     return false;
   }
   const report = await reportOf(run, step, env);
-  if (!report) return false;
+  if (!report) return (await overtaken(run, f, env)) ?? false;
   const summary = report.summary ?? "";
   const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "fix");
   const holds = onFail === "hold" || (onFail === "fix" && !fixable(run, f));
@@ -588,6 +607,7 @@ function closed(run: Run, d: PrDetail, f: Factory, env: Env) {
     run.mergeSha = d.mergeSha;
     return next(run, env.now(), merge + 1);
   }
+  run.agent = undefined;
   enter(run, "done", env.now(), d.state === "MERGED" ? "merged" : "the PR was closed");
   return false;
 }
