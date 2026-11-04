@@ -345,9 +345,7 @@ describe("the ADR-0004 pipeline", () => {
     w.builds.set("mmmmmmmm:cloudbuild", { status: "error", detail: AUTH });
     await go(run, env);
     expect(run.stage).toBe("held");
-    expect(run.reason).toBe(
-      `couldn't check the dev deploy of mmmmmmm: gcloud's login expired; run \`gcloud auth login\`, then \`remy factory retry ${URL}\``,
-    );
+    expect(run.reason).toBe("couldn't check the dev deploy of mmmmmmm: gcloud needs a login; run `gcloud auth login`");
   });
 
   test("gcloud with no active account holds the deploy wait at once", async () => {
@@ -360,9 +358,34 @@ describe("the ADR-0004 pipeline", () => {
     });
     await go(run, env);
     expect(run.stage).toBe("held");
-    expect(run.reason).toBe(
-      `couldn't check the dev deploy of mmmmmmm: gcloud's login expired; run \`gcloud auth login\`, then \`remy factory retry ${URL}\``,
-    );
+    expect(run.reason).toBe("couldn't check the dev deploy of mmmmmmm: gcloud needs a login; run `gcloud auth login`");
+  });
+
+  test("gcloud with no valid credentials holds the deploy wait at once", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 3, mergeSha: "mmmmmmmm" });
+    w.builds.set("mmmmmmmm:cloudbuild", {
+      status: "error",
+      detail:
+        "ERROR: (gcloud.builds.list) Your current active account [you@example.com] does not have any valid credentials",
+    });
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("couldn't check the dev deploy of mmmmmmm: gcloud needs a login; run `gcloud auth login`");
+  });
+
+  test("a deploy that never shows up holds after the timeout saying there is no deploy", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 3, mergeSha: "mmm" });
+    w.builds.set("mmm:cloudbuild", { status: "none" });
+    await go(run, env);
+    expect(run.stage).toBe("running");
+    w.t += 61 * 60_000;
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("no dev deploy of mmm after 60 min");
   });
 
   test("another check error waits out the timeout, then holds saying Remy couldn't check", async () => {
@@ -375,9 +398,7 @@ describe("the ADR-0004 pipeline", () => {
     w.t += 61 * 60_000;
     await go(run, env);
     expect(run.stage).toBe("held");
-    expect(run.reason).toBe(
-      `couldn't check the dev deploy of mmm after 60 min (ERROR: network unreachable); then \`remy factory retry ${URL}\``,
-    );
+    expect(run.reason).toBe(`couldn't check the dev deploy of mmm after 60 min (ERROR: network unreachable)`);
   });
 
   test("a retry after a check error carries on from the deploy wait", async () => {

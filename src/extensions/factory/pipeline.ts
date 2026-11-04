@@ -476,9 +476,13 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
   return hold(run, now, `${step.name}: ${summary}`);
 }
 
-/** gcloud's wording when its login needs a person (reauthentication, refreshing tokens, no active account). */
+/**
+ * gcloud's wording when its login needs a person (reauthentication, refreshing tokens, no active account, no valid
+ * credentials). The detector keeps only gcloud's first `ERROR` line, so the "Please run: gcloud auth login" line
+ * that follows never reaches `detail`.
+ */
 const LOGIN_EXPIRED =
-  /reauthentication|problem refreshing your current auth tokens|do not currently have an active account|gcloud auth login/i;
+  /reauthentication|problem refreshing your current auth tokens|do not currently have an active account|does not have any valid credentials/i;
 
 async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
@@ -507,21 +511,21 @@ async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Fact
     );
   const sha = run.mergeSha.slice(0, 7);
   if (b.status === "error") {
-    // The detector couldn't look, so say that rather than "no deploy". An expired login won't fix itself while we
-    // wait; anything else (a network blip) may, so it waits out the timeout.
-    const retry = `\`remy factory retry ${run.pr}\``;
+    // The detector couldn't look, so say that rather than "no deploy". A login that needs a person won't fix itself
+    // while we wait; anything else (a network blip) may, so it waits out the timeout. The waiting list adds the
+    // retry command to every hold, so the reason is only the cause.
     if (LOGIN_EXPIRED.test(b.detail ?? ""))
       return hold(
         run,
         now,
-        `couldn't check the ${step.env} deploy of ${sha}: gcloud's login expired; run \`gcloud auth login\`, then ${retry}`,
+        `couldn't check the ${step.env} deploy of ${sha}: gcloud needs a login; run \`gcloud auth login\``,
       );
     run.reason = b.detail;
     return late
       ? hold(
           run,
           now,
-          `couldn't check the ${step.env} deploy of ${sha} after ${minutes} min${b.detail ? ` (${b.detail})` : ""}; then ${retry}`,
+          `couldn't check the ${step.env} deploy of ${sha} after ${minutes} min${b.detail ? ` (${b.detail})` : ""}`,
         )
       : false;
   }
