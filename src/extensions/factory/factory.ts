@@ -3,9 +3,9 @@
  * its repo defines in `.remy/factory.ts`, for repos listed in `extensions.repos` only.
  *
  * On every tick it starts a run for each ready PR of a session on this machine (each person's Remy acts on its own
- * machine's PRs), moves every run on (pipeline.ts), and keeps the waiting list in step: a run in progress
- * keeps its session off the list, a held one is a judgment call on it. Autonomy is the lower of the repo's and
- * yours (ADR-0006). Step agents count against `maxFactoryAgents`, and a usage limit pauses new ones for a while.
+ * machine's PRs) and for each PR you named with `remy factory start` (ADR-0013), moves every run on (pipeline.ts),
+ * and keeps the waiting list in step: a run in progress keeps its session off the list, a held one is a judgment call
+ * on it. Autonomy is the lower of the repo's and yours (ADR-0006). Step agents count against `maxFactoryAgents`, and a usage limit pauses new ones for a while.
  */
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -35,6 +35,8 @@ export const spawnHitUsageLimit = (message = "") =>
 const BACKOFF_MS = 30 * 60_000;
 /** Runs that need nothing more are dropped after this long. */
 const KEEP_MS = 7 * 24 * 3_600_000;
+/** What a run keeps about itself as it moves, rather than about its PR. */
+type NewRunState = "step" | "round" | "stage" | "since" | "stepSince" | "reports" | "approved";
 
 /** A PR the factory takes on: open, out of draft, not red, no changes requested, its author not mid-turn. */
 export const isReady = (s: SessionRef) =>
@@ -165,6 +167,24 @@ export const createFactory =
       remy.waitingList.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
     }
 
+    /** A run from the first step, when the repo has a factory that may do more than notify. */
+    async function startRun(fields: Omit<Run, NewRunState>) {
+      const f = await factoryAt(fields.repoDir);
+      if (!f || autonomy(f) === "notify") return;
+      const now = Date.now();
+      runs[fields.pr] = {
+        ...fields,
+        step: 0,
+        round: 1,
+        stage: "running",
+        since: now,
+        stepSince: now,
+        reports: [],
+        approved: [],
+      };
+      remy.log("factory run started", fields.pr);
+    }
+
     let ticking = false;
     remy.on("tick", async () => {
       if (ticking) return;
@@ -176,10 +196,7 @@ export const createFactory =
           // A held or finished run starts over once its PR has new commits.
           if (had && (isActive(had) || had.head === pr.head)) continue;
           const root = repoRootOf(s.cwd);
-          const f = await factoryAt(root);
-          if (!f || autonomy(f) === "notify") continue;
-          const now = Date.now();
-          runs[pr.url] = {
+          await startRun({
             pr: pr.url,
             number: pr.number,
             title: pr.title,
@@ -190,15 +207,15 @@ export const createFactory =
             workspace: s.workspace,
             about: s.about,
             head: pr.head!,
-            step: 0,
-            round: 1,
-            stage: "running",
-            since: now,
-            stepSince: now,
-            reports: [],
-            approved: [],
-          };
-          remy.log("factory run started", pr.url);
+          });
+        }
+        // `remy factory start`: a PR no session of yours is on. A start is used once: the run it made is newer.
+        for (const r of env.reports()) {
+          if (r.kind !== "start" || !r.start || !r.head) continue;
+          const had = runs[r.pr];
+          if (had && (isActive(had) || had.since >= r.at)) continue;
+          const { repo, number } = r.start;
+          await startRun({ ...r.start, pr: r.pr, head: r.head, session: `${repo.split("/").pop()}#${number}` });
         }
         for (const [url, run] of Object.entries(runs)) {
           const f = await factoryAt(run.repoDir);

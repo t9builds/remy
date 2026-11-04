@@ -10,7 +10,7 @@ import { PLUGIN_ROOT } from "../../shared/paths";
 import { createFactory, endedOnUsageLimit, isReady, spawnHitUsageLimit } from "./factory";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
-import { type Env, gateBlockers, type PrDetail, type Run } from "./pipeline";
+import { type Env, gateBlockers, type PrDetail, type Report, type Run } from "./pipeline";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "remy-factory-")));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -380,4 +380,37 @@ test("a fix offer that lapses while it is on the waiting list is withdrawn witho
   expect(h.waitingEntries().map((e) => e.key)).not.toContain("ask:factory:api#7");
   // Withdrawing the question is not a failure to log.
   expect(logs.filter((l) => l.includes("ask failed"))).toEqual([]);
+});
+
+test("`remy factory start` runs a PR no session is on, once per start", async () => {
+  const root = repo("api-start", GOOD);
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-start"] } };
+  const url = "https://github.com/acme-corp/api/pull/9";
+  const startedAt = Date.now() - 1000;
+  const start: Report = {
+    pr: url,
+    at: startedAt,
+    step: "",
+    kind: "start",
+    head: "bbb",
+    start: { number: 9, title: "Hand-pushed", repo: "acme-corp/api", repoDir: root, branch: "b", workspace: "work" },
+  };
+  const stateDir = join(dir, `state-${Math.random()}`);
+  const { h } = await hostWith(config, [], { pr: async () => undefined, reports: () => [start] }, stateDir);
+  await h.emit("tick", { at: 1 });
+  const saved = () =>
+    JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs as Record<string, Run>;
+  expect(saved()[url]).toMatchObject({ stage: "running", step: 0, head: "bbb", session: "api#9", workspace: "work" });
+  expect(h.waitingEntries().map((e) => [e.key, e.label, !!e.hide])).toEqual([[url, "api#9", true]]);
+
+  // A run the start already made, finished since, isn't made again by the same start.
+  const done = { ...saved()[url]!, stage: "done" as const };
+  const again = await hostWithRuns([done], { extensions: { repos: ["api-start"] } }, { reports: () => [start] });
+  await again.h.emit("tick", { at: 1 });
+  expect(again.saved()[url]?.stage).toBe("done");
+
+  // A repo outside extensions.repos gets no run.
+  const off = await hostWith({ ...config, extensions: { repos: [] } }, [], { reports: () => [start] });
+  await off.h.emit("tick", { at: 1 });
+  expect(off.h.waitingEntries()).toEqual([]);
 });

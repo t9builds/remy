@@ -24,11 +24,11 @@ import {
 } from "../../sdk/factory";
 import { defang } from "../../shared/notices";
 
-/** What an agent reported with `remy report`, or the user's `remy factory retry`. */
+/** What an agent reported with `remy report`, or the user's `remy factory retry` or `remy factory start`. */
 export type Report = {
   pr: string;
   at: number;
-  /** The step's name; "" for a retry. */
+  /** The step's name; "" for a retry or a start. */
   step: string;
   verdict?: "pass" | "fail" | "fixed";
   summary?: string;
@@ -36,7 +36,9 @@ export type Report = {
   head?: string;
   /** The session that reported, so its transcript can be found (`remy trace`). */
   session?: string;
-  kind?: "retry";
+  kind?: "retry" | "start";
+  /** For a start: the PR and where it runs, as `remy factory start` resolved them. */
+  start?: Pick<Run, "number" | "title" | "repo" | "repoDir" | "branch" | "workspace">;
 };
 
 type Stage =

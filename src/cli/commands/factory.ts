@@ -3,13 +3,14 @@
  * work while the daemon is down, and say so when `extensions.disabled` turns the factory off.
  */
 import { join } from "node:path";
-import { loadConfig } from "../../config/config";
+import { loadConfig, workspaceFor } from "../../config/config";
 import { resolveRepo, trustedRepos } from "../../config/repos";
 import { formatRuns } from "../../extensions/factory/format";
 import { appendReport, headOf, repoRootOf } from "../../extensions/factory/live";
 import { loadFactory } from "../../extensions/factory/load";
-import type { Run } from "../../extensions/factory/pipeline";
+import { isActive, type Run } from "../../extensions/factory/pipeline";
 import { lowerLevel } from "../../sdk/factory";
+import { githubRepoOf } from "../../sessions/git";
 import { readJson } from "../../shared/json-file";
 import { PATHS } from "../../shared/paths";
 import { parse } from "../args";
@@ -52,8 +53,50 @@ export async function factory(args: string[]) {
     );
     return;
   }
+  if (positionals[0] === "start") return start(positionals[1], runs);
   if (values.json) return console.log(JSON.stringify(runs, null, 2));
   say(formatRuns(Object.values(runs)), disabledNote("these PRs stay where they are"));
+}
+
+/**
+ * `remy factory start <pr>`: a run for a PR no session of yours is on, such as one pushed by hand (ADR-0013). Everything
+ * the run needs is resolved here, so a mistake fails now rather than silently in the daemon.
+ */
+async function start(want: string | undefined, runs: Record<string, Run>) {
+  if (!want) throw new Error(`usage: ${pc.cyan("remy factory start <pr-url|number|branch>")}`);
+  const p = Bun.spawnSync(
+    ["gh", "pr", "view", want, "--json", "url,number,title,headRefName,headRefOid,state,isDraft"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (p.exitCode !== 0) throw new Error(`gh pr view ${want}: ${p.stderr.toString().trim()}`);
+  const pr = JSON.parse(p.stdout.toString());
+  if (pr.state !== "OPEN" || pr.isDraft)
+    throw new Error(`#${pr.number} is ${pr.isDraft ? "a draft" : pr.state.toLowerCase()}; the factory takes open PRs`);
+  const had = runs[pr.url];
+  if (had && isActive(had)) return say(`#${pr.number} is already in the factory; \`remy factory\` shows where.`);
+
+  const c = loadConfig();
+  const repo = pr.url.match(/github\.com\/([^/]+\/[^/]+)\/pull\//)[1] as string;
+  const root = trustedRepos(c).find((r) => r.root && githubRepoOf(r.root) === repo)?.root;
+  if (!root) throw new Error(`${repo} isn't in extensions.repos in ${PATHS.config}, so the factory doesn't run there`);
+  const l = await loadFactory(root);
+  if (!l.factory) throw new Error(`${join(root, ".remy", "factory.ts")}: ${l.error ?? "not found"}`);
+  if (lowerLevel(l.factory.autonomy ?? "notify", c.autonomy) === "notify")
+    throw new Error(`autonomy is notify for ${repo}, so the factory only reports; \`remy factory check\` says why`);
+  const workspace = workspaceFor({ cwd: root, repo }, c)?.name;
+  if (!workspace) throw new Error(`no workspace in ${PATHS.config} to report to`);
+
+  appendReport({
+    pr: pr.url,
+    step: "",
+    kind: "start",
+    head: pr.headRefOid,
+    start: { number: pr.number, title: pr.title, repo, repoDir: root, branch: pr.headRefName, workspace },
+  });
+  say(
+    disabledNote("nothing starts it until you turn it back on") ??
+      `#${pr.number} starts its pipeline within a minute or so. A held run doesn't restart on new commits: start it again.`,
+  );
 }
 
 export async function report(args: string[]) {
