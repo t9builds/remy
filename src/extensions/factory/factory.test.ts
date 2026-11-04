@@ -352,8 +352,8 @@ test("a fix offer nobody answers expires: the run ends and its question leaves t
   expect(keys()).not.toContain("ask:factory:api#7");
   expect(saved()[fresh.pr]).toMatchObject({ stage: "asking" });
   expect(keys()).toContain("ask:factory:api#8");
-  // The user answers after the expiry: nothing breaks, and the run stays done.
-  h.answer("factory:api#7", "yes");
+  // The user answers after the expiry: the reply is not consumed (it reaches the coordinator), nothing starts.
+  expect(h.answer("factory:api#7", "yes")).toBe(false);
   await new Promise((r) => setTimeout(r, 10));
   expect(saved()[old.pr]).toMatchObject({ stage: "done", reason: "no answer to the fix offer in 3 days" });
 });

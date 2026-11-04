@@ -314,7 +314,7 @@ describe("the ADR-0004 pipeline", () => {
       expect(run.reason).toBe("a fix was started");
     });
 
-    test("an answer that lands after the expiry changes nothing", async () => {
+    test("a run that expired stays done on later ticks", async () => {
       const { w, env } = world();
       const run = newRun();
       Object.assign(run, { step: 8, mergeSha: "mmm" });
@@ -324,6 +324,34 @@ describe("the ADR-0004 pipeline", () => {
       w.t += 4 * DAY;
       await go(run, env);
       expect(run.stage).toBe("done");
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      expect(run.reason).toBe("no answer to the fix offer in 3 days");
+    });
+
+    test("an answer set after 3 days but before the next tick still counts", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      Object.assign(run, { step: 8, mergeSha: "mmm" });
+      await go(run, env);
+      w.report("fail", "500 on /login");
+      await go(run, env);
+      w.t += 4 * DAY;
+      run.ask!.answer = "yes";
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      expect(run.reason).toBe("a fix was started");
+    });
+
+    test("an empty answer is no answer: the offer still expires", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      Object.assign(run, { step: 8, mergeSha: "mmm" });
+      await go(run, env);
+      w.report("fail", "500 on /login");
+      await go(run, env);
+      run.ask!.answer = "";
+      w.t += 4 * DAY;
       await go(run, env);
       expect(run.stage).toBe("done");
       expect(run.reason).toBe("no answer to the fix offer in 3 days");

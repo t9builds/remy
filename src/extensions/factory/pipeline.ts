@@ -312,7 +312,7 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
   if (run.stage === "asking") {
     if (await mergedByHand(run, f, env)) return true;
     const a = run.ask;
-    if (a?.purpose === "fix" && a.answer === undefined && now - run.since > FIX_OFFER_TTL_MS) {
+    if (a?.purpose === "fix" && !a.answer && now - run.since > FIX_OFFER_TTL_MS) {
       run.ask = undefined;
       enter(run, "done", now, "no answer to the fix offer in 3 days");
       return false;

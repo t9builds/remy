@@ -495,11 +495,25 @@ class ExtensionHost {
         this.handlers.set(event, [...this.handlers.get(event) ?? [], { ext, fn }]);
       },
       post: (text, { expectReply, ...opts } = {}) => deps.post(text, { ...opts, expect_reply: expectReply }),
-      ask: async (question, opts) => {
+      ask: async (question, { signal, ...opts }) => {
+        signal?.throwIfAborted();
         if (this.asks.has(opts.session))
           throw new Error(`"${opts.session}" already waits for an answer`);
-        const answer = new Promise((resolve) => this.asks.set(opts.session, { ext, resolve }));
         const key = `ask:${opts.session}`;
+        let pending;
+        const answer = new Promise((resolve, reject) => {
+          pending = { ext, resolve };
+          this.asks.set(opts.session, pending);
+          signal?.addEventListener("abort", () => {
+            if (this.asks.get(opts.session) !== pending)
+              return;
+            this.asks.delete(opts.session);
+            this.entries.delete(`${ext}\x00${key}`);
+            deps.waitingListChanged();
+            reject(signal.reason);
+          }, { once: true });
+        });
+        answer.catch(() => {});
         addEntry({
           key,
           rank: 0,
@@ -513,9 +527,11 @@ class ExtensionHost {
         try {
           await deps.post(question, { ...opts, expect_reply: true });
         } catch (e) {
-          this.asks.delete(opts.session);
-          this.entries.delete(`${ext}\x00${key}`);
-          deps.waitingListChanged();
+          if (this.asks.get(opts.session) === pending) {
+            this.asks.delete(opts.session);
+            this.entries.delete(`${ext}\x00${key}`);
+            deps.waitingListChanged();
+          }
           throw e;
         }
         return answer;
@@ -1137,7 +1153,7 @@ async function stepOnce(run, f, autonomy, env) {
     if (await mergedByHand(run, f, env))
       return true;
     const a = run.ask;
-    if (a?.purpose === "fix" && a.answer === undefined && now - run.since > FIX_OFFER_TTL_MS) {
+    if (a?.purpose === "fix" && !a.answer && now - run.since > FIX_OFFER_TTL_MS) {
       run.ask = undefined;
       enter(run, "done", now, "no answer to the fix offer in 3 days");
       return false;
@@ -1468,8 +1484,13 @@ var createFactory = (world = {}) => (remy) => {
   }
   const autonomy = (f) => lowerLevel(f.autonomy ?? "notify", remy.config.autonomy ?? "notify");
   const label = (r) => `factory:${r.repo.split("/").pop()}#${r.number}`;
+  const pendingAsks = new Map;
   function ask(run, question) {
-    remy.ask(question, { session: label(run), workspace: run.workspace }).then(async (answer) => {
+    const ctl = new AbortController;
+    pendingAsks.set(run.pr, ctl);
+    remy.ask(question, { session: label(run), workspace: run.workspace, signal: ctl.signal }).then(async (answer) => {
+      if (pendingAsks.get(run.pr) === ctl)
+        pendingAsks.delete(run.pr);
       const r = runs[run.pr];
       if (!r?.ask || r.ask.answer !== undefined)
         return;
@@ -1483,7 +1504,12 @@ var createFactory = (world = {}) => (remy) => {
       }
       r.ask.answer = answer;
       save();
-    }).catch((e) => remy.log("ask failed", run.pr, e?.message ?? e));
+    }).catch((e) => {
+      if (pendingAsks.get(run.pr) === ctl)
+        pendingAsks.delete(run.pr);
+      if (!ctl.signal.aborted)
+        remy.log("ask failed", run.pr, e?.message ?? e);
+    });
   }
   const env = {
     now: Date.now,
@@ -1519,7 +1545,8 @@ var createFactory = (world = {}) => (remy) => {
   function syncWaitingList(run) {
     const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
     if (run.stage === "done") {
-      remy.waitingList.remove(`ask:${label(run)}`);
+      pendingAsks.get(run.pr)?.abort();
+      pendingAsks.delete(run.pr);
       return remy.waitingList.remove(run.pr);
     }
     if (run.stage === "held")

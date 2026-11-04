@@ -80,10 +80,16 @@ export const createFactory =
     const autonomy = (f: Factory) => lowerLevel(f.autonomy ?? "notify", remy.config.autonomy ?? "notify");
     const label = (r: Run) => `factory:${r.repo.split("/").pop()}#${r.number}`;
 
+    // Each run's pending ask, so a run that ends can withdraw its question.
+    const pendingAsks = new Map<string, AbortController>();
+
     function ask(run: Run, question: string) {
+      const ctl = new AbortController();
+      pendingAsks.set(run.pr, ctl);
       remy
-        .ask(question, { session: label(run), workspace: run.workspace })
+        .ask(question, { session: label(run), workspace: run.workspace, signal: ctl.signal })
         .then(async (answer) => {
+          if (pendingAsks.get(run.pr) === ctl) pendingAsks.delete(run.pr);
           const r = runs[run.pr];
           if (!r?.ask || r.ask.answer !== undefined) return;
           if (r.ask.purpose === "fix" && YES.test(answer)) {
@@ -97,7 +103,10 @@ export const createFactory =
           r.ask.answer = answer;
           save();
         })
-        .catch((e) => remy.log("ask failed", run.pr, e?.message ?? e));
+        .catch((e) => {
+          if (pendingAsks.get(run.pr) === ctl) pendingAsks.delete(run.pr);
+          if (!ctl.signal.aborted) remy.log("ask failed", run.pr, e?.message ?? e);
+        });
     }
 
     const env: Env = {
@@ -141,8 +150,9 @@ export const createFactory =
     function syncWaitingList(run: Run) {
       const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
       if (run.stage === "done") {
-        // An offer that lapsed unanswered leaves its question here too (the host keys it `ask:<session>`).
-        remy.waitingList.remove(`ask:${label(run)}`);
+        // A run that ended with its question unanswered (an offer that lapsed, a merge by hand) withdraws it.
+        pendingAsks.get(run.pr)?.abort();
+        pendingAsks.delete(run.pr);
         return remy.waitingList.remove(run.pr);
       }
       if (run.stage === "held")

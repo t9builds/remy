@@ -112,6 +112,52 @@ describe("extension host", () => {
     expect(h.waitingEntries()).toEqual([]);
   });
 
+  test("ask: aborting the signal withdraws the question; a later reply is not consumed", async () => {
+    const { h, posts } = host();
+    let remy!: Remy;
+    await h.load("factory", "test", (r) => void (remy = r));
+    const ctl = new AbortController();
+    const answer = remy.ask("Fix?", { session: "factory:api#7", signal: ctl.signal });
+    const rejected = answer.then(
+      () => false,
+      () => true,
+    );
+    await Bun.sleep(0);
+    expect(h.waitingEntries()).toHaveLength(1);
+    ctl.abort();
+    expect(await rejected).toBeTrue();
+    expect(h.waitingEntries()).toEqual([]);
+    expect(h.answer("factory:api#7", "yes")).toBeFalse();
+    // The label is free again.
+    const again = remy.ask("Ship?", { session: "factory:api#7" });
+    await Bun.sleep(0);
+    expect(h.answer("factory:api#7", "ok")).toBeTrue();
+    expect(await again).toBe("ok");
+    expect(posts).toHaveLength(2);
+  });
+
+  test("ask: an aborted signal rejects at once without posting; aborting after the answer or for an older ask changes nothing", async () => {
+    const { h, posts } = host();
+    let remy!: Remy;
+    await h.load("factory", "test", (r) => void (remy = r));
+    const gone = new AbortController();
+    gone.abort();
+    await expect(remy.ask("q", { session: "s", signal: gone.signal })).rejects.toBeDefined();
+    expect(posts).toEqual([]);
+    expect(h.waitingEntries()).toEqual([]);
+    const first = new AbortController();
+    const a = remy.ask("one", { session: "s", signal: first.signal });
+    await Bun.sleep(0);
+    expect(h.answer("s", "yes")).toBeTrue();
+    await a;
+    const b = remy.ask("two", { session: "s" });
+    await Bun.sleep(0);
+    first.abort();
+    expect(h.waitingEntries()).toHaveLength(1);
+    expect(h.answer("s", "later")).toBeTrue();
+    expect(await b).toBe("later");
+  });
+
   test("waiting-list entries, coordinator.tell and state", async () => {
     const { h, told, waitingListChanges } = host();
     let remy!: Remy;
