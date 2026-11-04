@@ -298,7 +298,7 @@ Remy keeps each agent's session id and transcript path in `~/.remy/spawned.json`
 | `extensions.packages` | `[]` | Extension packages installed in `~/.remy` |
 | `extensions.disabled` | `[]` | Extensions not to load, by name, built-in ones included |
 | `autonomy` | `notify` | The most you let the [factory](#factory) do with your changes: `notify`, `verify`, `merge`, `deploy-dev` or `deploy-prod` |
-| `maxFactoryAgents` | `2` | Factory agents (verifiers, checks, fixers) running at once on your subscription |
+| `maxFactoryAgents` | `5` | Factory agents (verifiers, checks, fixers) running at once on your subscription |
 
 Each workspace:
 

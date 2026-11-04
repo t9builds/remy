@@ -105,7 +105,7 @@ export const createFactory =
       canStartAgent: () =>
         Date.now() >= backoffUntil &&
         Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing") && r.agent).length <
-          (remy.config.maxFactoryAgents ?? 2),
+          (remy.config.maxFactoryAgents ?? 5),
       spawn: async (run, step, prompt) => {
         try {
           const r = await remy.spawn({
