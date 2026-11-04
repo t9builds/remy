@@ -1293,6 +1293,7 @@ ${run.pr}`);
     return fix(run, f, env, `${step.name} failed`, summary);
   return hold(run, now, `${step.name}: ${summary}`);
 }
+var LOGIN_EXPIRED = /reauthentication|problem refreshing your current auth tokens|gcloud auth login/i;
 async function waitStep(run, step, f, env) {
   const now = env.now();
   const minutes = step.timeoutMinutes ?? 60;
@@ -1320,9 +1321,15 @@ async function waitStep(run, step, f, env) {
     return next(run, now);
   if (b.status === "failed")
     return hold(run, now, `the ${step.env} deploy of ${run.mergeSha.slice(0, 7)} failed${b.id ? ` (${b.id})` : ""}${b.detail ? `: ${b.detail}` : ""}`);
-  if (b.status === "error")
+  const sha = run.mergeSha.slice(0, 7);
+  if (b.status === "error") {
+    const retry = `\`remy factory retry ${run.pr}\``;
+    if (LOGIN_EXPIRED.test(b.detail ?? ""))
+      return hold(run, now, `couldn't check the ${step.env} deploy of ${sha}: gcloud's login expired; run \`gcloud auth login\`, then ${retry}`);
     run.reason = b.detail;
-  return late ? hold(run, now, `no ${step.env} deploy of ${run.mergeSha.slice(0, 7)} after ${minutes} min${run.reason ? ` (${run.reason})` : ""}`) : false;
+    return late ? hold(run, now, `couldn't check the ${step.env} deploy of ${sha} for ${minutes} min (${b.detail}); then ${retry}`) : false;
+  }
+  return late ? hold(run, now, `no ${step.env} deploy of ${sha} after ${minutes} min`) : false;
 }
 async function gateStep(run, step, f, env) {
   const now = env.now();
