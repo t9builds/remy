@@ -284,7 +284,7 @@ In any channel the bot is in, mention it in a thread (`@bot fix this, it's in ap
 
 Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
 
-From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy resume <name>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`, `remy factory`, `remy trace`.
+From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy resume <name>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`, `remy factory` (with `start`, `retry` and `check`), `remy trace`.
 
 ### Tracing what agents did
 
@@ -458,7 +458,7 @@ How far Remy goes on its own is the lower of the repo's `autonomy` and yours in 
 
 A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a failure the fixer couldn't fix, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
 
-The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Sessions sharing a [GitButler](https://gitbutler.com) workspace each get the PR of the branch they named, so one session's PR never runs as another's. Step agents and fixers count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
+The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. For a PR no session of yours is on, such as one pushed by hand, `remy factory start <pr>` (a URL, number or branch) starts its run. Start it again after new commits if it was held. Sessions sharing a [GitButler](https://gitbutler.com) workspace each get the PR of the branch they named, so one session's PR never runs as another's. Step agents and fixers count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` and shows the autonomy that applies.
 
 ## Limits
 

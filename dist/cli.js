@@ -1463,10 +1463,12 @@ var createFactory = (world = {}) => (remy) => {
   const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo]));
   const loaded = new Map;
   const runs = remy.state.get("runs", {});
+  const starts = remy.state.get("starts", {});
   let backoffUntil = remy.state.get("backoffUntil", 0);
   const tried = new Set;
   const save = () => {
     remy.state.set("runs", runs);
+    remy.state.set("starts", starts);
     remy.state.set("backoffUntil", backoffUntil);
   };
   async function factoryAt(root) {
@@ -1559,6 +1561,24 @@ var createFactory = (world = {}) => (remy) => {
       });
     remy.waitingList.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
   }
+  async function startRun(fields) {
+    const f = await factoryAt(fields.repoDir);
+    if (!f || autonomy(f) === "notify")
+      return false;
+    const now = Date.now();
+    runs[fields.pr] = {
+      ...fields,
+      step: 0,
+      round: 1,
+      stage: "running",
+      since: now,
+      stepSince: now,
+      reports: [],
+      approved: []
+    };
+    remy.log("factory run started", fields.pr);
+    return true;
+  }
   let ticking = false;
   remy.on("tick", async () => {
     if (ticking)
@@ -1571,11 +1591,7 @@ var createFactory = (world = {}) => (remy) => {
         if (had && (isActive(had) || had.head === pr.head))
           continue;
         const root = repoRootOf(s.cwd);
-        const f = await factoryAt(root);
-        if (!f || autonomy(f) === "notify")
-          continue;
-        const now = Date.now();
-        runs[pr.url] = {
+        await startRun({
           pr: pr.url,
           number: pr.number,
           title: pr.title,
@@ -1585,16 +1601,20 @@ var createFactory = (world = {}) => (remy) => {
           session: s.name,
           workspace: s.workspace,
           about: s.about,
-          head: pr.head,
-          step: 0,
-          round: 1,
-          stage: "running",
-          since: now,
-          stepSince: now,
-          reports: [],
-          approved: []
-        };
-        remy.log("factory run started", pr.url);
+          head: pr.head
+        });
+      }
+      const now = Date.now();
+      for (const [url, at] of Object.entries(starts))
+        if (now - at > KEEP_MS)
+          delete starts[url];
+      for (const r of env.reports()) {
+        if (r.kind !== "start" || !r.start || !r.head || now - r.at > KEEP_MS || r.at <= (starts[r.pr] ?? 0))
+          continue;
+        const had = runs[r.pr];
+        const { repo, number } = r.start;
+        if (had && (isActive(had) || had.since >= r.at) || await startRun({ ...r.start, pr: r.pr, head: r.head, session: `${repo.split("/").pop()}#${number}` }))
+          starts[r.pr] = r.at;
       }
       for (const [url, run] of Object.entries(runs)) {
         const f = await factoryAt(run.repoDir);
@@ -5057,9 +5077,55 @@ autonomy: ${lowerLevel(f.autonomy ?? "notify", c.autonomy)} (repo ${f.autonomy ?
     say(disabledNote("nothing runs the step again until you turn it back on") ?? `#${run.number} runs its held step again within a minute or so.`);
     return;
   }
+  if (positionals[0] === "start")
+    return start(positionals[1], runs);
   if (values.json)
     return console.log(JSON.stringify(runs, null, 2));
   say(formatRuns(Object.values(runs)), disabledNote("these PRs stay where they are"));
+}
+async function start(want, runs) {
+  if (!want)
+    throw new Error(`usage: ${import_picocolors.default.cyan("remy factory start <pr-url|number|branch>")}`);
+  const p = Bun.spawnSync(["gh", "pr", "view", want, "--json", "url,number,title,headRefName,headRefOid,state,isDraft"], { stdout: "pipe", stderr: "pipe" });
+  if (p.exitCode !== 0)
+    throw new Error(`gh pr view ${want}: ${p.stderr.toString().trim()}`);
+  const pr = JSON.parse(p.stdout.toString());
+  const c = loadConfig();
+  const had = runs[pr.url];
+  const repo = repoOfUrl(pr.url);
+  if (had && isActive(had) && pr.state === "OPEN")
+    return say(`${repo}#${pr.number} is already in the factory; \`remy factory\` shows where.`);
+  const root = trustedRepos(c).find((r) => r.root && githubRepoOf(r.root)?.toLowerCase() === repo.toLowerCase())?.root;
+  const l = root ? await loadFactory(root) : undefined;
+  appendReport(startReport(pr, c, root, l));
+  say(disabledNote("nothing starts it until you turn it back on") ?? `${repo}#${pr.number} starts its pipeline within a minute or so. A held run doesn't restart on new commits: start it again.`);
+}
+var repoOfUrl = (url) => {
+  const m = url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+  if (!m)
+    throw new Error(`${url} isn't a github.com/<owner>/<repo>/pull/<number> URL`);
+  return m[1];
+};
+function startReport(pr, c, root, l) {
+  const repo = repoOfUrl(pr.url);
+  if (pr.state !== "OPEN" || pr.isDraft)
+    throw new Error(`${repo}#${pr.number} is ${pr.isDraft ? "a draft" : pr.state.toLowerCase()}; the factory takes open PRs`);
+  if (!root)
+    throw new Error(`${repo} isn't in extensions.repos in ${PATHS.config}, so the factory doesn't run there`);
+  if (!l?.factory)
+    throw new Error(`${join11(root, ".remy", "factory.ts")}: ${l?.error ?? "not found"}`);
+  if (lowerLevel(l.factory.autonomy ?? "notify", c.autonomy) === "notify")
+    throw new Error(`autonomy is notify for ${repo}, so the factory only reports; \`remy factory check\` says why`);
+  const workspace = workspaceFor({ cwd: root, repo }, c)?.name;
+  if (!workspace)
+    throw new Error(`no workspace in ${PATHS.config} to report to`);
+  return {
+    pr: pr.url,
+    step: "",
+    kind: "start",
+    head: pr.headRefOid,
+    start: { number: pr.number, title: pr.title, repo, repoDir: root, branch: pr.headRefName, workspace }
+  };
 }
 async function report(args) {
   const { values, positionals } = parse(args, { pr: { type: "string" }, summary: { type: "string" } });
@@ -5360,7 +5426,7 @@ async function doctor() {
 }
 
 // src/cli/commands/start.ts
-async function start(extra) {
+async function start2(extra) {
   const { rows } = await doctor();
   const c = loadConfig();
   const problems = blocking(rows);
@@ -7597,8 +7663,8 @@ var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, 
     "Carry on an agent's own session in the background, stopping it first if it's stuck; keeps its history and worktree"
   ],
   [
-    "factory [--json] | factory retry <pr> | factory check [repo]",
-    "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts"
+    "factory [--json] | factory start <pr> | factory retry <pr> | factory check [repo]",
+    "Where each PR stands in its factory pipeline; start runs one no session of yours is on; retry runs a held step again; check validates a repo's .remy/factory.ts"
   ],
   ["report <step> pass|fail|fixed --pr <url> --summary <text>", "A factory agent's verdict on its step"],
   [
@@ -7621,7 +7687,7 @@ var COMMANDS = {
   trace,
   post,
   setup: async (args) => setup(parse(args, {}).positionals[0]),
-  start,
+  start: start2,
   daemon,
   doctor: async () => {
     const { ok, rows } = await doctor();

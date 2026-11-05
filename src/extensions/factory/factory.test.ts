@@ -10,7 +10,7 @@ import { PLUGIN_ROOT } from "../../shared/paths";
 import { createFactory, endedOnUsageLimit, isReady, spawnHitUsageLimit } from "./factory";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
-import { type Env, gateBlockers, type PrDetail, type Run } from "./pipeline";
+import { type Env, gateBlockers, type PrDetail, type Report, type Run } from "./pipeline";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "remy-factory-")));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -380,4 +380,111 @@ test("a fix offer that lapses while it is on the waiting list is withdrawn witho
   expect(h.waitingEntries().map((e) => e.key)).not.toContain("ask:factory:api#7");
   // Withdrawing the question is not a failure to log.
   expect(logs.filter((l) => l.includes("ask failed"))).toEqual([]);
+});
+
+test("`remy factory start` runs a PR no session is on, once per start", async () => {
+  const root = repo("api-start", GOOD);
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-start"] } };
+  const url = "https://github.com/acme-corp/api/pull/9";
+  const startedAt = Date.now() - 1000;
+  const start: Report = {
+    pr: url,
+    at: startedAt,
+    step: "",
+    kind: "start",
+    head: "bbb",
+    start: { number: 9, title: "Hand-pushed", repo: "acme-corp/api", repoDir: root, branch: "b", workspace: "work" },
+  };
+  const stateDir = join(dir, `state-${Math.random()}`);
+  const { h } = await hostWith(config, [], { pr: async () => undefined, reports: () => [start] }, stateDir);
+  await h.emit("tick", { at: 1 });
+  const saved = () =>
+    JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs as Record<string, Run>;
+  expect(saved()[url]).toMatchObject({ stage: "running", step: 0, head: "bbb", session: "api#9", workspace: "work" });
+  expect(h.waitingEntries().map((e) => [e.key, e.label, !!e.hide])).toEqual([[url, "api#9", true]]);
+
+  // A run the start already made, finished since, isn't made again by the same start.
+  const done = { ...saved()[url]!, stage: "done" as const };
+  const again = await hostWithRuns([done], { extensions: { repos: ["api-start"] } }, { reports: () => [start] });
+  await again.h.emit("tick", { at: 1 });
+  expect(again.saved()[url]?.stage).toBe("done");
+
+  // A repo outside extensions.repos gets no run.
+  const off = await hostWith({ ...config, extensions: { repos: [] } }, [], { reports: () => [start] });
+  await off.h.emit("tick", { at: 1 });
+  expect(off.h.waitingEntries()).toEqual([]);
+});
+
+/** A start report for PR 9 of `acme-corp/api`, `ago` ms old. */
+const startReport = (root: string, ago: number): Report => ({
+  pr: "https://github.com/acme-corp/api/pull/9",
+  at: Date.now() - ago,
+  step: "",
+  kind: "start",
+  head: "bbb",
+  start: { number: 9, title: "Hand-pushed", repo: "acme-corp/api", repoDir: root, branch: "b", workspace: "work" },
+});
+
+/** A factory whose saved state is `state`, given `reports`. */
+async function hostWithState(state: object, reports: () => Report[]) {
+  const stateDir = join(dir, `state-${Math.random()}`);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "builtin_factory.json"), JSON.stringify(state));
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-start2"] } };
+  const { h } = await hostWith(config, [], { pr: async () => undefined, reports }, stateDir);
+  const saved = () => JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8"));
+  return { h, saved };
+}
+
+test("a start report outlives its run without starting it again", async () => {
+  const root = repo("api-start2", GOOD);
+  const url = startReport(root, 0).pr;
+  const day = 24 * 3_600_000;
+
+  // The run it made was dropped (or never saved) and the report remains: the report was taken already.
+  const report = startReport(root, 3 * day);
+  const taken = await hostWithState({ runs: {}, starts: { [url]: report.at } }, () => [report]);
+  await taken.h.emit("tick", { at: 1 });
+  expect(taken.saved().runs).toEqual({});
+
+  // A report older than a week is never taken, and a record that old is pruned.
+  const old = await hostWithState({ starts: { [url]: Date.now() - 8 * day } }, () => [startReport(root, 8 * day)]);
+  await old.h.emit("tick", { at: 1 });
+  expect(old.saved().runs).toEqual({});
+  expect(old.saved().starts).toEqual({});
+
+  // A newer report restarts a held run, and a done one.
+  for (const stage of ["held", "done"] as const) {
+    const run = { ...savedRun(root, 9, stage), since: Date.now() - day };
+    const s = await hostWithState({ runs: { [url]: run }, starts: { [url]: Date.now() - 2 * day } }, () => [
+      startReport(root, 1000),
+    ]);
+    await s.h.emit("tick", { at: 1 });
+    expect(s.saved().runs[url]).toMatchObject({ stage: "running", step: 0, head: "bbb" });
+  }
+});
+
+test("a start report seen while its run is active is taken, and leaves the run as it is", async () => {
+  const root = repo("api-start2", GOOD);
+  const url = startReport(root, 0).pr;
+  const active = { ...savedRun(root, 9, "running"), since: Date.now() - 5000 };
+  const s = await hostWithState({ runs: { [url]: active } }, () => [startReport(root, 1000)]);
+  await s.h.emit("tick", { at: 1 });
+  expect(s.saved().runs[url]).toMatchObject({ head: "aaa", since: active.since });
+  expect(s.saved().starts[url]).toBeGreaterThan(0);
+});
+
+test("a start report whose repo's factory can't load yet is tried again, not lost", async () => {
+  const root = repo("api-start2", GOOD);
+  rmSync(join(root, ".remy", "factory.ts"));
+  const report = startReport(root, 1000);
+  const s = await hostWithState({}, () => [report]);
+  await s.h.emit("tick", { at: 1 });
+  expect(s.saved().runs?.[report.pr]).toBeUndefined();
+  expect(s.saved().starts?.[report.pr]).toBeUndefined();
+
+  repo("api-start2", GOOD);
+  await s.h.emit("tick", { at: 2 });
+  expect(s.saved().runs[report.pr]).toMatchObject({ stage: "running", head: "bbb", session: "api#9" });
+  expect(s.saved().starts[report.pr]).toBe(report.at);
 });
