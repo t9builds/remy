@@ -55,7 +55,7 @@ function fakeRun(answers: Record<string, string | undefined>) {
   };
   return { calls, exec };
 }
-const ghJson = (number: number, branch: string) =>
+const ghJson = (number: number, branch: string, base = "main") =>
   JSON.stringify({
     number,
     url: `https://github.com/acme/web/pull/${number}`,
@@ -66,6 +66,7 @@ const ghJson = (number: number, branch: string) =>
     statusCheckRollup: [],
     headRefOid: "abc",
     headRefName: branch,
+    baseRefName: base,
   });
 const head = (calls: string[]) => calls.map((c) => c.split(" ").slice(0, 3).join(" "));
 
@@ -82,6 +83,8 @@ test("checkoutPrs: a plain branch asks gh for its PR and nothing else", async ()
   expect(prs.map((p) => p.number)).toEqual([5]);
   expect(w.calls).toHaveLength(1);
   expect(w.calls[0]).toStartWith("gh pr view feat --json ");
+  expect(w.calls[0]).toContain("baseRefName");
+  expect(prs[0]?.base).toBe("main");
 });
 
 test("checkoutPrs: a GitButler workspace asks `but` for its branches, with no fallback", async () => {

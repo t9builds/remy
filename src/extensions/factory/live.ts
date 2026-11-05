@@ -41,6 +41,18 @@ export async function prDetail(url: string): Promise<PrDetail | undefined> {
   };
 }
 
+const defaultBranches = new Map<string, string>();
+
+/** The default branch of `owner/name`, asked of gh once per repo; a failed lookup isn't remembered. */
+export async function defaultBranch(repo: string): Promise<string | undefined> {
+  const known = defaultBranches.get(repo);
+  if (known) return known;
+  const r = await run(["gh", "repo", "view", repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
+  if (!r.ok || !r.out) return undefined;
+  defaultBranches.set(repo, r.out);
+  return r.out;
+}
+
 export async function mergePr(url: string, head: string, method: string) {
   const r = await run(["gh", "pr", "merge", url, `--${method}`, "--match-head-commit", head]);
   return { ok: r.ok, out: r.err || r.out };

@@ -29,6 +29,8 @@ export type Pr = {
   head?: string;
   /** The PR's branch. */
   branch?: string;
+  /** The branch it merges into. */
+  base?: string;
 };
 
 /** A started agent: its name, its worktree label, the session id `claude --bg` printed, and its folder. */

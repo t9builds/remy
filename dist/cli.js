@@ -853,6 +853,17 @@ async function prDetail(url) {
     mergeSha: j.mergeCommit?.oid
   };
 }
+var defaultBranches = new Map;
+async function defaultBranch(repo) {
+  const known = defaultBranches.get(repo);
+  if (known)
+    return known;
+  const r = await run(["gh", "repo", "view", repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
+  if (!r.ok || !r.out)
+    return;
+  defaultBranches.set(repo, r.out);
+  return r.out;
+}
 async function mergePr(url, head, method) {
   const r = await run(["gh", "pr", "merge", url, `--${method}`, "--match-head-commit", head]);
   return { ok: r.ok, out: r.err || r.out };
@@ -1460,6 +1471,7 @@ var createFactory = (world = {}) => (remy) => {
   const env = {
     now: Date.now,
     pr: prDetail,
+    defaultBranch,
     merge: mergePr,
     deployed: (sha, e, run) => deployed(sha, e, run.repoDir),
     deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
@@ -1520,6 +1532,11 @@ var createFactory = (world = {}) => (remy) => {
         const gitbutler = s.branch === GITBUTLER_WORKSPACE;
         if (gitbutler && !pr.branch)
           continue;
+        if (gitbutler) {
+          const base = await env.defaultBranch(s.repo ?? trusted.get(root));
+          if (!base || pr.base !== base)
+            continue;
+        }
         runs[pr.url] = {
           pr: pr.url,
           number: pr.number,
@@ -3464,7 +3481,7 @@ async function prInfo(cwd, branch, exec) {
     "view",
     branch,
     "--json",
-    "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid,headRefName"
+    "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid,headRefName,baseRefName"
   ], cwd);
   if (!out)
     return;
@@ -3478,7 +3495,8 @@ async function prInfo(cwd, branch, exec) {
     review: j.reviewDecision ?? "",
     ...ciOf(j.statusCheckRollup),
     head: j.headRefOid,
-    branch: j.headRefName
+    branch: j.headRefName,
+    base: j.baseRefName
   };
 }
 async function checkoutPrs(cwd, branch, exec = run2) {

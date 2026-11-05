@@ -10,7 +10,7 @@ Remy found a session's PR from the branch its checkout is on (`git branch --show
 2. **The applied branches.** `but status --json` lists them, stacked branches included; one never pushed has no PR and is left out. Without the `but` CLI, the branches at the parents of the workspace commit stand in: the top branch of each stack. Each branch's PR comes from `gh pr view <branch>`, as before.
 3. **One session, many PRs.** The session owns every PR of its workspace. `SessionRef.prs` (and `SessionView.prs`) lists them; `pr` stays the first, so an extension that reads `pr` keeps working, and a snapshot stored before `prs` reads as one PR.
 4. **Each PR on its own.** Events (`pr.opened`, `pr.ready`, `pr.ci`, `pr.merged`) come per PR. The waiting list has a line per PR that waits, named by its number, unless the session itself waits on the user (a question or a permission), which stays one line. An extension's entry about one of a session's PRs replaces only that PR's line. The factory starts a run per ready PR; `remy status` lists them all. A spawned agent with several PRs is closed once all of them merged.
-5. **The factory keeps out of the workspace.** A run's branch is the PR's own (`headRefName`), never `gitbutler/workspace`. Step agents already work in their own worktree on a detached HEAD; for a GitButler PR their prompt also says not to run git or `but` in the author's checkout, and to push only `HEAD:<branch>`, never with force. When an agent pushes a fix, the notice in the author's thread says to integrate the upstream commits in GitButler before pushing that branch again.
+5. **The factory keeps out of the workspace.** A run's branch is the PR's own (`headRefName`), never `gitbutler/workspace`. Step agents already work in their own worktree on a detached HEAD; for a GitButler PR their prompt also says not to run git or `but` in the author's checkout, and to push only `HEAD:<branch>`, never with force. When an agent pushes a fix, the notice in the author's thread says to integrate the upstream commits in GitButler before pushing that branch again. The factory takes a GitButler PR only when it merges into the repo's default branch; a stacked one waits until the PR below it merged and GitHub retargeted it.
 
 ## Considered Options
 
@@ -22,7 +22,8 @@ Remy found a session's PR from the branch its checkout is on (`git branch --show
 
 ## Consequences
 
-- `SessionRef.prs` and `Pr.branch` are new in the extension API; nothing was removed, and `pr` keeps its meaning for every checkout not on GitButler.
+- `SessionRef.prs`, `Pr.branch` and `Pr.base` are new in the extension API; nothing was removed, and `pr` keeps its meaning for every checkout not on GitButler.
+- For a ready GitButler PR in a factory repo, the factory asks `gh repo view` for the default branch, once per repo for the life of the daemon.
 - A look at a GitButler session runs `but status` (about 2 s) and one `gh pr view` per pushed applied branch, every `tickSeconds`.
 - Two sessions in the same GitButler workspace both own its PRs. The factory still runs each PR once (runs are keyed by PR), under the first session it saw it on; both sessions show the PRs in `remy status`.
 - Without `but`, stacked branches below the top of a stack aren't seen, and a branch name reused from an old PR shows that PR (merged or closed, so it never reaches the factory or the waiting list).

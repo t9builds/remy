@@ -169,10 +169,26 @@ test("a ready PR in a listed repo starts a run; an unlisted repo's or a notify-l
 test("a GitButler session's two ready PRs are two runs, each pushing to its own branch", async () => {
   const root = repo("api-gitbutler", GOOD);
   const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-gitbutler"] } };
-  const second = { ...pr, number: 8, url: "https://github.com/acme-corp/api/pull/8", head: "bbb", branch: "tomas/b" };
-  const session = ref({ cwd: root, branch: "gitbutler/workspace", prs: [{ ...pr, branch: "tomas/a" }, second] });
+  const second = {
+    ...pr,
+    number: 8,
+    url: "https://github.com/acme-corp/api/pull/8",
+    head: "bbb",
+    branch: "tomas/b",
+    base: "main",
+  };
+  const session = ref({
+    cwd: root,
+    branch: "gitbutler/workspace",
+    prs: [{ ...pr, branch: "tomas/a", base: "main" }, second],
+  });
   const stateDir = join(dir, `state-${Math.random()}`);
-  const { h } = await hostWith(config, [session], { pr: async () => undefined }, stateDir);
+  const { h } = await hostWith(
+    config,
+    [session],
+    { pr: async () => undefined, defaultBranch: async () => "main" },
+    stateDir,
+  );
   await h.emit("tick", { at: 1 });
   const runs = JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs as Record<string, Run>;
   expect(Object.values(runs).map((r) => [r.number, r.branch, r.gitbutler, r.session])).toEqual([
@@ -186,6 +202,42 @@ test("a GitButler session's two ready PRs are two runs, each pushing to its own 
   const plainRuns = JSON.parse(readFileSync(join(plainDir, "builtin_factory.json"), "utf8")).runs;
   expect(plainRuns[pr.url]).toMatchObject({ branch: "fix" });
   expect(plainRuns[pr.url].gitbutler).toBeUndefined();
+});
+
+test("a GitButler session's stacked PR waits until it merges into the default branch; a plain checkout asks for none", async () => {
+  const root = repo("api-stacked", GOOD);
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-stacked"] } };
+  const upper = { ...pr, number: 8, url: "https://github.com/acme-corp/api/pull/8", head: "bbb", branch: "tomas/b" };
+  const prs = (upperBase: string) => [
+    { ...pr, branch: "tomas/a", base: "main" },
+    { ...upper, base: upperBase },
+  ];
+  const asked: string[] = [];
+  const world = {
+    pr: async () => undefined,
+    defaultBranch: async (r: string) => (asked.push(r), "main"),
+  };
+  const started = async (session: SessionRef) => {
+    const stateDir = join(dir, `state-${Math.random()}`);
+    const { h } = await hostWith(config, [session], world, stateDir);
+    await h.emit("tick", { at: 1 });
+    const runs = JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs as Record<string, Run>;
+    return Object.values(runs).map((r) => r.number);
+  };
+  const workspace = { cwd: root, branch: "gitbutler/workspace" };
+  expect(await started(ref({ ...workspace, prs: prs("tomas/a") }))).toEqual([7]);
+  // GitHub retargeted the upper PR once the one below it merged.
+  expect(await started(ref({ ...workspace, prs: prs("main") }))).toEqual([7, 8]);
+  // Without a default branch nothing starts, and nothing throws.
+  const unknown = await hostWith(config, [ref({ ...workspace, prs: prs("main") })], {
+    ...world,
+    defaultBranch: async () => undefined,
+  });
+  await unknown.h.emit("tick", { at: 1 });
+  expect(unknown.h.waitingEntries()).toEqual([]);
+  asked.length = 0;
+  expect(await started(ref({ cwd: root }))).toEqual([7]);
+  expect(asked).toEqual([]);
 });
 
 test("formatRuns", () => {

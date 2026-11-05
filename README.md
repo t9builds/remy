@@ -450,6 +450,8 @@ The factory runs only in repos listed in `extensions.repos`, and only on PRs of 
 
 A repo managed by [GitButler](https://gitbutler.com) keeps its checkout on `gitbutler/workspace` and applies several branches at once, each with its own PR. Remy sees that by itself, for sessions you started too: the session owns the PR of every applied branch that was pushed, read with `but status` (or, without the `but` CLI, the top branch of each stack). `remy status` lists them all on the session's line, the waiting list has a line per PR that waits (`burger · #823 PR ready for you`), and the factory takes each ready PR on as a run of its own ([ADR-0012](docs/adr/0012-a-gitbutler-session-owns-a-pr-per-applied-branch.md)).
 
+The factory takes a PR only when it merges into the repo's default branch: a stacked PR waits until the one below it merged and GitHub retargeted it.
+
 The factory leaves your workspace alone: its agents work in worktrees of their own, never run git or `but` in your checkout, and push a fix only to the PR's branch. GitButler then shows the fix as upstream commits; integrate them before you push that branch again, or a force push drops the fix. The notice in the session's thread reminds you.
 
 ## Limits

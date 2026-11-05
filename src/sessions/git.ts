@@ -48,7 +48,7 @@ async function prInfo(cwd: string, branch: string, exec: Runner): Promise<Pr | u
       "view",
       branch,
       "--json",
-      "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid,headRefName",
+      "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid,headRefName,baseRefName",
     ],
     cwd,
   );
@@ -64,6 +64,7 @@ async function prInfo(cwd: string, branch: string, exec: Runner): Promise<Pr | u
     ...ciOf(j.statusCheckRollup),
     head: j.headRefOid,
     branch: j.headRefName,
+    base: j.baseRefName,
   };
 }
 

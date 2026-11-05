@@ -106,6 +106,8 @@ export type Build = { status: "none" | "running" | "success" | "failed" | "error
 export type Env = {
   now(): number;
   pr(url: string): Promise<PrDetail | undefined>;
+  /** The default branch of `owner/name`; undefined when it can't be found. */
+  defaultBranch(repo: string): Promise<string | undefined>;
   merge(url: string, head: string, method: string): Promise<{ ok: boolean; out: string }>;
   /** Whether `sha` is deployed to the environment, as its detector sees it. Commands run in the run's checkout. */
   deployed(sha: string, env: Environment, run: Run): Promise<Build>;

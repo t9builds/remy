@@ -95,6 +95,7 @@ function world() {
   const env: Env = {
     now: () => w.t,
     pr: async () => ({ ...w.pr }),
+    defaultBranch: async () => "main",
     merge: async (_url, head, method) => {
       w.merges.push(`${head} ${method}`);
       w.pr = { ...w.pr, state: "MERGED", mergeSha: "mmm" };

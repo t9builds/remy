@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { Remy, SessionRef } from "../../sdk/extension";
 import { type Factory, lowerLevel } from "../../sdk/factory";
 import { formatRuns } from "./format";
-import { deploy, deployed, mergePr, prDetail, readReports, repoRootOf } from "./live";
+import { defaultBranch, deploy, deployed, mergePr, prDetail, readReports, repoRootOf } from "./live";
 import { type Loaded, loadFactory } from "./load";
 import { advance, type Env, isActive, type Run, YES } from "./pipeline";
 
@@ -104,6 +104,7 @@ export const createFactory =
     const env: Env = {
       now: Date.now,
       pr: prDetail,
+      defaultBranch,
       merge: mergePr,
       deployed: (sha, e, run) => deployed(sha, e, run.repoDir),
       deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
@@ -170,6 +171,11 @@ export const createFactory =
           // In a GitButler workspace the checkout is on GitButler's branch; agents push to the PR's own.
           const gitbutler = s.branch === GITBUTLER_WORKSPACE;
           if (gitbutler && !pr.branch) continue;
+          // A stacked PR merges into the branch below it, so it waits until GitHub retargets it to the default branch once that one merged.
+          if (gitbutler) {
+            const base = await env.defaultBranch(s.repo ?? trusted.get(root)!);
+            if (!base || pr.base !== base) continue;
+          }
           runs[pr.url] = {
             pr: pr.url,
             number: pr.number,
