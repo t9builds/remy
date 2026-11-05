@@ -2,7 +2,7 @@
 
 ## pstack
 
-Parts of `skills/review/` and `skills/create-verification-skill/` (including its feature-map example, copied as it is) are adapted from [pstack](https://github.com/cursor/plugins/tree/main/pstack).
+Parts of `skills/review/`, `skills/implement/` and `skills/create-verification-skill/` (including its feature-map example, copied as it is) are adapted from [pstack](https://github.com/cursor/plugins/tree/main/pstack).
 
 ```
 MIT License

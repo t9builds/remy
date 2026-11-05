@@ -32,5 +32,5 @@ Preconditions:
 ## Gotchas
 
 - Each step is a coordinator turn plus the agent's own: allow minutes, not seconds.
-- `spawnWorktree` is off in the run's config, so the agent works in `fixture` itself.
+- `spawnWorktree` is off in the run's config, so the agent works in `fixture` itself. The config also sets `spawnTemplate` to `{task}`, so agents get their task as is.
 - Remy takes a turn as a question when a line of the agent's last message ends with `?`, or its last line asks and goes on to say what happens once the user answers (it must name the user answering: "once you tell me", "let me know") ("Which colour? Once you tell me, I'll write it down."). A question buried mid-message shows as `stopped without a PR` instead.

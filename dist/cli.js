@@ -263,7 +263,7 @@ function migrateWorkspace(w) {
 var DEFAULTS = {
   workspaces: [],
   repoRoots: [join2(homedir2(), "Repositories")],
-  spawnTemplate: "{task}",
+  spawnTemplate: "/remy:implement {task}",
   spawnPermissionMode: "auto",
   spawnWorktree: true,
   digestMinutes: 15,
