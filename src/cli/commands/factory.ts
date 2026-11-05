@@ -24,7 +24,7 @@ const disabledNote = (what: string) =>
 
 const say = (...lines: (string | undefined)[]) => console.log(lines.filter(Boolean).join("\n"));
 
-/** How a PR that conflicts with its base is handled, as `remy factory check` shows it (ADR-0014). */
+/** How a PR that conflicts with its base is handled, as `remy factory check` shows it (ADR-0015). */
 export function conflictsLine(f: Factory) {
   const c = f.conflicts;
   if (c === false) return "conflicts with the base: held for you";
@@ -32,6 +32,7 @@ export function conflictsLine(f: Factory) {
   return `conflicts with the base: ${how}, by ${c?.skill ?? "/remy:resolve"}`;
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 20); don't add to it
 export async function factory(args: string[]) {
   const { values, positionals } = parse(args, { json: { type: "boolean" } });
   const runs = readJson<{ runs?: Record<string, Run> }>(PATHS.factory, {}).runs ?? {};

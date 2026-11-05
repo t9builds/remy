@@ -1204,6 +1204,15 @@ function conflicted(run, f, env, d) {
     return;
   return resolve4(run, f, env);
 }
+async function beforeAgent(run, f, env) {
+  const d = await env.pr(run.pr);
+  if (!d)
+    return false;
+  if (d.state !== "OPEN")
+    return closed(run, d, f, env);
+  run.head = d.head;
+  return conflicted(run, f, env, d);
+}
 async function resolve4(run, f, env) {
   const now = env.now();
   const most = maxResolves(f);
@@ -1295,24 +1304,9 @@ async function stepOnce(run, f, autonomy, env) {
     return false;
   }
   if (run.stage === "awaiting-fix") {
-    const d = await env.pr(run.pr);
-    if (!d)
-      return false;
-    if (d.state !== "OPEN")
-      return closed(run, d, f, env);
-    const last = run.reports.at(-1)?.step;
-    const by = last === FIXER ? "the fixer" : last === RESOLVER ? "the resolver" : last ?? "an agent";
-    if (d.head === run.head)
-      return now - run.since > PUSH_WAIT_MS ? hold(run, now, `${by} said it pushed fixes, but the PR didn't change`) : false;
-    const c = conflicted(run, f, env, d);
-    if (c)
-      return c;
-    if (d.ci === "pending")
-      return false;
-    run.head = d.head;
-    if (d.ci === "fail")
-      return ciFails(run, f, env, d, `CI fails after ${by}'s fixes`);
-    enter(run, "running", now);
+    const stop = await awaitingFix(run, f, env);
+    if (stop !== undefined)
+      return stop;
   }
   if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(approval(run))) {
     const said = run.reports.findLast((r) => r.verdict === "pass" || r.verdict === "fixed")?.summary;
@@ -1325,6 +1319,28 @@ async function stepOnce(run, f, autonomy, env) {
   if (step.kind === "gate")
     return gateStep(run, step, f, env);
   return actionStep(run, step, f, env);
+}
+async function awaitingFix(run, f, env) {
+  const now = env.now();
+  const d = await env.pr(run.pr);
+  if (!d)
+    return false;
+  if (d.state !== "OPEN")
+    return closed(run, d, f, env);
+  const last = run.reports.at(-1)?.step;
+  const by = last === FIXER ? "the fixer" : last === RESOLVER ? "the resolver" : last ?? "an agent";
+  if (d.head === run.head)
+    return now - run.since > PUSH_WAIT_MS ? hold(run, now, `${by} said it pushed fixes, but the PR didn't change`) : false;
+  const c = conflicted(run, f, env, d);
+  if (c)
+    return c;
+  if (d.ci === "pending")
+    return false;
+  run.head = d.head;
+  if (d.ci === "fail")
+    return ciFails(run, f, env, d, `CI fails after ${by}'s fixes`);
+  enter(run, "running", now);
+  return;
 }
 var describe = (s) => s.kind === "action" ? s.name === "merge" ? "Merge" : s.name === "deploy" ? `Deploy to ${s.env}` : "Notify" : `${s.kind} ${s.name}`;
 async function mergedByHand(run, f, env) {
@@ -1371,15 +1387,9 @@ async function fixing(run, f, env) {
   if (!run.agent) {
     if (!env.canStartAgent())
       return false;
-    const d = await env.pr(run.pr);
-    if (!d)
-      return false;
-    if (d.state !== "OPEN")
-      return closed(run, d, f, env);
-    run.head = d.head;
-    const c = conflicted(run, f, env, d);
-    if (c)
-      return c;
+    const stop = await beforeAgent(run, f, env);
+    if (stop !== undefined)
+      return stop;
     await start(run, env, step, fixPrompt(run, step, f));
     return false;
   }
@@ -1398,40 +1408,8 @@ async function fixing(run, f, env) {
 async function resolving(run, f, env) {
   const step = resolverStep(f);
   const now = env.now();
-  if (!run.agent) {
-    const d = await env.pr(run.pr);
-    if (!d)
-      return false;
-    if (d.state !== "OPEN")
-      return closed(run, d, f, env);
-    run.head = d.head;
-    run.base = d.base ?? run.base;
-    if (unknownWait(run, d, now))
-      return false;
-    const m = mergeability(d);
-    if (m === "clean") {
-      enter(run, "running", now);
-      return true;
-    }
-    const below = env.runs().find((r) => r !== run && r.repo === run.repo && !!run.base && r.branch === run.base && isActive(r));
-    if (below) {
-      const b = below.stage === "resolving" ? undefined : await env.pr(below.pr);
-      if (!b || b.state === "OPEN" && mergeability(b) !== "clean") {
-        run.reason = `conflicts with \`${run.base}\`; waits for #${below.number} below it to be brought up to date first`;
-        return false;
-      }
-    }
-    const busy = await stillWorking(run, env);
-    if (busy.length) {
-      run.reason = `conflicts with \`${run.base}\`; waits for ${busy.join(", ")} to stop working on it`;
-      return false;
-    }
-    if (!env.canStartAgent())
-      return false;
-    run.reason = `conflicts with \`${run.base ?? "its base"}\``;
-    await start(run, env, step, resolvePrompt(run, step, f));
-    return false;
-  }
+  if (!run.agent)
+    return startResolver(run, step, f, env, now);
   const report = await reportOf(run, step, env);
   if (!report)
     return await overtaken(run, f, env) ?? false;
@@ -1446,22 +1424,49 @@ async function resolving(run, f, env) {
   enter(run, "awaiting-fix", now);
   return false;
 }
+async function startResolver(run, step, f, env, now) {
+  const d = await env.pr(run.pr);
+  if (!d)
+    return false;
+  if (d.state !== "OPEN")
+    return closed(run, d, f, env);
+  run.head = d.head;
+  run.base = d.base ?? run.base;
+  if (unknownWait(run, d, now))
+    return false;
+  if (mergeability(d) === "clean") {
+    enter(run, "running", now);
+    return true;
+  }
+  const waits = await resolverWaits(run, env);
+  if (waits) {
+    run.reason = `conflicts with \`${run.base}\`; waits for ${waits}`;
+    return false;
+  }
+  if (!env.canStartAgent())
+    return false;
+  run.reason = `conflicts with \`${run.base ?? "its base"}\``;
+  await start(run, env, step, resolvePrompt(run, step, f));
+  return false;
+}
+async function resolverWaits(run, env) {
+  const below = env.runs().find((r) => r !== run && r.repo === run.repo && !!run.base && r.branch === run.base && isActive(r));
+  if (below) {
+    const b = below.stage === "resolving" ? undefined : await env.pr(below.pr);
+    if (!b || b.state === "OPEN" && mergeability(b) !== "clean")
+      return `#${below.number} below it to be brought up to date first`;
+  }
+  const busy = await stillWorking(run, env);
+  return busy.length ? `${busy.join(", ")} to stop working on it` : undefined;
+}
 async function agentStep(run, step, f, env) {
   const now = env.now();
   if (!run.agent) {
     if (!env.canStartAgent())
       return false;
-    if (!run.mergeSha) {
-      const d = await env.pr(run.pr);
-      if (!d)
-        return false;
-      if (d.state !== "OPEN")
-        return closed(run, d, f, env);
-      run.head = d.head;
-      const c = conflicted(run, f, env, d);
-      if (c)
-        return c;
-    }
+    const stop = run.mergeSha ? undefined : await beforeAgent(run, f, env);
+    if (stop !== undefined)
+      return stop;
     await start(run, env, step, agentPrompt(run, step, f));
     enter(run, "agent", env.now());
     return false;
@@ -1502,21 +1507,8 @@ async function waitStep(run, step, f, env) {
   const now = env.now();
   const minutes = step.timeoutMinutes ?? 60;
   const late = now - run.stepSince > minutes * 60000;
-  if (step.name === "ci") {
-    const d = await env.pr(run.pr);
-    if (!d)
-      return false;
-    if (d.state === "CLOSED")
-      return closed(run, d, f, env);
-    const c = d.state === "OPEN" ? conflicted(run, f, env, d) : undefined;
-    if (c)
-      return c;
-    if (d.ci === "pass" || d.ci === "none")
-      return next(run, now);
-    if (d.ci === "fail")
-      return ciFails(run, f, env, d);
-    return late ? hold(run, now, `CI still running after ${minutes} min`) : false;
-  }
+  if (step.name === "ci")
+    return ciWait(run, f, env, late, minutes);
   if (!run.mergeSha)
     return hold(run, now, `nothing merged to wait for on ${step.env}`);
   const target = {
@@ -1536,6 +1528,22 @@ async function waitStep(run, step, f, env) {
     return late ? hold(run, now, `couldn't check the ${step.env} deploy of ${sha} after ${minutes} min${b.detail ? ` (${b.detail})` : ""}`) : false;
   }
   return late ? hold(run, now, `no ${step.env} deploy of ${sha} after ${minutes} min`) : false;
+}
+async function ciWait(run, f, env, late, minutes) {
+  const now = env.now();
+  const d = await env.pr(run.pr);
+  if (!d)
+    return false;
+  if (d.state === "CLOSED")
+    return closed(run, d, f, env);
+  const c = d.state === "OPEN" ? conflicted(run, f, env, d) : undefined;
+  if (c)
+    return c;
+  if (d.ci === "pass" || d.ci === "none")
+    return next(run, now);
+  if (d.ci === "fail")
+    return ciFails(run, f, env, d);
+  return late ? hold(run, now, `CI still running after ${minutes} min`) : false;
 }
 async function gateStep(run, step, f, env) {
   const now = env.now();
@@ -1586,6 +1594,10 @@ async function actionStep(run, step, f, env) {
     return r.ok ? next(run, now) : hold(run, now, `deploying to ${step.env} failed: ${r.out.split(`
 `)[0]}`);
   }
+  return mergeStep(run, step, f, env);
+}
+async function mergeStep(run, step, f, env) {
+  const now = env.now();
   const d = await env.pr(run.pr);
   if (!d)
     return false;

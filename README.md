@@ -482,7 +482,7 @@ The factory runs only in repos listed in `extensions.repos`, and only on PRs of 
 
 ```sh
 bun install
-bun run check   # types, lint and format, module boundaries, unused code, tests, and dist/ matching the source
+bun run check   # types, lint and format, module boundaries, unused code, copy-pasted code, tests, and dist/ matching the source
 bun run build   # bundles src/channel.ts and src/cli.ts (which runs the daemon) into dist/, which is committed
 bun src/cli.ts status   # run the CLI from source
 ```

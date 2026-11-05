@@ -14,5 +14,5 @@ jobs:
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
-      # Types, lint and format, module boundaries, unused code, tests, and dist/ matching the source.
+      # Types, lint and format, module boundaries, unused code, copy-pasted code, tests, and dist/ matching the source.
       - run: bun run check

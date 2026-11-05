@@ -131,7 +131,7 @@ export type Fixer = {
 export const FIXER = "fix";
 
 /**
- * The agent that brings a PR up to date when it conflicts with its base, before the merge (ADR-0014). The base is the
+ * The agent that brings a PR up to date when it conflicts with its base, before the merge (ADR-0015). The base is the
  * trunk, or the branch of the PR below it in a stack.
  */
 export type Conflicts = {
@@ -209,6 +209,7 @@ function helperErrors(key: string, c: Fixer | Conflicts | false | undefined, ski
 }
 
 /** What's wrong with a pipeline, so a broken factory.ts is reported instead of half run. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 40); don't add to it
 export function validate(f: Factory): string[] {
   const errors: string[] = [];
   if (!Array.isArray(f?.steps) || !f.steps.length) return ["it has no steps"];
@@ -220,6 +221,7 @@ export function validate(f: Factory): string[] {
   if (cx && typeof cx === "object" && cx.strategy !== undefined && !["merge", "rebase"].includes(cx.strategy))
     errors.push('conflicts: strategy is "merge" or "rebase"');
   const names = new Set<string>();
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 38); don't add to it
   f.steps.forEach((s, i) => {
     const at = `step ${i + 1} (${s?.kind} ${s?.name})`;
     if (!["agent", "wait", "gate", "action"].includes(s?.kind)) {

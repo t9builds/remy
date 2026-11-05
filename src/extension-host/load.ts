@@ -20,6 +20,7 @@ const USER_EXTENSIONS = join(REMY_DIR, "extensions");
 const repoExtensionDirs = (config: Config) =>
   trustedRepos(config).map((r) => ({ ...r, dir: r.root && join(r.root, ".remy", "extensions") }));
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 16); don't add to it
 export async function loadExtensions(
   host: ExtensionHost,
   config: Config,

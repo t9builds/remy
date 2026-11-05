@@ -54,14 +54,17 @@ module that owns it and keep the rule.
   them, so say so in the commit (`refactor!:` / `BREAKING CHANGE:`).
 - Files in `~/.remy` keep their names across releases (`queue.json`, `state/builtin_factory.json`): users upgrade
   with state on disk.
+- A function over Biome's cognitive-complexity limit is split, not suppressed. The `biome-ignore` comments that say
+  "debt from before the limit" are a backlog: shrink those functions when your task changes them, never grow them.
 - Find the plugin's folder with `PLUGIN_ROOT` (`shared/paths.ts`). `import.meta.dir` differs between `src/` and the
   bundle in `dist/`.
 
 ## Verify
 
-Run `bun run check` before you commit: types, Biome lint and format, module boundaries, unused code (knip), tests,
-and whether `dist/` matches the source. An installed plugin runs the committed `dist/`, so after changing `src/`
-run `bun run build` and commit `dist/` with it. `bun run format` fixes formatting and import order.
+Run `bun run check` before you commit: types, Biome lint and format, module boundaries, unused code (knip),
+copy-pasted code (jscpd), tests, and whether `dist/` matches the source. An installed plugin runs the committed
+`dist/`, so after changing `src/` run `bun run build` and commit `dist/` with it. `bun run format` fixes formatting
+and import order.
 
 Cover changed logic with a test beside it; pure functions with a fake world (see `extensions/factory/pipeline.test.ts`)
 are the cheapest. To see a change work for real, the `verify-remy` skill (`.claude/skills/verify-remy/`) runs this

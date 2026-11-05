@@ -92,6 +92,7 @@ export class SlackBridge implements Messenger {
   }
 
   /** Post to the DM, or in a channel thread when `thread` is "<channel>/<ts>". Returns the message's id. */
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 24); don't add to it
   async post(text: string, opts: PostOptions = {}) {
     const ref = opts.thread || (opts.session ? this.threadOf(opts.session) : undefined);
     const thread = ref ? parseRef(ref) : undefined;
@@ -155,6 +156,7 @@ export class SlackBridge implements Messenger {
     return open[0]?.session;
   }
 
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 19); don't add to it
   private async handleInbound(m: SlackMessage, threadRoot?: string, channel?: string) {
     if (!fromUser(m, this.settings.userId, this.settings.trustedApps)) return; // gate on sender, never on the channel
     if (m.subtype && m.subtype !== "thread_broadcast") return;
@@ -252,6 +254,7 @@ export class SlackBridge implements Messenger {
   private watcher?: ChannelWatcher;
 
   /** Every 15 s: task threads waiting for an answer. Every 45 s: all channels, reactions and every task thread. */
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 17); don't add to it
   private async startWatching() {
     let me: { userId: string; scopes: string[] };
     try {
@@ -315,6 +318,7 @@ export class SlackBridge implements Messenger {
   }
 
   /** Package the thread as a task: transcript, attachments, task.json, an :eyes: ack, then tell the coordinator. */
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 28); don't add to it
   private async startTask(t: Trigger) {
     const id = taskId(t.channel, t.root);
     const dir = PATHS.taskDir(id);

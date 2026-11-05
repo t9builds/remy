@@ -5,7 +5,7 @@
  * person (ADR-0005). What a run may do on its own is capped by its autonomy level (ADR-0006); a step above it is
  * asked for, and the user's yes is the consent. Red CI and failed steps before the merge go to a fixer, and the
  * pipeline runs again from its first step on the fix (ADR-0010). A PR that conflicts with its base goes to a resolver
- * first, lowest in a stack first, and only once no other factory agent works on it (ADR-0014).
+ * first, lowest in a stack first, and only once no other factory agent works on it (ADR-0015).
  *
  * Pure apart from `env`, so every path is tested with a fake world (pipeline.test.ts).
  */
@@ -209,7 +209,7 @@ function unknownWait(run: Run, d: PrDetail, now: number): boolean {
   return true;
 }
 
-/** What an agent does when its push is rejected because someone else moved the branch (ADR-0014). */
+/** What an agent does when its push is rejected because someone else moved the branch (ADR-0015). */
 const resync = (run: Run) =>
   `If the push is rejected because the branch moved, never force it. Right after you check out, note the head (\`git rev-parse HEAD\`). Then \`git fetch origin ${run.branch}\`, replay your own commits onto it (\`git rebase --onto origin/${run.branch} <the head you noted> HEAD\`), run the checks again on the result, and push again. After three rejected tries, stop and report \`fail\`, saying the branch keeps moving.`;
 
@@ -381,7 +381,7 @@ const ciFails = (run: Run, f: Factory, env: Env, d: PrDetail, what = "CI fails")
 const resolvable = (run: Run, f: Factory) => f.conflicts !== false && !run.mergeSha;
 
 /**
- * A PR that conflicts with its base goes to the resolver before anything else runs on it (ADR-0014): CI doesn't run on
+ * A PR that conflicts with its base goes to the resolver before anything else runs on it (ADR-0015): CI doesn't run on
  * a conflicting PR, and a review would check code about to change. Called with a fresh look at the open PR, while the
  * run has no agent at work. Undefined when the run goes on as it was: no conflict, or resolving is off (the gate holds
  * it then).
@@ -390,6 +390,18 @@ function conflicted(run: Run, f: Factory, env: Env, d: PrDetail): Promise<boolea
   run.base = d.base ?? run.base;
   if (mergeability(d) !== "conflict" || !resolvable(run, f)) return undefined;
   return resolve(run, f, env);
+}
+
+/**
+ * A fresh look at the open PR before an agent starts on it. Undefined when the agent may start; otherwise what the
+ * step returns: the PR is gone or closed, or it conflicts and goes to the resolver first.
+ */
+async function beforeAgent(run: Run, f: Factory, env: Env): Promise<boolean | undefined> {
+  const d = await env.pr(run.pr);
+  if (!d) return false;
+  if (d.state !== "OPEN") return closed(run, d, f, env);
+  run.head = d.head;
+  return conflicted(run, f, env, d);
 }
 
 /** Counts the resolution when the run enters `resolving`, as `fix` does for `fixing`: a restarted resolver is the same round. */
@@ -445,6 +457,7 @@ export async function advance(run: Run, f: Factory, autonomy: Level, env: Env): 
 }
 
 /** One move. True when the run went on to another step and may move again right away. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 37); don't add to it
 async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promise<boolean> {
   const now = env.now();
   if (run.stage === "done") return false;
@@ -493,22 +506,8 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
     return false;
   }
   if (run.stage === "awaiting-fix") {
-    const d = await env.pr(run.pr);
-    if (!d) return false;
-    if (d.state !== "OPEN") return closed(run, d, f, env);
-    const last = run.reports.at(-1)?.step;
-    const by = last === FIXER ? "the fixer" : last === RESOLVER ? "the resolver" : (last ?? "an agent");
-    if (d.head === run.head)
-      return now - run.since > PUSH_WAIT_MS
-        ? hold(run, now, `${by} said it pushed fixes, but the PR didn't change`)
-        : false;
-    // A fix to the PR below it in a stack, or to the trunk, can make the new head conflict; CI won't run until it's resolved.
-    const c = conflicted(run, f, env, d);
-    if (c) return c;
-    if (d.ci === "pending") return false;
-    run.head = d.head;
-    if (d.ci === "fail") return ciFails(run, f, env, d, `CI fails after ${by}'s fixes`);
-    enter(run, "running", now);
+    const stop = await awaitingFix(run, f, env);
+    if (stop !== undefined) return stop;
   }
   if (!atLeast(autonomy, levelOf(step)) && !run.approved.includes(approval(run))) {
     const said = run.reports.findLast((r) => r.verdict === "pass" || r.verdict === "fixed")?.summary;
@@ -523,6 +522,31 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
   if (step.kind === "wait") return waitStep(run, step, f, env);
   if (step.kind === "gate") return gateStep(run, step, f, env);
   return actionStep(run, step, f, env);
+}
+
+/**
+ * After an agent said it pushed fixes: wait for the new head and its CI. Undefined once it is green and the run is back
+ * to `running` on the step it was on; otherwise what `stepOnce` returns.
+ */
+async function awaitingFix(run: Run, f: Factory, env: Env): Promise<boolean | undefined> {
+  const now = env.now();
+  const d = await env.pr(run.pr);
+  if (!d) return false;
+  if (d.state !== "OPEN") return closed(run, d, f, env);
+  const last = run.reports.at(-1)?.step;
+  const by = last === FIXER ? "the fixer" : last === RESOLVER ? "the resolver" : (last ?? "an agent");
+  if (d.head === run.head)
+    return now - run.since > PUSH_WAIT_MS
+      ? hold(run, now, `${by} said it pushed fixes, but the PR didn't change`)
+      : false;
+  // A fix to the PR below it in a stack, or to the trunk, can make the new head conflict; CI won't run until it's resolved.
+  const c = conflicted(run, f, env, d);
+  if (c) return c;
+  if (d.ci === "pending") return false;
+  run.head = d.head;
+  if (d.ci === "fail") return ciFails(run, f, env, d, `CI fails after ${by}'s fixes`);
+  enter(run, "running", now);
+  return undefined;
 }
 
 const describe = (s: Step) =>
@@ -594,13 +618,9 @@ async function fixing(run: Run, f: Factory, env: Env): Promise<boolean> {
   const step = fixerStep(f);
   if (!run.agent) {
     if (!env.canStartAgent()) return false;
-    const d = await env.pr(run.pr);
-    if (!d) return false;
-    if (d.state !== "OPEN") return closed(run, d, f, env);
-    run.head = d.head;
     // Red CI on a PR that conflicts may only be the conflict: resolve it first, then the pipeline runs again.
-    const c = conflicted(run, f, env, d);
-    if (c) return c;
+    const stop = await beforeAgent(run, f, env);
+    if (stop !== undefined) return stop;
     await start(run, env, step, fixPrompt(run, step, f));
     return false;
   }
@@ -616,7 +636,7 @@ async function fixing(run: Run, f: Factory, env: Env): Promise<boolean> {
 }
 
 /**
- * The resolver at work (ADR-0014). It starts only when the PR still conflicts, the PR below it in a stack doesn't
+ * The resolver at work (ADR-0015). It starts only when the PR still conflicts, the PR below it in a stack doesn't
  * (lowest first: bringing that one up to date changes this one's base), and none of the run's earlier agents still
  * works on the PR, so nothing pushes to the branch while it is rewritten. A resolution sends the run back to the first
  * step, on the new head, as a fix does.
@@ -624,39 +644,7 @@ async function fixing(run: Run, f: Factory, env: Env): Promise<boolean> {
 async function resolving(run: Run, f: Factory, env: Env): Promise<boolean> {
   const step = resolverStep(f);
   const now = env.now();
-  if (!run.agent) {
-    const d = await env.pr(run.pr);
-    if (!d) return false;
-    if (d.state !== "OPEN") return closed(run, d, f, env);
-    run.head = d.head;
-    run.base = d.base ?? run.base;
-    if (unknownWait(run, d, now)) return false;
-    const m = mergeability(d);
-    // Someone brought it up to date meanwhile: carry on with the step it was on.
-    if (m === "clean") {
-      enter(run, "running", now);
-      return true;
-    }
-    const below = env
-      .runs()
-      .find((r) => r !== run && r.repo === run.repo && !!run.base && r.branch === run.base && isActive(r));
-    if (below) {
-      const b = below.stage === "resolving" ? undefined : await env.pr(below.pr);
-      if (!b || (b.state === "OPEN" && mergeability(b) !== "clean")) {
-        run.reason = `conflicts with \`${run.base}\`; waits for #${below.number} below it to be brought up to date first`;
-        return false;
-      }
-    }
-    const busy = await stillWorking(run, env);
-    if (busy.length) {
-      run.reason = `conflicts with \`${run.base}\`; waits for ${busy.join(", ")} to stop working on it`;
-      return false;
-    }
-    if (!env.canStartAgent()) return false;
-    run.reason = `conflicts with \`${run.base ?? "its base"}\``;
-    await start(run, env, step, resolvePrompt(run, step, f));
-    return false;
-  }
+  if (!run.agent) return startResolver(run, step, f, env, now);
   const report = await reportOf(run, step, env);
   if (!report) return (await overtaken(run, f, env)) ?? false;
   await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
@@ -671,18 +659,51 @@ async function resolving(run: Run, f: Factory, env: Env): Promise<boolean> {
   return false;
 }
 
+/** Starts the resolver on a PR that still conflicts, once nothing it waits for is in the way. */
+async function startResolver(run: Run, step: AgentStep, f: Factory, env: Env, now: number): Promise<boolean> {
+  const d = await env.pr(run.pr);
+  if (!d) return false;
+  if (d.state !== "OPEN") return closed(run, d, f, env);
+  run.head = d.head;
+  run.base = d.base ?? run.base;
+  if (unknownWait(run, d, now)) return false;
+  // Someone brought it up to date meanwhile: carry on with the step it was on.
+  if (mergeability(d) === "clean") {
+    enter(run, "running", now);
+    return true;
+  }
+  const waits = await resolverWaits(run, env);
+  if (waits) {
+    run.reason = `conflicts with \`${run.base}\`; waits for ${waits}`;
+    return false;
+  }
+  if (!env.canStartAgent()) return false;
+  run.reason = `conflicts with \`${run.base ?? "its base"}\``;
+  await start(run, env, step, resolvePrompt(run, step, f));
+  return false;
+}
+
+/** What the resolver waits for before it starts, if anything: the PR below it in a stack, or the run's earlier agents. */
+async function resolverWaits(run: Run, env: Env): Promise<string | undefined> {
+  const below = env
+    .runs()
+    .find((r) => r !== run && r.repo === run.repo && !!run.base && r.branch === run.base && isActive(r));
+  if (below) {
+    const b = below.stage === "resolving" ? undefined : await env.pr(below.pr);
+    if (!b || (b.state === "OPEN" && mergeability(b) !== "clean"))
+      return `#${below.number} below it to be brought up to date first`;
+  }
+  const busy = await stillWorking(run, env);
+  return busy.length ? `${busy.join(", ")} to stop working on it` : undefined;
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 29); don't add to it
 async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
   if (!run.agent) {
     if (!env.canStartAgent()) return false;
-    if (!run.mergeSha) {
-      const d = await env.pr(run.pr);
-      if (!d) return false;
-      if (d.state !== "OPEN") return closed(run, d, f, env);
-      run.head = d.head;
-      const c = conflicted(run, f, env, d);
-      if (c) return c;
-    }
+    const stop = run.mergeSha ? undefined : await beforeAgent(run, f, env);
+    if (stop !== undefined) return stop;
     await start(run, env, step, agentPrompt(run, step, f));
     enter(run, "agent", env.now());
     return false;
@@ -731,21 +752,12 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
 const LOGIN_EXPIRED =
   /reauthentication|problem refreshing your current auth tokens|do not currently have an active account|does not have any valid credentials/i;
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 20); don't add to it
 async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
   const minutes = step.timeoutMinutes ?? 60;
   const late = now - run.stepSince > minutes * 60_000;
-  if (step.name === "ci") {
-    const d = await env.pr(run.pr);
-    if (!d) return false;
-    if (d.state === "CLOSED") return closed(run, d, f, env);
-    // CI doesn't run on a PR that conflicts: waiting for it would only time out.
-    const c = d.state === "OPEN" ? conflicted(run, f, env, d) : undefined;
-    if (c) return c;
-    if (d.ci === "pass" || d.ci === "none") return next(run, now);
-    if (d.ci === "fail") return ciFails(run, f, env, d);
-    return late ? hold(run, now, `CI still running after ${minutes} min`) : false;
-  }
+  if (step.name === "ci") return ciWait(run, f, env, late, minutes);
   if (!run.mergeSha) return hold(run, now, `nothing merged to wait for on ${step.env}`);
   const target = {
     ...f.environments![step.env!]!,
@@ -780,6 +792,20 @@ async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Fact
       : false;
   }
   return late ? hold(run, now, `no ${step.env} deploy of ${sha} after ${minutes} min`) : false;
+}
+
+/** `wait("ci")`: on to the next step once CI is green; held once it is `late`, past its timeout of `minutes`. */
+async function ciWait(run: Run, f: Factory, env: Env, late: boolean, minutes: number): Promise<boolean> {
+  const now = env.now();
+  const d = await env.pr(run.pr);
+  if (!d) return false;
+  if (d.state === "CLOSED") return closed(run, d, f, env);
+  // CI doesn't run on a PR that conflicts: waiting for it would only time out.
+  const c = d.state === "OPEN" ? conflicted(run, f, env, d) : undefined;
+  if (c) return c;
+  if (d.ci === "pass" || d.ci === "none") return next(run, now);
+  if (d.ci === "fail") return ciFails(run, f, env, d);
+  return late ? hold(run, now, `CI still running after ${minutes} min`) : false;
 }
 
 async function gateStep(run: Run, step: GateStep, f: Factory, env: Env): Promise<boolean> {
@@ -829,6 +855,12 @@ async function actionStep(run: Run, step: Extract<Step, { kind: "action" }>, f: 
     const r = await env.deploy(run.mergeSha, f.environments![step.env!]!, run);
     return r.ok ? next(run, now) : hold(run, now, `deploying to ${step.env} failed: ${r.out.split("\n")[0]}`);
   }
+  return mergeStep(run, step, f, env);
+}
+
+/** `merge`: once the PR is still the head the gate let through and merges cleanly, ask GitHub to merge it. */
+async function mergeStep(run: Run, step: Extract<Step, { kind: "action" }>, f: Factory, env: Env): Promise<boolean> {
+  const now = env.now();
   const d = await env.pr(run.pr);
   if (!d) return false;
   if (d.state === "MERGED") {

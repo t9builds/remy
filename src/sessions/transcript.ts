@@ -149,6 +149,7 @@ export function summarize(main: Entry[], subagents: { name: string; entries: Ent
   const seen = new Set<string>();
   const stamps: string[] = [];
 
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 99); don't add to it
   const walk = (entries: Entry[], agent?: string) => {
     const toolOf = new Map<string, ToolCall>();
     for (const e of entries) {

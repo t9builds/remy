@@ -64,6 +64,7 @@ const supervised = process.env.REMY_DAEMON_SERVICE === "1";
 let lastActive = "";
 
 /** What a bridge hands over: the user's messages go to extensions first, then to the coordinator. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 17); don't add to it
 async function push(kind: string, content: string, meta: Record<string, string> = {}) {
   const clean = Object.fromEntries(Object.entries(meta).filter(([, v]) => v));
   if (kind === "user_message" && meta.workspace) lastActive = meta.workspace;
@@ -280,6 +281,7 @@ async function pingNeedsInput(a: {
   });
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 20); don't add to it
 async function onEvent(e: RemyEvent) {
   if (e.cwd) cwdById.set(e.session_id, e.cwd);
   // Read on every event: `remy spawn` writes this file from another process.

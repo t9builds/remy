@@ -111,6 +111,7 @@ async function daemonWithin(ms: number, ok: (s: DaemonStatus) => boolean = () =>
  * Use the running daemon, or start one in the background that outlives this terminal. A daemon of another version,
  * or one started before the config last changed, is restarted: by its service when it has one, else here.
  */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 16); don't add to it
 async function ensureDaemon(cwd: string) {
   const running = await daemonStatus();
   if (running && running.version === VERSION && running.config === configStamp()) return;

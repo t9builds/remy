@@ -813,7 +813,7 @@ describe("the fixer (ADR-0010)", () => {
   });
 });
 
-describe("conflicts with the base (ADR-0014)", () => {
+describe("conflicts with the base (ADR-0015)", () => {
   const pre = (run: Run, env: Env, f: Factory = PRE) => advance(run, f, "merge", env);
   const CONFLICT = { mergeable: "CONFLICTING", mergeState: "DIRTY", base: "main" } as const;
   const steps = (w: ReturnType<typeof world>["w"]) => w.spawned.map((s) => s.step);
