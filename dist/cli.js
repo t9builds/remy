@@ -1564,7 +1564,7 @@ var createFactory = (world = {}) => (remy) => {
   async function startRun(fields) {
     const f = await factoryAt(fields.repoDir);
     if (!f || autonomy(f) === "notify")
-      return;
+      return false;
     const now = Date.now();
     runs[fields.pr] = {
       ...fields,
@@ -1577,6 +1577,7 @@ var createFactory = (world = {}) => (remy) => {
       approved: []
     };
     remy.log("factory run started", fields.pr);
+    return true;
   }
   let ticking = false;
   remy.on("tick", async () => {
@@ -1610,12 +1611,10 @@ var createFactory = (world = {}) => (remy) => {
       for (const r of env.reports()) {
         if (r.kind !== "start" || !r.start || !r.head || now - r.at > KEEP_MS || r.at <= (starts[r.pr] ?? 0))
           continue;
-        starts[r.pr] = r.at;
         const had = runs[r.pr];
-        if (had && (isActive(had) || had.since >= r.at))
-          continue;
         const { repo, number } = r.start;
-        await startRun({ ...r.start, pr: r.pr, head: r.head, session: `${repo.split("/").pop()}#${number}` });
+        if (had && (isActive(had) || had.since >= r.at) || await startRun({ ...r.start, pr: r.pr, head: r.head, session: `${repo.split("/").pop()}#${number}` }))
+          starts[r.pr] = r.at;
       }
       for (const [url, run] of Object.entries(runs)) {
         const f = await factoryAt(run.repoDir);

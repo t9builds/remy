@@ -5,8 +5,7 @@
  * On every tick it starts a run for each ready PR of a session on this machine (each person's Remy acts on its own
  * machine's PRs) and for each PR you named with `remy factory start` (ADR-0013), moves every run on (pipeline.ts),
  * and keeps the waiting list in step: a run in progress keeps its session off the list, a held one is a judgment call
- * on it. A start report is taken once, the first time it is seen: the `starts` state remembers it after its run is
- * dropped. Autonomy is the lower of the repo's and yours (ADR-0006). Step agents count against `maxFactoryAgents`, and
+ * on it. A start report is taken once: the `starts` state remembers it after its run is dropped. Autonomy is the lower of the repo's and yours (ADR-0006). Step agents count against `maxFactoryAgents`, and
  * a usage limit pauses new ones for a while.
  */
 import { existsSync, statSync } from "node:fs";
@@ -172,10 +171,10 @@ export const createFactory =
       remy.waitingList.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
     }
 
-    /** A run from the first step, when the repo has a factory that may do more than notify. */
+    /** A run from the first step, when the repo has a factory that may do more than notify. True when it made one. */
     async function startRun(fields: Omit<Run, NewRunState>) {
       const f = await factoryAt(fields.repoDir);
-      if (!f || autonomy(f) === "notify") return;
+      if (!f || autonomy(f) === "notify") return false;
       const now = Date.now();
       runs[fields.pr] = {
         ...fields,
@@ -188,6 +187,7 @@ export const createFactory =
         approved: [],
       };
       remy.log("factory run started", fields.pr);
+      return true;
     }
 
     let ticking = false;
@@ -214,19 +214,22 @@ export const createFactory =
             head: pr.head!,
           });
         }
-        // `remy factory start`: a PR no session of yours is on. A start report is taken the first time it is seen, whether
-        // or not it makes a run, and the reports file is never pruned: so what was taken is remembered apart from the run
-        // (which is dropped after KEEP_MS), or an old report would start a dropped run over.
+        // `remy factory start`: a PR no session of yours is on. A start report is taken once: when it makes a run, or
+        // when its run is already going. The reports file is never pruned, so what was taken is remembered apart from
+        // the run (which is dropped after KEEP_MS), or an old report would start a dropped run over. One whose repo's
+        // factory can't load right now is tried again on later ticks, until it is KEEP_MS old.
         const now = Date.now();
         for (const [url, at] of Object.entries(starts)) if (now - at > KEEP_MS) delete starts[url];
         for (const r of env.reports()) {
           if (r.kind !== "start" || !r.start || !r.head || now - r.at > KEEP_MS || r.at <= (starts[r.pr] ?? 0))
             continue;
-          starts[r.pr] = r.at;
           const had = runs[r.pr];
-          if (had && (isActive(had) || had.since >= r.at)) continue;
           const { repo, number } = r.start;
-          await startRun({ ...r.start, pr: r.pr, head: r.head, session: `${repo.split("/").pop()}#${number}` });
+          if (
+            (had && (isActive(had) || had.since >= r.at)) ||
+            (await startRun({ ...r.start, pr: r.pr, head: r.head, session: `${repo.split("/").pop()}#${number}` }))
+          )
+            starts[r.pr] = r.at;
         }
         for (const [url, run] of Object.entries(runs)) {
           const f = await factoryAt(run.repoDir);

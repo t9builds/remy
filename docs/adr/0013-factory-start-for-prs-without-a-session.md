@@ -12,7 +12,7 @@ So `remy factory start <pr>` names a PR for the factory:
 2. **It writes a `start` report** to the reports file, the way `retry` does, so it works while the daemon is down.
 3. **The next tick starts the run** from the first step. Its label is `repo#N`, since there is no author session.
 
-A start is used once: a run newer than the report means it was taken. A held or finished run doesn't restart on new commits, because no session shows the new head. Start it again.
+A start report is used once. The daemon takes it when it makes a run, or when the PR's run is already going or newer than the report, and remembers that in its state apart from the run. The reports file is never pruned, so without that record an old report would start a run over once the run is dropped after 7 days, replaying a merged PR's post-merge steps. A report whose repo's factory can't load yet is tried again on later ticks, and one older than 7 days is ignored. A held or finished run doesn't restart on new commits, because no session shows the new head. Start it again.
 
 ## Considered Options
 
@@ -23,3 +23,4 @@ A start is used once: a run newer than the report means it was taken. A held or 
 
 - Naming a PR is an explicit choice, so "only your own changes" still holds.
 - A started run has no author session: posts go to its workspace, not into a session's thread.
+- A started run the factory drops because its repo's factory stopped loading, or left `extensions.repos`, doesn't come back on its own as a session's run does. Start it again.

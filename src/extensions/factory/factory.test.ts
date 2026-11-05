@@ -464,7 +464,7 @@ test("a start report outlives its run without starting it again", async () => {
   }
 });
 
-test("a start report seen while its run is active doesn't start it over when the run finishes", async () => {
+test("a start report seen while its run is active is taken, and leaves the run as it is", async () => {
   const root = repo("api-start2", GOOD);
   const url = startReport(root, 0).pr;
   const active = { ...savedRun(root, 9, "running"), since: Date.now() - 5000 };
@@ -472,12 +472,19 @@ test("a start report seen while its run is active doesn't start it over when the
   await s.h.emit("tick", { at: 1 });
   expect(s.saved().runs[url]).toMatchObject({ head: "aaa", since: active.since });
   expect(s.saved().starts[url]).toBeGreaterThan(0);
+});
 
-  // The run finishes long after; the same report is not taken again.
-  const done = { ...s.saved().runs[url], stage: "done", since: Date.now() - 500 };
-  const after = await hostWithState({ runs: { [url]: done }, starts: s.saved().starts }, () => [
-    startReport(root, 1000),
-  ]);
-  await after.h.emit("tick", { at: 1 });
-  expect(after.saved().runs[url]).toMatchObject({ stage: "done", head: "aaa" });
+test("a start report whose repo's factory can't load yet is tried again, not lost", async () => {
+  const root = repo("api-start2", GOOD);
+  rmSync(join(root, ".remy", "factory.ts"));
+  const report = startReport(root, 1000);
+  const s = await hostWithState({}, () => [report]);
+  await s.h.emit("tick", { at: 1 });
+  expect(s.saved().runs?.[report.pr]).toBeUndefined();
+  expect(s.saved().starts?.[report.pr]).toBeUndefined();
+
+  repo("api-start2", GOOD);
+  await s.h.emit("tick", { at: 2 });
+  expect(s.saved().runs[report.pr]).toMatchObject({ stage: "running", head: "bbb", session: "api#9" });
+  expect(s.saved().starts[report.pr]).toBe(report.at);
 });
