@@ -3457,8 +3457,8 @@ async function gitInfo(cwd) {
   const repo = remote?.match(GITHUB_REMOTE)?.[1] ?? top?.split("/").pop();
   return { branch: branch || undefined, repo };
 }
-async function prInfo(cwd, branch) {
-  const out = await run2([
+async function prInfo(cwd, branch, exec) {
+  const out = await exec([
     "gh",
     "pr",
     "view",
@@ -3481,19 +3481,19 @@ async function prInfo(cwd, branch) {
     branch: j.headRefName
   };
 }
-async function checkoutPrs(cwd, branch) {
+async function checkoutPrs(cwd, branch, exec = run2) {
   if (!branch || DEFAULT_BRANCHES.has(branch))
     return [];
-  const branches = branch === GITBUTLER_WORKSPACE2 ? await appliedBranches(cwd) : [branch];
-  const prs = await Promise.all(branches.map((b) => prInfo(cwd, b)));
+  const branches = branch === GITBUTLER_WORKSPACE2 ? await appliedBranches(cwd, exec) : [branch];
+  const prs = await Promise.all(branches.map((b) => prInfo(cwd, b, exec)));
   return prs.filter((p) => !!p);
 }
-async function appliedBranches(cwd) {
-  const listed = appliedOfStatus(await run2(["but", "status", "--json"], cwd));
+async function appliedBranches(cwd, exec) {
+  const listed = appliedOfStatus(await exec(["but", "status", "--json"], cwd));
   if (listed)
     return listed;
-  const parents = await run2(["git", "log", "-1", "--format=%P", GITBUTLER_WORKSPACE2], cwd);
-  const heads = await run2(["git", "for-each-ref", "--format=%(objectname) %(refname:short)", "refs/heads"], cwd);
+  const parents = await exec(["git", "log", "-1", "--format=%P", GITBUTLER_WORKSPACE2], cwd);
+  const heads = await exec(["git", "for-each-ref", "--format=%(objectname) %(refname:short)", "refs/heads"], cwd);
   return branchesAt(parents?.split(" ") ?? [], heads ?? "");
 }
 function appliedOfStatus(json) {
@@ -3636,7 +3636,7 @@ function diff(prev, next) {
     const prsBefore = prsOf(p);
     const prs = prsOf(s);
     for (const pr of prs) {
-      const was = prsBefore.length === 1 && prs.length === 1 ? prsBefore[0] : prsBefore.find((x) => x.url === pr.url);
+      const was = prsBefore.find((x) => x.url === pr.url);
       if (!was) {
         add(s, "pr_opened", prLabel(pr), pr);
         continue;

@@ -40,8 +40,8 @@ export async function gitInfo(cwd: string) {
   return { branch: branch || undefined, repo };
 }
 
-async function prInfo(cwd: string, branch: string): Promise<Pr | undefined> {
-  const out = await run(
+async function prInfo(cwd: string, branch: string, exec: Runner): Promise<Pr | undefined> {
+  const out = await exec(
     [
       "gh",
       "pr",
@@ -67,11 +67,14 @@ async function prInfo(cwd: string, branch: string): Promise<Pr | undefined> {
   };
 }
 
+/** How commands run; `checkoutPrs` takes one so a test can see which commands it asks for. */
+type Runner = (cmd: string[], cwd?: string) => Promise<string | undefined>;
+
 /** The PRs of a checkout on `branch`: that branch's, or in a GitButler workspace one per applied branch that has one. */
-export async function checkoutPrs(cwd: string, branch: string | undefined): Promise<Pr[]> {
+export async function checkoutPrs(cwd: string, branch: string | undefined, exec: Runner = run): Promise<Pr[]> {
   if (!branch || DEFAULT_BRANCHES.has(branch)) return [];
-  const branches = branch === GITBUTLER_WORKSPACE ? await appliedBranches(cwd) : [branch];
-  const prs = await Promise.all(branches.map((b) => prInfo(cwd, b)));
+  const branches = branch === GITBUTLER_WORKSPACE ? await appliedBranches(cwd, exec) : [branch];
+  const prs = await Promise.all(branches.map((b) => prInfo(cwd, b, exec)));
   return prs.filter((p): p is Pr => !!p);
 }
 
@@ -79,11 +82,11 @@ export async function checkoutPrs(cwd: string, branch: string | undefined): Prom
  * The branches a GitButler workspace applies, stacked ones included, as `but status` lists them. Without the `but`
  * CLI, the top branch of each stack: the branches at the parents of the workspace commit.
  */
-async function appliedBranches(cwd: string): Promise<string[]> {
-  const listed = appliedOfStatus(await run(["but", "status", "--json"], cwd));
+async function appliedBranches(cwd: string, exec: Runner): Promise<string[]> {
+  const listed = appliedOfStatus(await exec(["but", "status", "--json"], cwd));
   if (listed) return listed;
-  const parents = await run(["git", "log", "-1", "--format=%P", GITBUTLER_WORKSPACE], cwd);
-  const heads = await run(["git", "for-each-ref", "--format=%(objectname) %(refname:short)", "refs/heads"], cwd);
+  const parents = await exec(["git", "log", "-1", "--format=%P", GITBUTLER_WORKSPACE], cwd);
+  const heads = await exec(["git", "for-each-ref", "--format=%(objectname) %(refname:short)", "refs/heads"], cwd);
   return branchesAt(parents?.split(" ") ?? [], heads ?? "");
 }
 

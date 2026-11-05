@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { appliedOfStatus, branchesAt, githubRepoOf } from "./git";
+import { appliedOfStatus, branchesAt, checkoutPrs, githubRepoOf } from "./git";
 
 test("a session whose folder was removed has no repo, and doesn't throw", () => {
   expect(githubRepoOf("/nonexistent/removed-worktree")).toBeUndefined();
@@ -42,4 +42,83 @@ test("without `but`, the branches at the workspace commit's parents, not GitButl
     "tomas/oauth-callback-states",
   ]);
   expect(branchesAt([""], heads)).toEqual([]);
+});
+
+// A fake world for `checkoutPrs`: records each command and answers from `answers` by the start of its line.
+function fakeRun(answers: Record<string, string | undefined>) {
+  const calls: string[] = [];
+  const exec = async (cmd: string[]) => {
+    const line = cmd.join(" ");
+    calls.push(line);
+    const key = Object.keys(answers).find((k) => line.startsWith(k));
+    return key === undefined ? undefined : answers[key];
+  };
+  return { calls, exec };
+}
+const ghJson = (number: number, branch: string) =>
+  JSON.stringify({
+    number,
+    url: `https://github.com/acme/web/pull/${number}`,
+    title: "t",
+    state: "OPEN",
+    isDraft: false,
+    reviewDecision: "",
+    statusCheckRollup: [],
+    headRefOid: "abc",
+    headRefName: branch,
+  });
+const head = (calls: string[]) => calls.map((c) => c.split(" ").slice(0, 3).join(" "));
+
+test("checkoutPrs: no branch or a default branch runs no command", async () => {
+  const w = fakeRun({});
+  expect(await checkoutPrs("/r", undefined, w.exec)).toEqual([]);
+  expect(await checkoutPrs("/r", "main", w.exec)).toEqual([]);
+  expect(w.calls).toEqual([]);
+});
+
+test("checkoutPrs: a plain branch asks gh for its PR and nothing else", async () => {
+  const w = fakeRun({ "gh pr view feat": ghJson(5, "feat") });
+  const prs = await checkoutPrs("/r", "feat", w.exec);
+  expect(prs.map((p) => p.number)).toEqual([5]);
+  expect(w.calls).toHaveLength(1);
+  expect(w.calls[0]).toStartWith("gh pr view feat --json ");
+});
+
+test("checkoutPrs: a GitButler workspace asks `but` for its branches, with no fallback", async () => {
+  const status = JSON.stringify({
+    stacks: [
+      {
+        branches: [
+          { name: "a", branchStatus: "nothingToPush" },
+          { name: "b", branchStatus: "unpushedCommits" },
+          { name: "c", branchStatus: "completelyUnpushed" },
+        ],
+      },
+    ],
+  });
+  const w = fakeRun({ "but status --json": status, "gh pr view a": ghJson(1, "a"), "gh pr view b": ghJson(2, "b") });
+  const prs = await checkoutPrs("/r", "gitbutler/workspace", w.exec);
+  expect(prs.map((p) => p.number)).toEqual([1, 2]);
+  expect(head(w.calls)).toEqual(["but status --json", "gh pr view", "gh pr view"]);
+  expect(w.calls.filter((c) => c.startsWith("gh")).map((c) => c.split(" ")[3])).toEqual(["a", "b"]);
+});
+
+test("checkoutPrs: without `but`, a workspace uses the branches at its commit's parents; a failed gh is left out", async () => {
+  const w = fakeRun({
+    "but status": undefined,
+    "git log -1 --format=%P gitbutler/workspace": "p1 p2",
+    "git for-each-ref": "p1 a\np2 b\np3 other\nws gitbutler/workspace",
+    "gh pr view a": ghJson(1, "a"),
+    "gh pr view b": undefined,
+  });
+  const prs = await checkoutPrs("/r", "gitbutler/workspace", w.exec);
+  expect(prs.map((p) => p.number)).toEqual([1]);
+  expect(head(w.calls)).toEqual([
+    "but status --json",
+    "git log -1",
+    "git for-each-ref --format=%(objectname)",
+    "gh pr view",
+    "gh pr view",
+  ]);
+  expect(w.calls.filter((c) => c.startsWith("gh")).map((c) => c.split(" ")[3])).toEqual(["a", "b"]);
 });

@@ -29,12 +29,13 @@ export function diff(prev: Snapshot | undefined, next: Snapshot): Change[] {
       continue;
     }
     if (p.status !== s.status) add(s, "status", `${p.status} → ${s.status}`);
-    // Each PR on its own: a GitButler workspace has one per applied branch. A session with one PR before and after
-    // compares the two, as before there could be several.
+    // Each PR on its own, matched by url: a GitButler workspace has one per applied branch, and a PR replaced by
+    // another (a branch applied in place of one unapplied, a checkout switching branches) is opened, not changed.
+    // A snapshot stored before `prs` carries its PR's url in `pr`, which `prsOf` maps to `[pr]`.
     const prsBefore = prsOf(p);
     const prs = prsOf(s);
     for (const pr of prs) {
-      const was = prsBefore.length === 1 && prs.length === 1 ? prsBefore[0] : prsBefore.find((x) => x.url === pr.url);
+      const was = prsBefore.find((x) => x.url === pr.url);
       if (!was) {
         add(s, "pr_opened", prLabel(pr), pr);
         continue;

@@ -40,6 +40,12 @@ test("a GitButler session's PRs change each on its own", () => {
   ]);
 });
 
+test("a PR replaced by another is opened, not a change of the first", () => {
+  expect(changes(snap({ prs: [pr(822)] }), snap({ prs: [pr(823)] }))).toEqual([
+    "pr_opened #823 open, CI pending https://github.com/acme/web/pull/823",
+  ]);
+});
+
 test("a checkout's one PR compares with the one before, also from a snapshot stored before `prs`", () => {
   const before = snap({ pr: pr(7) });
   expect(changes(before, snap({ pr: pr(7, { ci: "pass" }), prs: [pr(7, { ci: "pass" })] }))).toEqual([
