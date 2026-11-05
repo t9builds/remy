@@ -245,6 +245,8 @@ async function launch(args: string[]) {
         digestMinutes: 1,
         tickSeconds: 15,
         spawnWorktree: false,
+        // The scenarios test the relay, not the implement skill: agents get their task as is.
+        spawnTemplate: "{task}",
         autonomy: "notify",
       } satisfies Partial<Config>,
       null,

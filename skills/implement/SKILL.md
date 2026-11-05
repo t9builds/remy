@@ -15,7 +15,9 @@ Decide judgment calls yourself and record them in the PR. Ask a person only when
 
 In your first message, in your own words: the goal, the problem it solves, and the smallest change you expect to meet it. Carry on without waiting for an answer. If the evidence shows the change asked for is the wrong one (the bug isn't where the task says, the feature exists), show it and stop.
 
-A task that asks a question rather than a change ends here: answer it from the code, with evidence, and open no PR.
+A task that isn't a code change (a question, an investigation) ends here: do it, answer with evidence, and open no PR.
+
+A task about an existing PR (it names one, or a branch with an open PR) works on that PR: check out its branch and work there. You push to it and open no second PR.
 
 Done when the goal, the problem and the expected change are written down.
 
@@ -51,7 +53,7 @@ Done when you'd pass the diff yourself under all three lenses.
 
 ## 5. Open the PR
 
-Commit in the order the playbook gives, each commit one step that passes its checks. Push and open a ready PR. The reviewers judge the change against its description, so write it for them:
+Commit in the order the playbook gives, each commit one step that passes its checks, except a bug fix's failing-test commit, which is red on purpose. Push, and open a ready PR unless the task is about an existing one. The reviewers judge the change against its description, so write it for them:
 
 - **Why**: the goal from step 1, first.
 - **What changes**: the behavior a user or caller sees.
@@ -60,6 +62,6 @@ Commit in the order the playbook gives, each commit one step that passes its che
 
 Your part ends at the ready PR: the factory reviews, verifies and merges it. In a repo without `.remy/factory.ts`, a person takes it from there.
 
-Done when the PR is open and ready, and its head is your last commit.
+Done when the PR (new or existing) is open and ready, and its head is your last commit.
 
 The playbooks and principles are adapted from [pstack](https://github.com/cursor/plugins/tree/main/pstack)'s `poteto-mode`, `architect`, `tdd` and principle skills by Lauren Tan (MIT).

@@ -106,7 +106,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 
 ## Tips
 
-- Every agent Remy starts builds its task with `/remy:implement` (the default `spawnTemplate`): it grounds itself in the code, picks a playbook (feature, bug fix or refactor), shapes the change before writing it, proves it on the real thing, reviews its own diff and opens a ready PR. Put your own routine there instead, e.g. `/start-feature {task}`, and agents work the way you do.
+- Every agent Remy starts builds its task with `/remy:implement` (the default `spawnTemplate`, unless your `config.json` already sets one, as `remy setup` does): it grounds itself in the code, picks a playbook (feature, bug fix or refactor), shapes the change before writing it, proves it on the real thing, reviews its own diff and opens a ready PR. Put your own routine there instead, e.g. `/start-feature {task}`, and agents work the way you do.
 - Sessions you start yourself show up too. Remy only pings you about one if it's been stuck for about a minute, so it won't bother you about a session you're watching.
 - Every session gets a short kitchen name, like `saffron` or `risotto`, that's easy to type from your phone. A session you named yourself (`claude -n`, `/rename`) keeps its name.
 - Each agent gets its own Slack thread, or reply chain in Telegram. Reply there to talk to that agent. Remy posts what the agent says at the end of each turn, and tells the agent so (in its system prompt), so the agent keeps that message short, leads with the outcome and ends on a `Next:` line, either the decision it needs from you or the step it recommends.

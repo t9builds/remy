@@ -25,5 +25,5 @@ The playbooks and principles are adapted from pstack's `poteto-mode`, `architect
 ## Consequences
 
 - An agent Remy starts spends more of its run before the first line of code: grounding, a sketch, sometimes a second sketch from a subagent.
-- Existing installs keep the `spawnTemplate` saved in their config; only new ones get the default. To switch, set it to `/remy:implement {task}`.
+- A `spawnTemplate` in `config.json` is kept, and `remy setup` writes one, so installs set up before this keep `{task}`; they switch by setting it to `/remy:implement {task}`. A config without the key gets the new default. No migration: it would override a value the user saw and accepted in setup.
 - A change to the design lens changes what writers aim at and what reviewers judge, together.
