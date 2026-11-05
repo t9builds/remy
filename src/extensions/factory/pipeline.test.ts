@@ -854,6 +854,32 @@ describe("conflicts with the base (ADR-0014)", () => {
     expect(steps(w)).toEqual(["resolve", "review"]);
   });
 
+  test("a PR merged by hand while the resolver works closes the resolver and ends the run", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    expect(w.closed).toEqual([]);
+    w.pr = { ...w.pr, state: "MERGED", mergeSha: "mmm" };
+    // The resolver is still working and never reports.
+    await pre(run, env);
+    expect(run.stage).not.toBe("resolving");
+    expect(w.closed).toEqual(["agent1"]);
+    expect(steps(w)).toEqual(["resolve"]);
+  });
+
+  test("a PR closed by hand while the resolver works closes the resolver and ends the run", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    w.pr = { ...w.pr, state: "CLOSED" };
+    await pre(run, env);
+    expect(run.stage).toBe("done");
+    expect(w.closed).toEqual(["agent1"]);
+  });
+
   test("a conflict found at the gate is resolved instead of waiting for CI that never runs", async () => {
     const { w, env } = world();
     const run = newRun();
