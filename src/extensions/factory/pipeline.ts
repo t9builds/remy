@@ -211,7 +211,7 @@ function unknownWait(run: Run, d: PrDetail, now: number): boolean {
 
 /** What an agent does when its push is rejected because someone else moved the branch (ADR-0015). */
 const resync = (run: Run) =>
-  `If the push is rejected because the branch moved, never force it. Right after you check out, note the head (\`git rev-parse HEAD\`). Then \`git fetch origin ${run.branch}\`, replay your own commits onto it (\`git rebase --onto origin/${run.branch} <the head you noted> HEAD\`), run the checks again on the result, and push again. After three rejected tries, stop and report \`fail\`, saying the branch keeps moving.`;
+  `If the push is rejected because the branch moved, never force it. Right after you check out, note the head (\`git rev-parse HEAD\`). Then \`git fetch origin ${run.branch}\`, replay your own commits onto it (\`git rebase --onto origin/${run.branch} <the head you noted> HEAD\`; if your commits include a merge commit, don't rebase, since that drops the merge: merge the moved branch in with \`git merge origin/${run.branch}\` and resolve by intent), run the checks again on the result, and push again. After three rejected tries, stop and report \`fail\`, saying the branch keeps moving.`;
 
 function agentPrompt(run: Run, step: AgentStep, f: Factory) {
   const n = run.number;

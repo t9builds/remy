@@ -988,6 +988,56 @@ describe("conflicts with the base (ADR-0015)", () => {
     expect(prompt).toContain("After three rejected tries, stop and report `fail`");
   });
 
+  test("a resolver that says it pushed, but the PR didn't change, holds the run naming the resolver", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    w.report("fixed", "merged main");
+    await pre(run, env);
+    expect(run.stage).toBe("awaiting-fix");
+    w.t += 31 * 60_000;
+    await pre(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("the resolver said it pushed fixes, but the PR didn't change");
+  });
+
+  test("no resolver starts while the limit on agents at once is reached", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    run.earlier = [{ name: "old", id: "old" }];
+    w.status.set("old", "busy");
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    w.status.delete("old");
+    w.slots = false;
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    expect(w.spawned).toEqual([]);
+    w.slots = true;
+    await pre(run, env);
+    expect(steps(w)).toEqual(["resolve"]);
+  });
+
+  test("a PR closed before the resolver would start ends the run without a resolver", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    run.earlier = [{ name: "old", id: "old" }];
+    w.status.set("old", "busy");
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    w.status.delete("old");
+    w.slots = false;
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    w.pr = { ...w.pr, state: "CLOSED" };
+    await pre(run, env);
+    expect(run.stage).toBe("done");
+    expect(w.spawned).toEqual([]);
+  });
+
   test("a resolver waits for GitHub's answer, and isn't started once the conflict is gone", async () => {
     const { w, env } = world();
     const run = newRun();
@@ -1119,6 +1169,18 @@ describe("conflicts with the base (ADR-0015)", () => {
       expect(w.spawned[0]!.prompt).toContain("Merge `origin/fix-login-base` into it");
     });
 
+    test("a resolver waits for the PR below while it is being resolved, however its detail reads", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      w.runs = [run, lowerRun("resolving")];
+      w.pr = detail(STACKED);
+      w.prs.set(LOWER, detail({ mergeable: "MERGEABLE" }));
+      await pre(run, env);
+      expect(run.stage).toBe("resolving");
+      expect(run.reason).toBe("conflicts with `fix-login-base`; waits for #8 below it to be brought up to date first");
+      expect(w.spawned).toEqual([]);
+    });
+
     test("a PR below that isn't in the factory, or is held, doesn't hold up the one above", async () => {
       for (const runs of [[], [lowerRun("held")]]) {
         const { w, env } = world();
@@ -1234,6 +1296,8 @@ describe("conflicts with the base (ADR-0015)", () => {
       expect(a.prompt).toContain("`git fetch origin fix-login`");
       expect(a.prompt).toContain("git rebase --onto origin/fix-login <the head you noted> HEAD");
       expect(a.prompt).toContain("git rev-parse HEAD");
+      expect(a.prompt).toContain("if your commits include a merge commit, don't rebase");
+      expect(a.prompt).toContain("`git merge origin/fix-login`");
       expect(a.prompt).toContain("After three rejected tries, stop and report `fail`");
     }
     // After the merge there is nothing to push.
