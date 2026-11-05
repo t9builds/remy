@@ -50,7 +50,7 @@ When it returns, check its work yourself:
 - `git diff` since the PR's head touches only what the findings need
 - the checks pass
 
-Then `git push origin HEAD:<branch>`. If the push is rejected, don't force or rebase: report `fail`, saying the PR moved during review.
+Then `git push origin HEAD:<branch>`. If the push is rejected because the branch moved during the review (its author pushed, or someone rebased it), re-sync your fixes onto the new head, check them again and push, as [references/push.md](references/push.md) says. Don't hand a patch to a person, and never force the push. The findings' threads still go on the lines of the diff you saved.
 
 ## 7. Record
 

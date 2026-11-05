@@ -249,35 +249,65 @@ test("a fixer that stops on a usage limit stays fixing, to restart later; a held
   expect(again.saved()[other.pr]!.agent).toMatchObject({ name: "fixer2" });
 });
 
-test("a fixer with its agent running counts against maxFactoryAgents", async () => {
-  const root = repo("api-count", GOOD);
-  const spawn = async (n: number) => {
-    const started: string[] = [];
-    const { h } = await hostWithRuns(
-      [savedRun(root, 7, "fixing", "fixer1"), savedRun(root, 8, "fixing")],
-      { maxFactoryAgents: n, extensions: { repos: ["api-count"] } },
-      {
-        pr: async () => ({
-          ...pr,
-          state: "OPEN",
-          ci: "fail",
-          failing: [],
-          head: "aaa",
-          lines: 1,
-          files: [],
-          allFiles: true,
-        }),
-        agentStatus: async () => "busy",
-        reports: () => [],
-        spawn: async (run) => (started.push(`#${run.number}`), { name: "fixer2" }),
-      },
-    );
-    await h.emit("tick", { at: 1 });
-    return started;
-  };
-  expect(await spawn(1)).toEqual([]);
-  expect(await spawn(2)).toEqual(["#8"]);
+test("a resolver that stops on a usage limit stays resolving with the same resolutions, to restart later", async () => {
+  const root = repo("api-limit-resolve", GOOD);
+  const resolving = { ...savedRun(root, 7, "resolving", "resolver1"), resolves: 1 };
+  const { h, saved } = await hostWithRuns([resolving]);
+  await h.emit("session.stopped", { session: ref({ name: "resolver1" }), last: LIMIT });
+  expect(saved()[resolving.pr]).toMatchObject({ stage: "resolving", resolves: 1 });
+  expect(saved()[resolving.pr]!.agent).toBeUndefined();
 });
+
+test("a held run that restarts on new commits remembers its agents as earlier, so a resolver waits for them", async () => {
+  const root = repo("api-earlier", GOOD);
+  const held = { ...savedRun(root, 7, "held", "old-agent"), earlier: [{ name: "older", id: "o1" }] };
+  const stateDir = join(dir, `state-${Math.random()}`);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "builtin_factory.json"), JSON.stringify({ runs: { [held.pr]: held } }));
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-earlier"] } };
+  const sessions = [ref({ cwd: root, pr: { ...pr, url: held.pr, head: "bbb" } })];
+  const { h } = await hostWith(config, sessions, { pr: async () => undefined }, stateDir);
+  await h.emit("tick", { at: 1 });
+  const run = JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs[held.pr] as Run;
+  expect(run.head).toBe("bbb");
+  expect(run.earlier).toEqual([
+    { name: "older", id: "o1" },
+    { name: "old-agent", id: undefined },
+  ]);
+});
+
+test.each(["fixing", "resolving"] as const)(
+  "a %s run with its agent running counts against maxFactoryAgents",
+  async (stage) => {
+    const root = repo(`api-count-${stage}`, GOOD);
+    const spawn = async (n: number) => {
+      const started: string[] = [];
+      const { h } = await hostWithRuns(
+        [savedRun(root, 7, stage, "agent1"), savedRun(root, 8, "fixing")],
+        { maxFactoryAgents: n, extensions: { repos: [`api-count-${stage}`] } },
+        {
+          pr: async () => ({
+            ...pr,
+            state: "OPEN",
+            ci: "fail",
+            failing: [],
+            head: "aaa",
+            lines: 1,
+            files: [],
+            allFiles: true,
+          }),
+          agentStatus: async () => "busy",
+          reports: () => [],
+          spawn: async (run) => (started.push(`#${run.number}`), { name: "fixer2" }),
+        },
+      );
+      await h.emit("tick", { at: 1 });
+      return started;
+    };
+    expect(await spawn(1)).toEqual([]);
+    expect(await spawn(2)).toEqual(["#8"]);
+  },
+);
 
 test("an orphaned factory agent is closed; a run's current agent and sessions without the role are left alone", async () => {
   const root = repo("api-orphans", GOOD);
@@ -487,4 +517,18 @@ test("a start report whose repo's factory can't load yet is tried again, not los
   await s.h.emit("tick", { at: 2 });
   expect(s.saved().runs[report.pr]).toMatchObject({ stage: "running", head: "bbb", session: "api#9" });
   expect(s.saved().starts[report.pr]).toBe(report.at);
+});
+
+test("a `remy factory start` that restarts a held run remembers its agents as earlier", async () => {
+  const root = repo("api-start2", GOOD);
+  const url = startReport(root, 0).pr;
+  const held = {
+    ...savedRun(root, 9, "held", "old-agent"),
+    since: Date.now() - 24 * 3_600_000,
+    earlier: [{ name: "older", id: "o1" }],
+  };
+  const s = await hostWithState({ runs: { [url]: held } }, () => [startReport(root, 1000)]);
+  await s.h.emit("tick", { at: 1 });
+  expect(s.saved().runs[url]).toMatchObject({ stage: "running", step: 0, head: "bbb" });
+  expect(s.saved().runs[url].earlier).toEqual([{ name: "older", id: "o1" }, { name: "old-agent" }]);
 });

@@ -21,7 +21,7 @@ export async function prDetail(url: string): Promise<PrDetail | undefined> {
     "view",
     url,
     "--json",
-    "state,isDraft,reviewDecision,statusCheckRollup,headRefOid,additions,deletions,files,changedFiles,mergeCommit",
+    "state,isDraft,reviewDecision,statusCheckRollup,headRefOid,additions,deletions,files,changedFiles,mergeCommit,baseRefName,mergeable,mergeStateStatus",
   ]);
   if (!r.ok) return undefined;
   const j = JSON.parse(r.out);
@@ -38,6 +38,9 @@ export async function prDetail(url: string): Promise<PrDetail | undefined> {
     files,
     allFiles: files.length >= (j.changedFiles ?? 0),
     mergeSha: j.mergeCommit?.oid,
+    base: j.baseRefName,
+    mergeable: j.mergeable,
+    mergeState: j.mergeStateStatus,
   };
 }
 

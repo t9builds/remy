@@ -3,7 +3,17 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../../sdk/config";
-import { type GhPr, repoOfUrl, startReport } from "./factory";
+import { agent } from "../../sdk/factory";
+import { conflictsLine, type GhPr, repoOfUrl, startReport } from "./factory";
+
+test("remy factory check says how a PR that conflicts with its base is handled", () => {
+  const steps = [agent("review", { skill: "/remy:review" })];
+  expect(conflictsLine({ steps })).toBe("conflicts with the base: the base merged in, by /remy:resolve");
+  expect(conflictsLine({ steps, conflicts: { strategy: "rebase", skill: "/our:resolve" } })).toBe(
+    "conflicts with the base: rebased onto the base, pushed with --force-with-lease, by /our:resolve",
+  );
+  expect(conflictsLine({ steps, conflicts: false })).toBe("conflicts with the base: held for you");
+});
 
 // `remy report` runs as its own process, as an agent runs it: its own REMY_DIR and session, and a stand-in `gh` so
 // the PR's head isn't fetched from GitHub.

@@ -10,7 +10,7 @@ import { appendReport, headOf, repoRootOf } from "../../extensions/factory/live"
 import { type Loaded, loadFactory } from "../../extensions/factory/load";
 import { isActive, type Run } from "../../extensions/factory/pipeline";
 import type { Config } from "../../sdk/config";
-import { lowerLevel } from "../../sdk/factory";
+import { type Factory, lowerLevel } from "../../sdk/factory";
 import { githubRepoOf } from "../../sessions/git";
 import { readJson } from "../../shared/json-file";
 import { PATHS } from "../../shared/paths";
@@ -23,6 +23,14 @@ const disabledNote = (what: string) =>
     : undefined;
 
 const say = (...lines: (string | undefined)[]) => console.log(lines.filter(Boolean).join("\n"));
+
+/** How a PR that conflicts with its base is handled, as `remy factory check` shows it (ADR-0015). */
+export function conflictsLine(f: Factory) {
+  const c = f.conflicts;
+  if (c === false) return "conflicts with the base: held for you";
+  const how = c?.strategy === "rebase" ? "rebased onto the base, pushed with --force-with-lease" : "the base merged in";
+  return `conflicts with the base: ${how}, by ${c?.skill ?? "/remy:resolve"}`;
+}
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 20); don't add to it
 export async function factory(args: string[]) {
@@ -39,6 +47,7 @@ export async function factory(args: string[]) {
     say(
       f.steps.map((s, i) => `${i + 1}. ${s.kind} ${s.name}${"env" in s && s.env ? ` (${s.env})` : ""}`).join("\n"),
       `\nautonomy: ${lowerLevel(f.autonomy ?? "notify", c.autonomy)} (repo ${f.autonomy ?? "notify"}, yours ${c.autonomy})`,
+      conflictsLine(f),
       trusted ? undefined : pc.yellow("! not in extensions.repos, so the factory doesn't run here"),
       disabledNote("it doesn't run anywhere"),
     );

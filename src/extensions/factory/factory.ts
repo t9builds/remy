@@ -37,7 +37,7 @@ const BACKOFF_MS = 30 * 60_000;
 /** Runs that need nothing more are dropped after this long. */
 const KEEP_MS = 7 * 24 * 3_600_000;
 /** What a run keeps about itself as it moves, rather than about its PR. */
-type NewRunState = "step" | "round" | "stage" | "since" | "stepSince" | "reports" | "approved";
+type NewRunState = "step" | "round" | "stage" | "since" | "stepSince" | "reports" | "approved" | "earlier";
 
 /** A PR the factory takes on: open, out of draft, not red, no changes requested, its author not mid-turn. */
 export const isReady = (s: SessionRef) =>
@@ -125,8 +125,9 @@ export const createFactory =
       deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
       canStartAgent: () =>
         Date.now() >= backoffUntil &&
-        Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing") && r.agent).length <
-          (remy.config.maxFactoryAgents ?? 5),
+        Object.values(runs).filter(
+          (r) => (r.stage === "agent" || r.stage === "fixing" || r.stage === "resolving") && r.agent,
+        ).length < (remy.config.maxFactoryAgents ?? 5),
       spawn: async (run, step, prompt) => {
         try {
           const r = await remy.spawn({
@@ -151,6 +152,7 @@ export const createFactory =
       reports: readReports,
       ask,
       notify: async (run, text) => void (await remy.post(text, { workspace: run.workspace, session: run.session })),
+      runs: () => Object.values(runs),
       ...world,
     };
 
@@ -178,6 +180,7 @@ export const createFactory =
       const f = await factoryAt(fields.repoDir);
       if (!f || autonomy(f) === "notify") return false;
       const now = Date.now();
+      const had = runs[fields.pr];
       runs[fields.pr] = {
         ...fields,
         step: 0,
@@ -187,6 +190,8 @@ export const createFactory =
         stepSince: now,
         reports: [],
         approved: [],
+        // Agents of the run before it may still work on the PR: a resolver waits for them.
+        earlier: had && [...(had.earlier ?? []), ...(had.agent ? [{ name: had.agent.name, id: had.agent.id }] : [])],
       };
       remy.log("factory run started", fields.pr);
       return true;

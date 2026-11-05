@@ -11,7 +11,17 @@ import {
   validate,
   wait,
 } from "../../sdk/factory";
-import { advance, type Build, type Env, gateBlockers, type PrDetail, type Report, type Run, YES } from "./pipeline";
+import {
+  advance,
+  type Build,
+  type Env,
+  gateBlockers,
+  mergeability,
+  type PrDetail,
+  type Report,
+  type Run,
+  YES,
+} from "./pipeline";
 
 const URL = "https://github.com/acme-corp/api/pull/7";
 
@@ -85,6 +95,9 @@ function world() {
     asked: [] as string[],
     notices: [] as string[],
     slots: true,
+    /** Other PRs by URL, e.g. the one below in a stack; any other URL is `pr`. */
+    prs: new Map<string, PrDetail>(),
+    runs: [] as Run[],
     /** The newest agent reports on its step, at the PR's current head. */
     report(verdict: Report["verdict"], summary = "ok") {
       const a = w.spawned.at(-1)!;
@@ -94,7 +107,7 @@ function world() {
   };
   const env: Env = {
     now: () => w.t,
-    pr: async () => ({ ...w.pr }),
+    pr: async (url) => ({ ...(w.prs.get(url) ?? w.pr) }),
     merge: async (_url, head, method) => {
       w.merges.push(`${head} ${method}`);
       w.pr = { ...w.pr, state: "MERGED", mergeSha: "mmm" };
@@ -114,6 +127,7 @@ function world() {
     reports: () => w.reports,
     ask: (_run, q) => void w.asked.push(q),
     notify: async (_run, text) => void w.notices.push(text),
+    runs: () => w.runs,
   };
   return { w, env };
 }
@@ -796,6 +810,520 @@ describe("the fixer (ADR-0010)", () => {
     expect(held.stage).toBe("held");
     expect(held.reason).toBe("gate merge: it's a draft; CI fails");
     expect(other.w.spawned.map((s) => s.step)).toEqual(["review", "verify"]);
+  });
+});
+
+describe("conflicts with the base (ADR-0015)", () => {
+  const pre = (run: Run, env: Env, f: Factory = PRE) => advance(run, f, "merge", env);
+  const CONFLICT = { mergeable: "CONFLICTING", mergeState: "DIRTY", base: "main" } as const;
+  const steps = (w: ReturnType<typeof world>["w"]) => w.spawned.map((s) => s.step);
+
+  test("GitHub's mergeable and mergeStateStatus say whether a PR conflicts; UNKNOWN until GitHub works it out", () => {
+    expect(mergeability(detail({ mergeable: "CONFLICTING" }))).toBe("conflict");
+    expect(mergeability(detail({ mergeable: "MERGEABLE", mergeState: "DIRTY" }))).toBe("conflict");
+    expect(mergeability(detail({ mergeable: "UNKNOWN" }))).toBe("unknown");
+    expect(mergeability(detail({ mergeable: "MERGEABLE", mergeState: "UNKNOWN" }))).toBe("unknown");
+    expect(mergeability(detail({ mergeable: "MERGEABLE", mergeState: "BEHIND" }))).toBe("clean");
+    expect(mergeability(detail({ mergeable: "MERGEABLE", mergeState: "CLEAN" }))).toBe("clean");
+    expect(mergeability(detail())).toBe("clean");
+  });
+
+  test("a PR that conflicts goes to the resolver before its review, and the resolution runs the pipeline again", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("resolving:agent review");
+    expect(steps(w)).toEqual(["resolve"]);
+    const prompt = w.spawned[0]!.prompt;
+    expect(prompt).toStartWith("/remy:resolve");
+    expect(prompt).toContain("It conflicts with its base `main`");
+    expect(prompt).toContain("Merge `origin/main` into it");
+    expect(prompt).toContain("Don't rebase or force-push.");
+    expect(prompt).toContain(`remy report resolve fixed --pr ${URL}`);
+    expect(w.notices).toEqual([
+      `🔀 *#7 Fix login* conflicts with \`main\`; a resolver brings it up to date (1 of 3)\n${URL}`,
+    ]);
+
+    w.report("fixed", "merged main; kept both validations");
+    await pre(run, env);
+    expect(run.stage).toBe("awaiting-fix");
+    w.pr = detail({ head: "bbb", base: "main", mergeable: "MERGEABLE", mergeState: "CLEAN" });
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("agent:agent review");
+    expect(steps(w)).toEqual(["resolve", "review"]);
+  });
+
+  test("a PR merged by hand while the resolver works closes the resolver and ends the run", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    expect(w.closed).toEqual([]);
+    w.pr = { ...w.pr, state: "MERGED", mergeSha: "mmm" };
+    // The resolver is still working and never reports.
+    await pre(run, env);
+    expect(run.stage).not.toBe("resolving");
+    expect(w.closed).toEqual(["agent1"]);
+    expect(steps(w)).toEqual(["resolve"]);
+  });
+
+  test("a PR closed by hand while the resolver works closes the resolver and ends the run", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    w.pr = { ...w.pr, state: "CLOSED" };
+    await pre(run, env);
+    expect(run.stage).toBe("done");
+    expect(w.closed).toEqual(["agent1"]);
+  });
+
+  test("a conflict found at the gate is resolved instead of waiting for CI that never runs", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("pass");
+    await pre(run, env);
+    w.pr = detail({ ...CONFLICT, ci: "pending" });
+    w.report("pass");
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("resolving:gate merge");
+    expect(steps(w)).toEqual(["review", "verify", "resolve"]);
+    expect(w.merges).toEqual([]);
+  });
+
+  test("new commits that conflict after an agent's fixes go to the resolver, not a wait for CI", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("fixed", "null check");
+    await pre(run, env);
+    w.pr = detail({ ...CONFLICT, head: "bbb", ci: "pending" });
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    expect(steps(w)).toEqual(["review", "resolve"]);
+  });
+
+  test("the gate and the merge wait while GitHub's answer is UNKNOWN", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("pass");
+    await pre(run, env);
+    w.pr = detail({ mergeable: "UNKNOWN", mergeState: "UNKNOWN" });
+    w.report("pass");
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("running:gate merge");
+    expect(run.reason).toBe("waits for GitHub to work out whether it merges cleanly");
+    expect(w.merges).toEqual([]);
+    w.pr = detail({ mergeable: "MERGEABLE", mergeState: "CLEAN" });
+    await pre(run, env);
+    expect(w.merges).toEqual(["aaa squash"]);
+  });
+
+  test("an UNKNOWN that lasts past 15 minutes holds the gate; a brief one after a long CI wait doesn't", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("pass");
+    await pre(run, env);
+    w.pr = detail({ ci: "pending" });
+    w.report("pass");
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("running:gate merge");
+    // CI took two hours: the wait on GitHub starts only with its own UNKNOWN.
+    w.t += 2 * 60 * 60_000;
+    w.pr = detail({ mergeable: "UNKNOWN" });
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("running:gate merge");
+    w.t += 60_000;
+    w.pr = detail({ mergeable: "MERGEABLE", mergeState: "CLEAN" });
+    await pre(run, env);
+    expect(w.merges).toEqual(["aaa squash"]);
+
+    const stuck = world();
+    const run2 = newRun();
+    await pre(run2, stuck.env);
+    stuck.w.report("pass");
+    await pre(run2, stuck.env);
+    stuck.w.pr = detail({ mergeable: "UNKNOWN" });
+    stuck.w.report("pass");
+    await pre(run2, stuck.env);
+    stuck.w.t += 16 * 60_000;
+    await pre(run2, stuck.env);
+    expect(run2.stage).toBe("held");
+    expect(run2.reason).toBe("GitHub hasn't worked out whether it merges cleanly after 15 min");
+    expect(stuck.w.merges).toEqual([]);
+  });
+
+  test("a resolver that waits on GitHub's UNKNOWN past 15 minutes holds the run", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    run.earlier = [{ name: "old", id: "old" }];
+    w.status.set("old", "busy");
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    w.status.delete("old");
+    w.pr = detail({ mergeable: "UNKNOWN" });
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    expect(run.reason).toBe("waits for GitHub to work out whether it merges cleanly");
+    w.t += 16 * 60_000;
+    await pre(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toContain("hasn't worked out whether it merges cleanly");
+    expect(w.spawned).toEqual([]);
+  });
+
+  test("the merge-strategy resolver re-syncs by merging the moved branch in, never by rebasing", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    const prompt = w.spawned[0]!.prompt;
+    expect(prompt).toContain("`git merge origin/fix-login`");
+    expect(prompt).not.toContain("rebase --onto");
+    expect(prompt).toContain("After three rejected tries, stop and report `fail`");
+  });
+
+  test("a resolver that says it pushed, but the PR didn't change, holds the run naming the resolver", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    w.report("fixed", "merged main");
+    await pre(run, env);
+    expect(run.stage).toBe("awaiting-fix");
+    w.t += 31 * 60_000;
+    await pre(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("the resolver said it pushed fixes, but the PR didn't change");
+  });
+
+  test("no resolver starts while the limit on agents at once is reached", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    run.earlier = [{ name: "old", id: "old" }];
+    w.status.set("old", "busy");
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    w.status.delete("old");
+    w.slots = false;
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    expect(w.spawned).toEqual([]);
+    w.slots = true;
+    await pre(run, env);
+    expect(steps(w)).toEqual(["resolve"]);
+  });
+
+  test("a PR closed before the resolver would start ends the run without a resolver", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    run.earlier = [{ name: "old", id: "old" }];
+    w.status.set("old", "busy");
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    w.status.delete("old");
+    w.slots = false;
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    w.pr = { ...w.pr, state: "CLOSED" };
+    await pre(run, env);
+    expect(run.stage).toBe("done");
+    expect(w.spawned).toEqual([]);
+  });
+
+  test("a resolver waits for GitHub's answer, and isn't started once the conflict is gone", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    run.earlier = [{ name: "old", id: "old" }];
+    w.status.set("old", "busy");
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    w.status.delete("old");
+    w.pr = detail({ mergeable: "UNKNOWN" });
+    await pre(run, env);
+    expect(w.spawned).toEqual([]);
+    // Someone merged the base in meanwhile: the run carries on with the step it was on.
+    w.pr = detail({ head: "bbb", mergeable: "MERGEABLE" });
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("agent:agent review");
+    expect(steps(w)).toEqual(["review"]);
+  });
+
+  test("a conflict found at wait(ci) goes to the resolver while CI is pending", async () => {
+    const waiting = world();
+    const f = defineFactory({ steps: [wait("ci"), agent("review", { skill: "/review" }), action("merge")] });
+    const run = newRun();
+    waiting.w.pr = detail({ ...CONFLICT, ci: "pending" });
+    await pre(run, waiting.env, f);
+    expect(run.stage).toBe("resolving");
+    expect(steps(waiting.w)).toEqual(["resolve"]);
+  });
+
+  test("red CI on a conflicting PR goes to the resolver, not the fixer", async () => {
+    const fixer = world();
+    const fixing: Run = { ...newRun(), stage: "fixing" };
+    fixer.w.pr = detail({ ...CONFLICT, ci: "fail", failing: ["e2e"] });
+    await pre(fixing, fixer.env);
+    expect(fixing.stage).toBe("resolving");
+    expect(steps(fixer.w)).toEqual(["resolve"]);
+  });
+
+  test("a conflict found at the merge action goes to the resolver, and no merge is attempted", async () => {
+    const merging = world();
+    const merge = newRun();
+    merge.step = 3;
+    merging.w.pr = detail(CONFLICT);
+    await pre(merge, merging.env);
+    expect(merge.stage).toBe("resolving");
+    expect(merging.w.merges).toEqual([]);
+  });
+
+  test("a resolver that is started again after a usage limit is the same resolution: no new round, no new notice", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(run.resolves).toBe(1);
+    expect(w.notices).toHaveLength(1);
+    // The usage-limit handler drops the agent and leaves the stage as it was.
+    run.agent = undefined;
+    await pre(run, env);
+    expect(steps(w)).toEqual(["resolve", "resolve"]);
+    expect(run.resolves).toBe(1);
+    expect(w.notices).toHaveLength(1);
+  });
+
+  test("no resolver starts while an earlier agent of the run still works on the PR", async () => {
+    const { w, env } = world();
+    // The retry lets the stuck agent go and the run closes it; here the close does not take, so it still works.
+    env.close = async () => {};
+    const run = newRun();
+    await pre(run, env);
+    // The review works past its timeout: the run holds, but its agent is still busy and may still push.
+    w.t += 61 * 60_000;
+    await pre(run, env);
+    expect(run.stage).toBe("held");
+    w.t += 1000;
+    w.reports.push({ pr: URL, at: w.t, step: "", kind: "retry" });
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(run.stage).toBe("resolving");
+    expect(run.reason).toBe("conflicts with `main`; waits for agent1 to stop working on it");
+    expect(steps(w)).toEqual(["review"]);
+    w.status.set("agent1", "waiting");
+    await pre(run, env);
+    expect(steps(w)).toEqual(["review"]);
+    w.status.set("agent1", "idle");
+    await pre(run, env);
+    expect(steps(w)).toEqual(["review", "resolve"]);
+  });
+
+  test("an agent that is gone is forgotten", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    run.earlier = [{ name: "old", id: "old" }];
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    expect(steps(w)).toEqual(["resolve"]);
+    expect(run.earlier).toEqual([]);
+  });
+
+  describe("a stack: #8 on fix-login-base, #7 on top of it", () => {
+    const LOWER = "https://github.com/acme-corp/api/pull/8";
+    const lowerRun = (stage: Run["stage"] = "agent"): Run => ({
+      ...newRun(),
+      pr: LOWER,
+      number: 8,
+      branch: "fix-login-base",
+      stage,
+    });
+    const STACKED = { ...CONFLICT, base: "fix-login-base" } as const;
+
+    test("the lowest PR that conflicts is resolved first", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      w.runs = [run, lowerRun()];
+      w.pr = detail(STACKED);
+      w.prs.set(LOWER, detail({ ...CONFLICT, head: "lll" }));
+      await pre(run, env);
+      expect(run.stage).toBe("resolving");
+      expect(run.reason).toBe("conflicts with `fix-login-base`; waits for #8 below it to be brought up to date first");
+      expect(w.spawned).toEqual([]);
+      // #8 is being resolved: #7 still waits.
+      w.runs = [run, lowerRun("resolving")];
+      await pre(run, env);
+      expect(w.spawned).toEqual([]);
+      // #8 merges cleanly again; #7 is checked again and brought up to date on #8's new head.
+      w.runs = [run, lowerRun("awaiting-fix")];
+      w.prs.set(LOWER, detail({ head: "lll2", mergeable: "MERGEABLE" }));
+      await pre(run, env);
+      expect(steps(w)).toEqual(["resolve"]);
+      expect(w.spawned[0]!.prompt).toContain("Merge `origin/fix-login-base` into it");
+    });
+
+    test("a resolver waits for the PR below while it is being resolved, however its detail reads", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      w.runs = [run, lowerRun("resolving")];
+      w.pr = detail(STACKED);
+      w.prs.set(LOWER, detail({ mergeable: "MERGEABLE" }));
+      await pre(run, env);
+      expect(run.stage).toBe("resolving");
+      expect(run.reason).toBe("conflicts with `fix-login-base`; waits for #8 below it to be brought up to date first");
+      expect(w.spawned).toEqual([]);
+    });
+
+    test("a PR below that isn't in the factory, or is held, doesn't hold up the one above", async () => {
+      for (const runs of [[], [lowerRun("held")]]) {
+        const { w, env } = world();
+        const run = newRun();
+        w.runs = [run, ...runs];
+        w.pr = detail(STACKED);
+        w.prs.set(LOWER, detail(CONFLICT));
+        await pre(run, env);
+        expect(steps(w)).toEqual(["resolve"]);
+      }
+    });
+
+    test("after the PR below changes, the one above is checked again before it merges", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      w.runs = [run, lowerRun()];
+      w.pr = detail({ base: "fix-login-base", mergeable: "MERGEABLE" });
+      await pre(run, env);
+      w.report("pass");
+      await pre(run, env);
+      // A fix pushed to #8 leaves GitHub working out #7 again: no merge on the old answer.
+      w.pr = detail({ base: "fix-login-base", mergeable: "UNKNOWN" });
+      w.report("pass");
+      await pre(run, env);
+      expect(w.merges).toEqual([]);
+      w.pr = detail(STACKED);
+      w.prs.set(LOWER, detail({ head: "lll2", mergeable: "MERGEABLE" }));
+      await pre(run, env);
+      expect(at(run, PRE)).toBe("resolving:gate merge");
+      expect(steps(w)).toEqual(["review", "verify", "resolve"]);
+    });
+  });
+
+  test("with strategy rebase, the resolver rebases and pushes with a lease on the head it saw", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env, { ...PRE, conflicts: { strategy: "rebase", instructions: "Run make check." } });
+    const prompt = w.spawned[0]!.prompt;
+    expect(prompt).toStartWith("/remy:resolve Run make check.");
+    expect(prompt).toContain("Rebase it onto `origin/main`");
+    expect(prompt).toContain("git push --force-with-lease=fix-login:aaa origin HEAD:fix-login");
+    expect(prompt).not.toContain("Merge `origin/main`");
+  });
+
+  test("a conflict that needs a product decision holds the run with the resolver's question", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    w.report("fail", "main caps discounts at 50% and this PR allows 100%: which applies?");
+    await pre(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe(
+      "conflicts with `main` need your call: main caps discounts at 50% and this PR allows 100%: which applies?",
+    );
+  });
+
+  test("resolutions are bounded by maxRounds, and a retry gives them back", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    const f = { ...PRE, conflicts: { maxRounds: 1 } };
+    w.pr = detail(CONFLICT);
+    await pre(run, env, f);
+    w.report("fixed", "merged main");
+    await pre(run, env, f);
+    w.pr = detail({ ...CONFLICT, head: "bbb" });
+    await pre(run, env, f);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("conflicts with `main` (after 1 resolutions)");
+    w.t += 1000;
+    w.reports.push({ pr: URL, at: w.t, step: "", kind: "retry" });
+    await pre(run, env, f);
+    expect(steps(w)).toEqual(["resolve", "resolve"]);
+  });
+
+  test("a resolver that finds nothing to resolve sends the run back to its step", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    w.pr = detail(CONFLICT);
+    await pre(run, env);
+    w.pr = detail();
+    w.report("pass", "main was reverted; no conflict left");
+    await pre(run, env);
+    expect(at(run, PRE)).toBe("agent:agent review");
+  });
+
+  test("with conflicts: false, nothing resolves and the gate holds the PR", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    const f = { ...PRE, conflicts: false as const };
+    w.pr = detail(CONFLICT);
+    await pre(run, env, f);
+    w.report("pass");
+    await pre(run, env, f);
+    w.report("pass");
+    await pre(run, env, f);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("gate merge: it conflicts with `main`");
+    expect(steps(w)).toEqual(["review", "verify"]);
+  });
+
+  test("an agent whose push is rejected because the branch moved re-syncs and pushes again, never forcing", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await pre(run, env);
+    w.report("fail", "a bug");
+    await pre(run, env);
+    const [review, fixer] = w.spawned;
+    expect(fixer!.step).toBe("fix");
+    for (const a of [review!, fixer!]) {
+      expect(a.prompt).toContain("If the push is rejected because the branch moved, never force it");
+      expect(a.prompt).toContain("`git fetch origin fix-login`");
+      expect(a.prompt).toContain("git rebase --onto origin/fix-login <the head you noted> HEAD");
+      expect(a.prompt).toContain("git rev-parse HEAD");
+      expect(a.prompt).toContain("if your commits include a merge commit, don't rebase");
+      expect(a.prompt).toContain("`git merge origin/fix-login`");
+      expect(a.prompt).toContain("After three rejected tries, stop and report `fail`");
+    }
+    // After the merge there is nothing to push.
+    const after = world();
+    const merged = newRun();
+    Object.assign(merged, { step: 4, mergeSha: "mmm" });
+    await go(merged, after.env);
+    expect(after.w.spawned[0]!.prompt).not.toContain("push is rejected");
+  });
+
+  test("the resolver's config is checked, and no step may take its name", () => {
+    const steps = [agent("review", { skill: "/x" })];
+    const errors = (conflicts: unknown) => validate({ conflicts, steps } as Factory);
+    expect(errors(undefined)).toEqual([]);
+    expect(errors(false)).toEqual([]);
+    expect(errors({ strategy: "rebase", skill: "/our:resolve", maxRounds: 2, timeoutMinutes: 30 })).toEqual([]);
+    expect(errors(true)).toEqual(["conflicts: an object, or false to turn it off"]);
+    expect(errors({ strategy: "squash" })).toEqual(['conflicts: strategy is "merge" or "rebase"']);
+    expect(errors({ maxRounds: 0 })).toEqual([
+      "conflicts: maxRounds is a whole number of at least 1 (false turns resolving off)",
+    ]);
+    expect(errors({ skill: " " })).toEqual(["conflicts: skill is a skill name, like /remy:resolve"]);
+    expect(validate({ steps: [agent("resolve", { skill: "/x" })] })).toEqual([
+      'step 1 (agent resolve): "resolve" is the conflict resolver\'s name',
+    ]);
+    expect(validate({ conflicts: false, steps: [agent("resolve", { skill: "/x" })] })).toEqual([]);
   });
 });
 
