@@ -414,3 +414,70 @@ test("`remy factory start` runs a PR no session is on, once per start", async ()
   await off.h.emit("tick", { at: 1 });
   expect(off.h.waitingEntries()).toEqual([]);
 });
+
+/** A start report for PR 9 of `acme-corp/api`, `ago` ms old. */
+const startReport = (root: string, ago: number): Report => ({
+  pr: "https://github.com/acme-corp/api/pull/9",
+  at: Date.now() - ago,
+  step: "",
+  kind: "start",
+  head: "bbb",
+  start: { number: 9, title: "Hand-pushed", repo: "acme-corp/api", repoDir: root, branch: "b", workspace: "work" },
+});
+
+/** A factory whose saved state is `state`, given `reports`. */
+async function hostWithState(state: object, reports: () => Report[]) {
+  const stateDir = join(dir, `state-${Math.random()}`);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "builtin_factory.json"), JSON.stringify(state));
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-start2"] } };
+  const { h } = await hostWith(config, [], { pr: async () => undefined, reports }, stateDir);
+  const saved = () => JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8"));
+  return { h, saved };
+}
+
+test("a start report outlives its run without starting it again", async () => {
+  const root = repo("api-start2", GOOD);
+  const url = startReport(root, 0).pr;
+  const day = 24 * 3_600_000;
+
+  // The run it made was dropped (or never saved) and the report remains: the report was taken already.
+  const report = startReport(root, 3 * day);
+  const taken = await hostWithState({ runs: {}, starts: { [url]: report.at } }, () => [report]);
+  await taken.h.emit("tick", { at: 1 });
+  expect(taken.saved().runs).toEqual({});
+
+  // A report older than a week is never taken, and a record that old is pruned.
+  const old = await hostWithState({ starts: { [url]: Date.now() - 8 * day } }, () => [startReport(root, 8 * day)]);
+  await old.h.emit("tick", { at: 1 });
+  expect(old.saved().runs).toEqual({});
+  expect(old.saved().starts).toEqual({});
+
+  // A newer report restarts a held run, and a done one.
+  for (const stage of ["held", "done"] as const) {
+    const run = { ...savedRun(root, 9, stage), since: Date.now() - day };
+    const s = await hostWithState({ runs: { [url]: run }, starts: { [url]: Date.now() - 2 * day } }, () => [
+      startReport(root, 1000),
+    ]);
+    await s.h.emit("tick", { at: 1 });
+    expect(s.saved().runs[url]).toMatchObject({ stage: "running", step: 0, head: "bbb" });
+  }
+});
+
+test("a start report seen while its run is active doesn't start it over when the run finishes", async () => {
+  const root = repo("api-start2", GOOD);
+  const url = startReport(root, 0).pr;
+  const active = { ...savedRun(root, 9, "running"), since: Date.now() - 5000 };
+  const s = await hostWithState({ runs: { [url]: active } }, () => [startReport(root, 1000)]);
+  await s.h.emit("tick", { at: 1 });
+  expect(s.saved().runs[url]).toMatchObject({ head: "aaa", since: active.since });
+  expect(s.saved().starts[url]).toBeGreaterThan(0);
+
+  // The run finishes long after; the same report is not taken again.
+  const done = { ...s.saved().runs[url], stage: "done", since: Date.now() - 500 };
+  const after = await hostWithState({ runs: { [url]: done }, starts: s.saved().starts }, () => [
+    startReport(root, 1000),
+  ]);
+  await after.h.emit("tick", { at: 1 });
+  expect(after.saved().runs[url]).toMatchObject({ stage: "done", head: "aaa" });
+});

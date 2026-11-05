@@ -5,7 +5,9 @@
  * On every tick it starts a run for each ready PR of a session on this machine (each person's Remy acts on its own
  * machine's PRs) and for each PR you named with `remy factory start` (ADR-0013), moves every run on (pipeline.ts),
  * and keeps the waiting list in step: a run in progress keeps its session off the list, a held one is a judgment call
- * on it. Autonomy is the lower of the repo's and yours (ADR-0006). Step agents count against `maxFactoryAgents`, and a usage limit pauses new ones for a while.
+ * on it. A start report is taken once, the first time it is seen: the `starts` state remembers it after its run is
+ * dropped. Autonomy is the lower of the repo's and yours (ADR-0006). Step agents count against `maxFactoryAgents`, and
+ * a usage limit pauses new ones for a while.
  */
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -60,10 +62,13 @@ export const createFactory =
     const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo] as const));
     const loaded = new Map<string, Loaded>();
     const runs = remy.state.get<Record<string, Run>>("runs", {});
+    // The `at` of the last start report taken for each PR: a report is used once, however long its run lives.
+    const starts = remy.state.get<Record<string, number>>("starts", {});
     let backoffUntil = remy.state.get("backoffUntil", 0);
     const tried = new Set<string>();
     const save = () => {
       remy.state.set("runs", runs);
+      remy.state.set("starts", starts);
       remy.state.set("backoffUntil", backoffUntil);
     };
 
@@ -209,9 +214,15 @@ export const createFactory =
             head: pr.head!,
           });
         }
-        // `remy factory start`: a PR no session of yours is on. A start is used once: the run it made is newer.
+        // `remy factory start`: a PR no session of yours is on. A start report is taken the first time it is seen, whether
+        // or not it makes a run, and the reports file is never pruned: so what was taken is remembered apart from the run
+        // (which is dropped after KEEP_MS), or an old report would start a dropped run over.
+        const now = Date.now();
+        for (const [url, at] of Object.entries(starts)) if (now - at > KEEP_MS) delete starts[url];
         for (const r of env.reports()) {
-          if (r.kind !== "start" || !r.start || !r.head) continue;
+          if (r.kind !== "start" || !r.start || !r.head || now - r.at > KEEP_MS || r.at <= (starts[r.pr] ?? 0))
+            continue;
+          starts[r.pr] = r.at;
           const had = runs[r.pr];
           if (had && (isActive(had) || had.since >= r.at)) continue;
           const { repo, number } = r.start;

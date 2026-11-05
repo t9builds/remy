@@ -1463,10 +1463,12 @@ var createFactory = (world = {}) => (remy) => {
   const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo]));
   const loaded = new Map;
   const runs = remy.state.get("runs", {});
+  const starts = remy.state.get("starts", {});
   let backoffUntil = remy.state.get("backoffUntil", 0);
   const tried = new Set;
   const save = () => {
     remy.state.set("runs", runs);
+    remy.state.set("starts", starts);
     remy.state.set("backoffUntil", backoffUntil);
   };
   async function factoryAt(root) {
@@ -1601,9 +1603,14 @@ var createFactory = (world = {}) => (remy) => {
           head: pr.head
         });
       }
+      const now = Date.now();
+      for (const [url, at] of Object.entries(starts))
+        if (now - at > KEEP_MS)
+          delete starts[url];
       for (const r of env.reports()) {
-        if (r.kind !== "start" || !r.start || !r.head)
+        if (r.kind !== "start" || !r.start || !r.head || now - r.at > KEEP_MS || r.at <= (starts[r.pr] ?? 0))
           continue;
+        starts[r.pr] = r.at;
         const had = runs[r.pr];
         if (had && (isActive(had) || had.since >= r.at))
           continue;
@@ -5084,32 +5091,42 @@ async function start(want, runs) {
   if (p.exitCode !== 0)
     throw new Error(`gh pr view ${want}: ${p.stderr.toString().trim()}`);
   const pr = JSON.parse(p.stdout.toString());
-  if (pr.state !== "OPEN" || pr.isDraft)
-    throw new Error(`#${pr.number} is ${pr.isDraft ? "a draft" : pr.state.toLowerCase()}; the factory takes open PRs`);
-  const had = runs[pr.url];
-  if (had && isActive(had))
-    return say(`#${pr.number} is already in the factory; \`remy factory\` shows where.`);
   const c = loadConfig();
-  const repo = pr.url.match(/github\.com\/([^/]+\/[^/]+)\/pull\//)[1];
-  const root = trustedRepos(c).find((r) => r.root && githubRepoOf(r.root) === repo)?.root;
+  const had = runs[pr.url];
+  const repo = repoOfUrl(pr.url);
+  if (had && isActive(had) && pr.state === "OPEN")
+    return say(`${repo}#${pr.number} is already in the factory; \`remy factory\` shows where.`);
+  const root = trustedRepos(c).find((r) => r.root && githubRepoOf(r.root)?.toLowerCase() === repo.toLowerCase())?.root;
+  const l = root ? await loadFactory(root) : undefined;
+  appendReport(startReport(pr, c, root, l));
+  say(disabledNote("nothing starts it until you turn it back on") ?? `${repo}#${pr.number} starts its pipeline within a minute or so. A held run doesn't restart on new commits: start it again.`);
+}
+var repoOfUrl = (url) => {
+  const m = url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+  if (!m)
+    throw new Error(`${url} isn't a github.com/<owner>/<repo>/pull/<number> URL`);
+  return m[1];
+};
+function startReport(pr, c, root, l) {
+  const repo = repoOfUrl(pr.url);
+  if (pr.state !== "OPEN" || pr.isDraft)
+    throw new Error(`${repo}#${pr.number} is ${pr.isDraft ? "a draft" : pr.state.toLowerCase()}; the factory takes open PRs`);
   if (!root)
     throw new Error(`${repo} isn't in extensions.repos in ${PATHS.config}, so the factory doesn't run there`);
-  const l = await loadFactory(root);
-  if (!l.factory)
-    throw new Error(`${join11(root, ".remy", "factory.ts")}: ${l.error ?? "not found"}`);
+  if (!l?.factory)
+    throw new Error(`${join11(root, ".remy", "factory.ts")}: ${l?.error ?? "not found"}`);
   if (lowerLevel(l.factory.autonomy ?? "notify", c.autonomy) === "notify")
     throw new Error(`autonomy is notify for ${repo}, so the factory only reports; \`remy factory check\` says why`);
   const workspace = workspaceFor({ cwd: root, repo }, c)?.name;
   if (!workspace)
     throw new Error(`no workspace in ${PATHS.config} to report to`);
-  appendReport({
+  return {
     pr: pr.url,
     step: "",
     kind: "start",
     head: pr.headRefOid,
     start: { number: pr.number, title: pr.title, repo, repoDir: root, branch: pr.headRefName, workspace }
-  });
-  say(disabledNote("nothing starts it until you turn it back on") ?? `#${pr.number} starts its pipeline within a minute or so. A held run doesn't restart on new commits: start it again.`);
+  };
 }
 async function report(args) {
   const { values, positionals } = parse(args, { pr: { type: "string" }, summary: { type: "string" } });
