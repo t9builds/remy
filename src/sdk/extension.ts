@@ -100,6 +100,8 @@ export type PostOptions = {
   thread?: string;
   /** The message asks the user something: Remy watches its thread closely, and the reply reaches the coordinator as the answer. */
   expectReply?: boolean;
+  /** `text` is standard Markdown, such as an agent's own words, rather than mrkdwn: Slack renders it as rich text. */
+  markdown?: boolean;
 };
 
 /** One line of the waiting list. Rank 0 is the most urgent: 0 question, 1 red CI, 2 changes requested, 3 ready, 4 stopped. */
@@ -150,8 +152,10 @@ export interface Remy {
    * Ask the user and wait for the answer: the question is posted, sits on the waiting list as a judgment call until
    * answered, and the user's reply in its thread resolves the promise instead of reaching the coordinator.
    * `session` names the thread: an agent's name, or any label such as "factory:api#212".
+   * Aborting `signal` withdraws the question: it leaves the waiting list, the promise rejects, and a later reply in
+   * the thread goes on as an ordinary message.
    */
-  ask(question: string, opts: PostOptions & { session: string }): Promise<string>;
+  ask(question: string, opts: PostOptions & { session: string; signal?: AbortSignal }): Promise<string>;
   /**
    * Start a background agent, as `remy spawn` does. `prompt` replaces `spawnTemplate` with a whole prompt of your own;
    * `role` marks an agent that reports through `remy report` rather than its own PR, and keeps it off the waiting list.

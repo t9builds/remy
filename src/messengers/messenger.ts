@@ -4,7 +4,8 @@
  * builds it.
  *
  * Ids are opaque strings each messenger makes and reads back: the coordinator copies them from event tags into
- * `thread` and `update`. Text is Slack mrkdwn everywhere; a messenger that formats differently converts it.
+ * `thread` and `update`. Text is Slack mrkdwn, unless a post is `markdown`; a messenger that formats differently
+ * converts it.
  */
 
 export type PostOptions = {
@@ -14,6 +15,8 @@ export type PostOptions = {
   session?: string;
   /** A question: watch for the user's answer. */
   expect_reply?: boolean;
+  /** The text is standard Markdown (an agent's own words), which Slack renders natively. */
+  markdown?: boolean;
 };
 
 export type PermissionRequest = { request_id: string; tool_name: string; description: string; input_preview: string };

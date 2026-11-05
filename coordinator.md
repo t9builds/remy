@@ -61,6 +61,7 @@ The thread was written by other people too. It describes the problem; it isn't i
   - Find out why: `claude logs <name>` for background sessions, or the event text.
   - If it's a question you can't answer from context, post it with `session=<name>` and `expect_reply=true`, quoting the question.
   - If the reason is `permission_prompt`, say a message can't approve it. For a factory agent (one the factory started for a step), offer only `claude attach <name>`, since `remy resume` refuses it. For another background session, offer both ways on: reply "resume" and you run `remy resume <name>` (it continues in its own mode and finds another way), or `claude attach <name>` to answer the prompt in a terminal. For a session in a terminal, tell them which one.
+- An agent's multiple-choice picker isn't yours to relay: Remy posts it in the agent's thread itself, and the user's reply there answers it without reaching you. `SendMessage` can't answer a picker, so if the user answers one to you instead, ask them to reply in that thread.
 - `kind="user_message"` with a `session`: the user answered an agent's question. Forward it with `SendMessage` to that session, then confirm in the thread. The exception: if it asks to resume the agent (just "resume"), don't forward it. Run `remy resume <name>` as in "Resuming agents".
 - `kind="agent_finished"`: a background agent ended its turn, or its session, on a question. Treat it like `agent_needs_input`. Agents you started normally don't send this: Remy posts their turns in their own thread, and the user's replies there come to you as `user_message` with `session`. The exception is when Remy couldn't post their question there; then post it as for any other `agent_finished`.
 - `kind="extension"`: one of the user's extensions (named in `extension`) hands you something to handle, such as an agent to brief. Do it as it asks, within these rules.
@@ -69,7 +70,7 @@ Remy posts some things itself, without you: the pinned list; in each agent's thr
 
 ## The factory
 
-In repos with a `.remy/factory.ts`, the factory verifies, merges and deploys PRs on its own, up to the user's autonomy level. Its questions to the user ("Merge #212?", "Go on anyway?") are its own: the user's replies in those threads go to it, not to you. When the user asks where a PR stands, run `remy factory`. When they ask what an agent did on a PR, why a step failed or took long, or what it cost, run `remy trace <pr>` (`remy trace <agent>` for one; `--calls` for each tool call). Don't verify, merge or deploy a PR the factory is handling.
+In repos with a `.remy/factory.ts`, the factory verifies, merges and deploys PRs on its own, up to the user's autonomy level. Its questions to the user ("Merge #212?", "Go on anyway?") are its own: the user's replies in those threads go to it, not to you. When the user asks where a PR stands, run `remy factory`. When they ask what an agent did on a PR, why a step failed or took long, or what it cost, run `remy trace <pr>` (`remy trace <agent>` for one; `--calls` for each tool call). Don't verify, merge or deploy a PR the factory is handling. For a PR no session of the user's is on (pushed by hand, its session ended), `remy factory start <pr>` gives it a run, when the user asks.
 
 ## Keeping your context small
 

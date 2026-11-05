@@ -24,11 +24,11 @@ import {
 } from "../../sdk/factory";
 import { defang } from "../../shared/notices";
 
-/** What an agent reported with `remy report`, or the user's `remy factory retry`. */
+/** What an agent reported with `remy report`, or the user's `remy factory retry` or `remy factory start`. */
 export type Report = {
   pr: string;
   at: number;
-  /** The step's name; "" for a retry. */
+  /** The step's name; "" for a retry or a start. */
   step: string;
   verdict?: "pass" | "fail" | "fixed";
   summary?: string;
@@ -36,7 +36,9 @@ export type Report = {
   head?: string;
   /** The session that reported, so its transcript can be found (`remy trace`). */
   session?: string;
-  kind?: "retry";
+  kind?: "retry" | "start";
+  /** For a start: the PR and where it runs, as `remy factory start` resolved them. */
+  start?: Pick<Run, "number" | "title" | "repo" | "repoDir" | "branch" | "workspace">;
 };
 
 type Stage =
@@ -121,6 +123,17 @@ export type Env = {
 
 /** An agent that just started, or just stopped, gets this long before it counts as stopped without a report. */
 const GRACE_MS = 3 * 60_000;
+/**
+ * An offer to start a fix lapses after this long unanswered (ADR-0012). The author was told of the failure when it
+ * happened, so a lapsed offer loses nothing. Three days, not hours: it must outlive a weekend away. Only `"fix"`
+ * lapses. An `"approve"` or `"continue"` question stays until answered: approving above the autonomy level is a
+ * person's call (ADR-0005, ADR-0006), so Remy never goes on without it, and the run is stuck on the question anyway:
+ * holding it would only turn one waiting-list item into another.
+ */
+const FIX_OFFER_TTL_MS = 3 * 24 * 60 * 60_000;
+/** Whether `run` waits on a fix offer that has gone unanswered past its lifetime. */
+export const fixOfferLapsed = (run: Run, now: number) =>
+  run.ask?.purpose === "fix" && !run.ask.answer && now - run.since > FIX_OFFER_TTL_MS;
 /** GitHub may take a moment to show a pushed fix or a merge. */
 const PUSH_WAIT_MS = 30 * 60_000;
 
@@ -272,13 +285,22 @@ const ciFails = (run: Run, f: Factory, env: Env, d: PrDetail, what = "CI fails")
 const lastPass = (run: Run, name: string) =>
   run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
 
-/** Move a run on as far as it can go now. */
+/**
+ * Move a run on as far as it can go now. An agent the run lets go of is closed here, whichever way it went: it
+ * reported, or the PR was merged or closed by hand, or the run was retried or moved on without it. Closing it where
+ * the run drops it keeps the many paths out of a step from each having to remember to.
+ */
 export async function advance(run: Run, f: Factory, autonomy: Level, env: Env): Promise<void> {
-  for (let i = 0; i < 50 && (await stepOnce(run, f, autonomy, env)); i++);
+  for (let i = 0; i < 50; i++) {
+    const had = run.agent;
+    const again = await stepOnce(run, f, autonomy, env);
+    if (had && run.agent !== had) await env.close(had);
+    if (!again) break;
+  }
 }
 
 /** One move. True when the run went on to another step and may move again right away. */
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 48); don't add to it
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 50); don't add to it
 async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promise<boolean> {
   const now = env.now();
   if (run.stage === "done") return false;
@@ -296,6 +318,11 @@ async function stepOnce(run: Run, f: Factory, autonomy: Level, env: Env): Promis
   if (run.stage === "asking") {
     if (await mergedByHand(run, f, env)) return true;
     const a = run.ask;
+    if (fixOfferLapsed(run, now)) {
+      run.ask = undefined;
+      enter(run, "done", now, "no answer to the fix offer in 3 days");
+      return false;
+    }
     if (!a?.answer) return false;
     const yes = YES.test(a.answer);
     if (a.purpose === "approve") {
@@ -396,10 +423,20 @@ async function reportOf(run: Run, step: AgentStep, env: Env): Promise<Report | u
       hold(run, now, `${step.name} (${agent.name}) stopped without reporting`);
     return undefined;
   }
-  await env.close(agent);
+  // `advance` closes the agent now that the run has let go of it.
   run.agent = undefined;
   run.reports.push(report);
   return report;
+}
+
+/**
+ * While an agent works, whether the PR was merged or closed by hand and left it with nothing to do: the run goes on
+ * (or ends) and `advance` closes the agent. Undefined while the PR is open, or once the merge is the pipeline's own.
+ */
+async function overtaken(run: Run, f: Factory, env: Env): Promise<boolean | undefined> {
+  if (run.stage === "held" || run.mergeSha) return undefined;
+  const d = await env.pr(run.pr);
+  return d && d.state !== "OPEN" ? closed(run, d, f, env) : undefined;
 }
 
 /** The fixer at work: start it, then read its report. A fix sends the run back to the first step, on the new head. */
@@ -416,7 +453,7 @@ async function fixing(run: Run, f: Factory, env: Env): Promise<boolean> {
     return false;
   }
   const report = await reportOf(run, step, env);
-  if (!report) return false;
+  if (!report) return (await overtaken(run, f, env)) ?? false;
   const now = env.now();
   await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "fail") return hold(run, now, `${step.name}: ${report.summary ?? ""}`);
@@ -426,7 +463,7 @@ async function fixing(run: Run, f: Factory, env: Env): Promise<boolean> {
   return report.verdict === "pass";
 }
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 32); don't add to it
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 33); don't add to it
 async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
   if (!run.agent) {
@@ -443,7 +480,7 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
     return false;
   }
   const report = await reportOf(run, step, env);
-  if (!report) return false;
+  if (!report) return (await overtaken(run, f, env)) ?? false;
   const summary = report.summary ?? "";
   const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "fix");
   const holds = onFail === "hold" || (onFail === "fix" && !fixable(run, f));
@@ -478,7 +515,15 @@ async function agentStep(run: Run, step: AgentStep, f: Factory, env: Env): Promi
   return hold(run, now, `${step.name}: ${summary}`);
 }
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 25); don't add to it
+/**
+ * gcloud's wording when its login needs a person (reauthentication, refreshing tokens, no active account, no valid
+ * credentials). The detector keeps only gcloud's first `ERROR` line, so the "Please run: gcloud auth login" line
+ * that follows never reaches `detail`.
+ */
+const LOGIN_EXPIRED =
+  /reauthentication|problem refreshing your current auth tokens|do not currently have an active account|does not have any valid credentials/i;
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 31); don't add to it
 async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Factory, env: Env): Promise<boolean> {
   const now = env.now();
   const minutes = step.timeoutMinutes ?? 60;
@@ -504,14 +549,27 @@ async function waitStep(run: Run, step: Extract<Step, { kind: "wait" }>, f: Fact
       now,
       `the ${step.env} deploy of ${run.mergeSha.slice(0, 7)} failed${b.id ? ` (${b.id})` : ""}${b.detail ? `: ${b.detail}` : ""}`,
     );
-  if (b.status === "error") run.reason = b.detail;
-  return late
-    ? hold(
+  const sha = run.mergeSha.slice(0, 7);
+  if (b.status === "error") {
+    // The detector couldn't look, so say that rather than "no deploy". A login that needs a person won't fix itself
+    // while we wait; anything else (a network blip) may, so it waits out the timeout. The waiting list adds the
+    // retry command to every hold, so the reason is only the cause.
+    if (LOGIN_EXPIRED.test(b.detail ?? ""))
+      return hold(
         run,
         now,
-        `no ${step.env} deploy of ${run.mergeSha.slice(0, 7)} after ${minutes} min${run.reason ? ` (${run.reason})` : ""}`,
-      )
-    : false;
+        `couldn't check the ${step.env} deploy of ${sha}: gcloud needs a login; run \`gcloud auth login\``,
+      );
+    run.reason = b.detail;
+    return late
+      ? hold(
+          run,
+          now,
+          `couldn't check the ${step.env} deploy of ${sha} after ${minutes} min${b.detail ? ` (${b.detail})` : ""}`,
+        )
+      : false;
+  }
+  return late ? hold(run, now, `no ${step.env} deploy of ${sha} after ${minutes} min`) : false;
 }
 
 async function gateStep(run: Run, step: GateStep, f: Factory, env: Env): Promise<boolean> {
@@ -592,6 +650,7 @@ function closed(run: Run, d: PrDetail, f: Factory, env: Env) {
     run.mergeSha = d.mergeSha;
     return next(run, env.now(), merge + 1);
   }
+  run.agent = undefined;
   enter(run, "done", env.now(), d.state === "MERGED" ? "merged" : "the PR was closed");
   return false;
 }

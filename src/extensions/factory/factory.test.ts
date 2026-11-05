@@ -10,7 +10,7 @@ import { PLUGIN_ROOT } from "../../shared/paths";
 import { createFactory, endedOnUsageLimit, isReady, spawnHitUsageLimit } from "./factory";
 import { formatRuns } from "./format";
 import { loadFactory } from "./load";
-import { type Env, gateBlockers, type PrDetail, type Run } from "./pipeline";
+import { type Env, gateBlockers, type PrDetail, type Report, type Run } from "./pipeline";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "remy-factory-")));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -115,8 +115,10 @@ async function hostWith(
   stateDir = join(dir, `state-${Math.random()}`),
 ) {
   const hidden: string[] = [];
+  const posts: string[] = [];
+  const logs: string[] = [];
   const h = new ExtensionHost({
-    post: async () => "id",
+    post: async (text) => (posts.push(text), "id"),
     spawn: async () => ({ name: "x", label: "x", id: "x", cwd: "/", worktree: true, output: "" }),
     close: async () => "",
     tell: () => {},
@@ -124,12 +126,12 @@ async function hostWith(
     config,
     waitingListChanged: () => {},
     waitingListText: async () => "",
-    log: () => {},
+    log: (...a) => void logs.push(a.join(" ")),
     stateDir,
   });
   // By default offline: the PR can't be looked up, so the run stays at its first step.
   await h.load("builtin:factory", "test", createFactory(world));
-  return { h, hidden };
+  return { h, hidden, posts, logs };
 }
 
 test("a ready PR in a listed repo starts a run; an unlisted repo's or a notify-level one doesn't", async () => {
@@ -222,10 +224,10 @@ async function hostWithRuns(runs: Run[], over: Partial<Config> = {}, world: Part
     JSON.stringify({ runs: Object.fromEntries(runs.map((r) => [r.pr, r])) }),
   );
   const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api"] }, ...over };
-  const { h } = await hostWith(config, [], world, stateDir);
+  const { h, posts, logs } = await hostWith(config, [], world, stateDir);
   const saved = () =>
     JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs as Record<string, Run>;
-  return { h, saved };
+  return { h, saved, posts, logs };
 }
 
 const LIMIT = "You've hit your session limit · resets 8:10pm (Europe/Prague)";
@@ -275,4 +277,214 @@ test("a fixer with its agent running counts against maxFactoryAgents", async () 
   };
   expect(await spawn(1)).toEqual([]);
   expect(await spawn(2)).toEqual(["#8"]);
+});
+
+test("an orphaned factory agent is closed; a run's current agent and sessions without the role are left alone", async () => {
+  const root = repo("api-orphans", GOOD);
+  const config: Config = {
+    ...DEFAULTS,
+    repoRoots: [dir],
+    autonomy: "merge",
+    extensions: { repos: ["api-orphans"] },
+  };
+  const stateDir = join(dir, `state-${Math.random()}`);
+  mkdirSync(stateDir, { recursive: true });
+  const active = savedRun(root, 7, "agent", "current");
+  const done = savedRun(root, 8, "done");
+  writeFileSync(
+    join(stateDir, "builtin_factory.json"),
+    JSON.stringify({ runs: { [active.pr]: active, [done.pr]: done } }),
+  );
+  const closed: string[] = [];
+  const sessions = [
+    ref({ name: "current", sessionId: "c1", role: "factory", pr: undefined }),
+    // cabbage's run is done; nothing has it as its agent.
+    ref({ name: "cabbage", sessionId: "c2", role: "factory", pr: undefined, status: "waiting" }),
+    ref({ name: "gone", sessionId: "c3", role: "factory", pr: undefined }),
+    ref({ name: "mine", sessionId: "c4", pr: undefined }),
+    ref({ name: "basil", sessionId: "c5", role: undefined, spawned: true }),
+  ];
+  const h = new ExtensionHost({
+    post: async () => "id",
+    spawn: async () => ({ name: "x", label: "x", id: "x", cwd: "/", worktree: true, output: "" }),
+    close: async () => "",
+    tell: () => {},
+    sessions: () => sessions,
+    config,
+    waitingListChanged: () => {},
+    waitingListText: async () => "",
+    log: () => {},
+    stateDir,
+  });
+  await h.load(
+    "builtin:factory",
+    "test",
+    createFactory({
+      pr: async () => undefined,
+      agentStatus: async () => "busy",
+      reports: () => [],
+      close: async (a) => void closed.push(a.name),
+    }),
+  );
+  await h.emit("tick", { at: 1 });
+  expect(closed.sort()).toEqual(["cabbage", "gone"]);
+  // Still listed (stopped, not removed): the next tick doesn't try them again.
+  await h.emit("tick", { at: 2 });
+  expect(closed.sort()).toEqual(["cabbage", "gone"]);
+});
+
+test("a fix offer nobody answers expires: the run ends and its question leaves the waiting list; a late reply is ignored", async () => {
+  const root = repo("api-expire", GOOD);
+  const day = 24 * 60 * 60_000;
+  const asking = (number: number, ageDays: number) => ({
+    ...savedRun(root, number, "asking"),
+    since: Date.now() - ageDays * day,
+    ask: { purpose: "fix" as const, question: "Start an agent on a fix? Reply yes." },
+  });
+  const old = asking(7, 4);
+  const fresh = asking(8, 1);
+  const { h, saved, posts } = await hostWithRuns([old, fresh], { extensions: { repos: ["api-expire"] } });
+  const keys = () => h.waitingEntries().map((e) => e.key);
+  // Restarted: the lapsed offer is not posted again, the 1-day-old one waits for its answer again.
+  await Bun.sleep(0);
+  expect(posts).toEqual(["Start an agent on a fix? Reply yes."]);
+  expect(keys()).not.toContain("ask:factory:api#7");
+  expect(keys()).toContain("ask:factory:api#8");
+  await h.emit("tick", { at: 1 });
+  expect(saved()[old.pr]).toMatchObject({ stage: "done", reason: "no answer to the fix offer in 3 days" });
+  expect(saved()[old.pr]!.ask).toBeUndefined();
+  expect(keys()).not.toContain("ask:factory:api#7");
+  expect(saved()[fresh.pr]).toMatchObject({ stage: "asking" });
+  expect(keys()).toContain("ask:factory:api#8");
+  // The user answers after the expiry: the reply is not consumed (it reaches the coordinator), nothing starts.
+  expect(h.answer("factory:api#7", "yes")).toBe(false);
+  await new Promise((r) => setTimeout(r, 10));
+  expect(saved()[old.pr]).toMatchObject({ stage: "done", reason: "no answer to the fix offer in 3 days" });
+});
+
+test("a fix offer that lapses while it is on the waiting list is withdrawn without logging a failed ask", async () => {
+  const root = repo("api-lapse", GOOD);
+  const day = 24 * 60 * 60_000;
+  // Just inside the 3 days: asked again on restart, lapsed by the tick.
+  const run = {
+    ...savedRun(root, 7, "asking"),
+    since: Date.now() - 3 * day + 50,
+    ask: { purpose: "fix" as const, question: "Start an agent on a fix? Reply yes." },
+  };
+  const { h, saved, logs } = await hostWithRuns([run], { extensions: { repos: ["api-lapse"] } });
+  expect(h.waitingEntries().map((e) => e.key)).toContain("ask:factory:api#7");
+  await Bun.sleep(100);
+  await h.emit("tick", { at: 1 });
+  await Bun.sleep(10);
+  expect(saved()[run.pr]).toMatchObject({ stage: "done" });
+  expect(h.waitingEntries().map((e) => e.key)).not.toContain("ask:factory:api#7");
+  // Withdrawing the question is not a failure to log.
+  expect(logs.filter((l) => l.includes("ask failed"))).toEqual([]);
+});
+
+test("`remy factory start` runs a PR no session is on, once per start", async () => {
+  const root = repo("api-start", GOOD);
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-start"] } };
+  const url = "https://github.com/acme-corp/api/pull/9";
+  const startedAt = Date.now() - 1000;
+  const start: Report = {
+    pr: url,
+    at: startedAt,
+    step: "",
+    kind: "start",
+    head: "bbb",
+    start: { number: 9, title: "Hand-pushed", repo: "acme-corp/api", repoDir: root, branch: "b", workspace: "work" },
+  };
+  const stateDir = join(dir, `state-${Math.random()}`);
+  const { h } = await hostWith(config, [], { pr: async () => undefined, reports: () => [start] }, stateDir);
+  await h.emit("tick", { at: 1 });
+  const saved = () =>
+    JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs as Record<string, Run>;
+  expect(saved()[url]).toMatchObject({ stage: "running", step: 0, head: "bbb", session: "api#9", workspace: "work" });
+  expect(h.waitingEntries().map((e) => [e.key, e.label, !!e.hide])).toEqual([[url, "api#9", true]]);
+
+  // A run the start already made, finished since, isn't made again by the same start.
+  const done = { ...saved()[url]!, stage: "done" as const };
+  const again = await hostWithRuns([done], { extensions: { repos: ["api-start"] } }, { reports: () => [start] });
+  await again.h.emit("tick", { at: 1 });
+  expect(again.saved()[url]?.stage).toBe("done");
+
+  // A repo outside extensions.repos gets no run.
+  const off = await hostWith({ ...config, extensions: { repos: [] } }, [], { reports: () => [start] });
+  await off.h.emit("tick", { at: 1 });
+  expect(off.h.waitingEntries()).toEqual([]);
+});
+
+/** A start report for PR 9 of `acme-corp/api`, `ago` ms old. */
+const startReport = (root: string, ago: number): Report => ({
+  pr: "https://github.com/acme-corp/api/pull/9",
+  at: Date.now() - ago,
+  step: "",
+  kind: "start",
+  head: "bbb",
+  start: { number: 9, title: "Hand-pushed", repo: "acme-corp/api", repoDir: root, branch: "b", workspace: "work" },
+});
+
+/** A factory whose saved state is `state`, given `reports`. */
+async function hostWithState(state: object, reports: () => Report[]) {
+  const stateDir = join(dir, `state-${Math.random()}`);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "builtin_factory.json"), JSON.stringify(state));
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-start2"] } };
+  const { h } = await hostWith(config, [], { pr: async () => undefined, reports }, stateDir);
+  const saved = () => JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8"));
+  return { h, saved };
+}
+
+test("a start report outlives its run without starting it again", async () => {
+  const root = repo("api-start2", GOOD);
+  const url = startReport(root, 0).pr;
+  const day = 24 * 3_600_000;
+
+  // The run it made was dropped (or never saved) and the report remains: the report was taken already.
+  const report = startReport(root, 3 * day);
+  const taken = await hostWithState({ runs: {}, starts: { [url]: report.at } }, () => [report]);
+  await taken.h.emit("tick", { at: 1 });
+  expect(taken.saved().runs).toEqual({});
+
+  // A report older than a week is never taken, and a record that old is pruned.
+  const old = await hostWithState({ starts: { [url]: Date.now() - 8 * day } }, () => [startReport(root, 8 * day)]);
+  await old.h.emit("tick", { at: 1 });
+  expect(old.saved().runs).toEqual({});
+  expect(old.saved().starts).toEqual({});
+
+  // A newer report restarts a held run, and a done one.
+  for (const stage of ["held", "done"] as const) {
+    const run = { ...savedRun(root, 9, stage), since: Date.now() - day };
+    const s = await hostWithState({ runs: { [url]: run }, starts: { [url]: Date.now() - 2 * day } }, () => [
+      startReport(root, 1000),
+    ]);
+    await s.h.emit("tick", { at: 1 });
+    expect(s.saved().runs[url]).toMatchObject({ stage: "running", step: 0, head: "bbb" });
+  }
+});
+
+test("a start report seen while its run is active is taken, and leaves the run as it is", async () => {
+  const root = repo("api-start2", GOOD);
+  const url = startReport(root, 0).pr;
+  const active = { ...savedRun(root, 9, "running"), since: Date.now() - 5000 };
+  const s = await hostWithState({ runs: { [url]: active } }, () => [startReport(root, 1000)]);
+  await s.h.emit("tick", { at: 1 });
+  expect(s.saved().runs[url]).toMatchObject({ head: "aaa", since: active.since });
+  expect(s.saved().starts[url]).toBeGreaterThan(0);
+});
+
+test("a start report whose repo's factory can't load yet is tried again, not lost", async () => {
+  const root = repo("api-start2", GOOD);
+  rmSync(join(root, ".remy", "factory.ts"));
+  const report = startReport(root, 1000);
+  const s = await hostWithState({}, () => [report]);
+  await s.h.emit("tick", { at: 1 });
+  expect(s.saved().runs?.[report.pr]).toBeUndefined();
+  expect(s.saved().starts?.[report.pr]).toBeUndefined();
+
+  repo("api-start2", GOOD);
+  await s.h.emit("tick", { at: 2 });
+  expect(s.saved().runs[report.pr]).toMatchObject({ stage: "running", head: "bbb", session: "api#9" });
+  expect(s.saved().starts[report.pr]).toBe(report.at);
 });

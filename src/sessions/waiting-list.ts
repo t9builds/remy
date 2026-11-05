@@ -68,10 +68,13 @@ export function questionOf(last: string | undefined): string | undefined {
 }
 
 /** Why `s` waits on the user, if it does. A session counts once, under its most urgent reason. */
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 22); don't add to it
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 25); don't add to it
 function itemOf(s: SessionView): Omit<WaitingItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
+  // A picker (AskUserQuestion): Remy relays it to the agent's thread, and a reply there answers it.
+  if (s.status === "waiting" && s.lastEvent?.event === "PermissionRequest")
+    return { rank: 0, why: `asks: "${short(s.lastEvent.text ?? "pick an option")}"`, action: "reply to its thread" };
   // A message can't approve a permission; a background session can be resumed instead (`remy resume`), except a
   // factory agent, which `remy resume` refuses.
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")

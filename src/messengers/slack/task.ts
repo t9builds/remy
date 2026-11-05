@@ -50,12 +50,16 @@ export function cleanText(text: string, names: Map<string, string>) {
     .replace(/&amp;/g, "&");
 }
 
-/** Strip mentions of the bot from the requester's message. */
+/** Strip mentions of the bot from the requester's message. Line breaks stay: a reply to a picker answers one per line. */
 export function requestText(text: string, botUserId: string) {
   return text
     .replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/ ?\n\s*/g, "\n")
+    .trim()
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
 }
 
 function clock(ts: string) {

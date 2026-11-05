@@ -11,7 +11,7 @@ import { PATHS } from "../shared/paths";
 import { type AgentRow, listAgents } from "./agents";
 import { type RemyEvent, readEvents } from "./events";
 import { gitInfo, prInfo } from "./git";
-import { DEFAULT_BRANCHES } from "./snapshot";
+import { NO_PR_BRANCHES } from "./snapshot";
 import { agentEnv } from "./spawn";
 import { type Spawned, spawnedEntry } from "./spawned";
 
@@ -108,7 +108,7 @@ const realToResumeWorld: ToResumeWorld = {
   exists: existsSync,
   lookup: async (cwd) => {
     const { branch, repo } = await gitInfo(cwd);
-    return { repo, pr: branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
+    return { repo, pr: branch && !NO_PR_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
   },
 };
 

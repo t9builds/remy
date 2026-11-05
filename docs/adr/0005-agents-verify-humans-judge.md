@@ -3,6 +3,7 @@ status: accepted
 ---
 
 > Which calls go to a person is narrowed by [ADR-0009](0009-agents-decide-people-only-for-critical.md).
+> An unanswered offer to start a fix lapses after 3 days: [ADR-0012](0012-unanswered-fix-offer-lapses.md).
 
 # Agents verify changes; humans make judgment calls, not code reviews
 

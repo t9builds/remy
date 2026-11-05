@@ -31,8 +31,8 @@ const HELP = formatHelp("remy — a coordinator for your Claude Code sessions, i
     "Carry on an agent's own session in the background, stopping it first if it's stuck; keeps its history and worktree",
   ],
   [
-    "factory [--json] | factory retry <pr> | factory check [repo]",
-    "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts",
+    "factory [--json] | factory start <pr> | factory retry <pr> | factory check [repo]",
+    "Where each PR stands in its factory pipeline; start runs one no session of yours is on; retry runs a held step again; check validates a repo's .remy/factory.ts",
   ],
   ["report <step> pass|fail|fixed --pr <url> --summary <text>", "A factory agent's verdict on its step"],
   [

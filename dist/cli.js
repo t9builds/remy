@@ -272,7 +272,7 @@ var DEFAULTS = {
   triggerEmoji: "mouse",
   tickSeconds: 60,
   autonomy: "notify",
-  maxFactoryAgents: 2
+  maxFactoryAgents: 5
 };
 function compactPct(value) {
   const n = Number(value);
@@ -495,11 +495,25 @@ class ExtensionHost {
         this.handlers.set(event, [...this.handlers.get(event) ?? [], { ext, fn }]);
       },
       post: (text, { expectReply, ...opts } = {}) => deps.post(text, { ...opts, expect_reply: expectReply }),
-      ask: async (question, opts) => {
+      ask: async (question, { signal, ...opts }) => {
+        signal?.throwIfAborted();
         if (this.asks.has(opts.session))
           throw new Error(`"${opts.session}" already waits for an answer`);
-        const answer = new Promise((resolve) => this.asks.set(opts.session, { ext, resolve }));
         const key = `ask:${opts.session}`;
+        let pending;
+        const answer = new Promise((resolve, reject) => {
+          pending = { ext, resolve };
+          this.asks.set(opts.session, pending);
+          signal?.addEventListener("abort", () => {
+            if (this.asks.get(opts.session) !== pending)
+              return;
+            this.asks.delete(opts.session);
+            this.entries.delete(`${ext}\x00${key}`);
+            deps.waitingListChanged();
+            reject(signal.reason);
+          }, { once: true });
+        });
+        answer.catch(() => {});
         addEntry({
           key,
           rank: 0,
@@ -513,9 +527,11 @@ class ExtensionHost {
         try {
           await deps.post(question, { ...opts, expect_reply: true });
         } catch (e) {
-          this.asks.delete(opts.session);
-          this.entries.delete(`${ext}\x00${key}`);
-          deps.waitingListChanged();
+          if (this.asks.get(opts.session) === pending) {
+            this.asks.delete(opts.session);
+            this.entries.delete(`${ext}\x00${key}`);
+            deps.waitingListChanged();
+          }
           throw e;
         }
         return answer;
@@ -621,12 +637,22 @@ function turnText(name, last, question) {
   const said = last?.trim();
   if (!said)
     return;
-  const cut = said.length > MAX_LAST ? `${said.slice(0, MAX_LAST)}\u2026
-_(cut; \`claude logs ${name}\` has all of it)_` : said;
+  let cut = said;
+  if (said.length > MAX_LAST) {
+    let kept = `${said.slice(0, MAX_LAST)}\u2026`;
+    if ((kept.match(/```/g)?.length ?? 0) % 2)
+      kept += "\n```";
+    cut = `${kept}
+
+_(cut; \`claude logs ${name}\` has all of it)_`;
+  }
   const body = defang(cut);
-  return question ? `\u2753 *${name}* asks:
+  return question ? `\u2753 **${name}** asks:
+
 ${body}
-_Reply here to answer._` : `*${name}* finished its turn:
+
+_Reply here to answer._` : `**${name}** finished its turn:
+
 ${body}`;
 }
 function agentUpdates(remy) {
@@ -637,7 +663,7 @@ function agentUpdates(remy) {
     if (!text)
       return;
     try {
-      await remy.post(text, { session: session.name, expectReply: !!question });
+      await remy.post(text, { session: session.name, expectReply: !!question, markdown: true });
     } catch (e) {
       if (!question)
         throw e;
@@ -974,6 +1000,8 @@ async function loadFactory(root) {
 
 // src/extensions/factory/pipeline.ts
 var GRACE_MS = 3 * 60000;
+var FIX_OFFER_TTL_MS = 3 * 24 * 60 * 60000;
+var fixOfferLapsed = (run, now) => run.ask?.purpose === "fix" && !run.ask.answer && now - run.since > FIX_OFFER_TTL_MS;
 var PUSH_WAIT_MS = 30 * 60000;
 var isActive = (r) => r.stage !== "held" && r.stage !== "done";
 var YES = /^\s*(y|yes|yep|yeah|ok|okay|go|go ahead|ship it|sure|do it|approved?|lgtm|\uD83D\uDC4D[\u{1F3FB}-\u{1F3FF}]?|\u2705|:\+1:|:thumbsup:|:white_check_mark:)[\s.!]*$/iu;
@@ -1100,8 +1128,14 @@ ${run.pr}`).catch(() => {});
 var ciFails = (run, f, env, d, what = "CI fails") => fixable(run, f) ? fix(run, f, env, what, d.failing.join(", ") || undefined) : hold(run, env.now(), what);
 var lastPass = (run, name) => run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
 async function advance(run, f, autonomy, env) {
-  for (let i = 0;i < 50 && await stepOnce(run, f, autonomy, env); i++)
-    ;
+  for (let i = 0;i < 50; i++) {
+    const had = run.agent;
+    const again = await stepOnce(run, f, autonomy, env);
+    if (had && run.agent !== had)
+      await env.close(had);
+    if (!again)
+      break;
+  }
 }
 async function stepOnce(run, f, autonomy, env) {
   const now = env.now();
@@ -1120,6 +1154,11 @@ async function stepOnce(run, f, autonomy, env) {
     if (await mergedByHand(run, f, env))
       return true;
     const a = run.ask;
+    if (fixOfferLapsed(run, now)) {
+      run.ask = undefined;
+      enter(run, "done", now, "no answer to the fix offer in 3 days");
+      return false;
+    }
     if (!a?.answer)
       return false;
     const yes = YES.test(a.answer);
@@ -1202,10 +1241,15 @@ async function reportOf(run, step, env) {
       hold(run, now, `${step.name} (${agent.name}) stopped without reporting`);
     return;
   }
-  await env.close(agent);
   run.agent = undefined;
   run.reports.push(report);
   return report;
+}
+async function overtaken(run, f, env) {
+  if (run.stage === "held" || run.mergeSha)
+    return;
+  const d = await env.pr(run.pr);
+  return d && d.state !== "OPEN" ? closed(run, d, f, env) : undefined;
 }
 async function fixing(run, f, env) {
   const step = fixerStep(f);
@@ -1224,7 +1268,7 @@ async function fixing(run, f, env) {
   }
   const report = await reportOf(run, step, env);
   if (!report)
-    return false;
+    return await overtaken(run, f, env) ?? false;
   const now = env.now();
   await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "fail")
@@ -1254,7 +1298,7 @@ async function agentStep(run, step, f, env) {
   }
   const report = await reportOf(run, step, env);
   if (!report)
-    return false;
+    return await overtaken(run, f, env) ?? false;
   const summary = report.summary ?? "";
   const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "fix");
   const holds = onFail === "hold" || onFail === "fix" && !fixable(run, f);
@@ -1283,6 +1327,7 @@ ${run.pr}`);
     return fix(run, f, env, `${step.name} failed`, summary);
   return hold(run, now, `${step.name}: ${summary}`);
 }
+var LOGIN_EXPIRED = /reauthentication|problem refreshing your current auth tokens|do not currently have an active account|does not have any valid credentials/i;
 async function waitStep(run, step, f, env) {
   const now = env.now();
   const minutes = step.timeoutMinutes ?? 60;
@@ -1310,9 +1355,14 @@ async function waitStep(run, step, f, env) {
     return next(run, now);
   if (b.status === "failed")
     return hold(run, now, `the ${step.env} deploy of ${run.mergeSha.slice(0, 7)} failed${b.id ? ` (${b.id})` : ""}${b.detail ? `: ${b.detail}` : ""}`);
-  if (b.status === "error")
+  const sha = run.mergeSha.slice(0, 7);
+  if (b.status === "error") {
+    if (LOGIN_EXPIRED.test(b.detail ?? ""))
+      return hold(run, now, `couldn't check the ${step.env} deploy of ${sha}: gcloud needs a login; run \`gcloud auth login\``);
     run.reason = b.detail;
-  return late ? hold(run, now, `no ${step.env} deploy of ${run.mergeSha.slice(0, 7)} after ${minutes} min${run.reason ? ` (${run.reason})` : ""}`) : false;
+    return late ? hold(run, now, `couldn't check the ${step.env} deploy of ${sha} after ${minutes} min${b.detail ? ` (${b.detail})` : ""}`) : false;
+  }
+  return late ? hold(run, now, `no ${step.env} deploy of ${sha} after ${minutes} min`) : false;
 }
 async function gateStep(run, step, f, env) {
   const now = env.now();
@@ -1392,6 +1442,7 @@ function closed(run, d, f, env) {
     run.mergeSha = d.mergeSha;
     return next(run, env.now(), merge + 1);
   }
+  run.agent = undefined;
   enter(run, "done", env.now(), d.state === "MERGED" ? "merged" : "the PR was closed");
   return false;
 }
@@ -1406,14 +1457,18 @@ var spawnHitUsageLimit = (message = "") => message.split(/\n|: /).some((part) =>
 var BACKOFF_MS = 30 * 60000;
 var KEEP_MS = 7 * 24 * 3600000;
 var isReady = (s) => !s.role && !!s.pr?.head && s.pr.state === "OPEN" && !s.pr.draft && s.pr.ci !== "fail" && s.pr.review !== "CHANGES_REQUESTED" && s.status !== "busy";
+var isOrphan = (s, current) => s.role === "factory" && !current.has(s.name);
 var factory_default = (remy) => createFactory()(remy);
 var createFactory = (world = {}) => (remy) => {
   const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo]));
   const loaded = new Map;
   const runs = remy.state.get("runs", {});
+  const starts = remy.state.get("starts", {});
   let backoffUntil = remy.state.get("backoffUntil", 0);
+  const tried = new Set;
   const save = () => {
     remy.state.set("runs", runs);
+    remy.state.set("starts", starts);
     remy.state.set("backoffUntil", backoffUntil);
   };
   async function factoryAt(root) {
@@ -1432,8 +1487,13 @@ var createFactory = (world = {}) => (remy) => {
   }
   const autonomy = (f) => lowerLevel(f.autonomy ?? "notify", remy.config.autonomy ?? "notify");
   const label = (r) => `factory:${r.repo.split("/").pop()}#${r.number}`;
+  const pendingAsks = new Map;
   function ask(run, question) {
-    remy.ask(question, { session: label(run), workspace: run.workspace }).then(async (answer) => {
+    const ctl = new AbortController;
+    pendingAsks.set(run.pr, ctl);
+    remy.ask(question, { session: label(run), workspace: run.workspace, signal: ctl.signal }).then(async (answer) => {
+      if (pendingAsks.get(run.pr) === ctl)
+        pendingAsks.delete(run.pr);
       const r = runs[run.pr];
       if (!r?.ask || r.ask.answer !== undefined)
         return;
@@ -1447,7 +1507,12 @@ var createFactory = (world = {}) => (remy) => {
       }
       r.ask.answer = answer;
       save();
-    }).catch((e) => remy.log("ask failed", run.pr, e?.message ?? e));
+    }).catch((e) => {
+      if (pendingAsks.get(run.pr) === ctl)
+        pendingAsks.delete(run.pr);
+      if (!ctl.signal.aborted)
+        remy.log("ask failed", run.pr, e?.message ?? e);
+    });
   }
   const env = {
     now: Date.now,
@@ -1455,7 +1520,7 @@ var createFactory = (world = {}) => (remy) => {
     merge: mergePr,
     deployed: (sha, e, run) => deployed(sha, e, run.repoDir),
     deploy: (sha, e, run) => deploy(sha, e, run.repoDir),
-    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing") && r.agent).length < (remy.config.maxFactoryAgents ?? 2),
+    canStartAgent: () => Date.now() >= backoffUntil && Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing") && r.agent).length < (remy.config.maxFactoryAgents ?? 5),
     spawn: async (run, step, prompt) => {
       try {
         const r = await remy.spawn({
@@ -1482,8 +1547,11 @@ var createFactory = (world = {}) => (remy) => {
   };
   function syncWaitingList(run) {
     const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
-    if (run.stage === "done")
+    if (run.stage === "done") {
+      pendingAsks.get(run.pr)?.abort();
+      pendingAsks.delete(run.pr);
       return remy.waitingList.remove(run.pr);
+    }
     if (run.stage === "held")
       return remy.waitingList.add({
         ...base,
@@ -1492,6 +1560,24 @@ var createFactory = (world = {}) => (remy) => {
         action: `decide, then \`remy factory retry ${run.pr}\``
       });
     remy.waitingList.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
+  }
+  async function startRun(fields) {
+    const f = await factoryAt(fields.repoDir);
+    if (!f || autonomy(f) === "notify")
+      return false;
+    const now = Date.now();
+    runs[fields.pr] = {
+      ...fields,
+      step: 0,
+      round: 1,
+      stage: "running",
+      since: now,
+      stepSince: now,
+      reports: [],
+      approved: []
+    };
+    remy.log("factory run started", fields.pr);
+    return true;
   }
   let ticking = false;
   remy.on("tick", async () => {
@@ -1505,11 +1591,7 @@ var createFactory = (world = {}) => (remy) => {
         if (had && (isActive(had) || had.head === pr.head))
           continue;
         const root = repoRootOf(s.cwd);
-        const f = await factoryAt(root);
-        if (!f || autonomy(f) === "notify")
-          continue;
-        const now = Date.now();
-        runs[pr.url] = {
+        await startRun({
           pr: pr.url,
           number: pr.number,
           title: pr.title,
@@ -1519,16 +1601,20 @@ var createFactory = (world = {}) => (remy) => {
           session: s.name,
           workspace: s.workspace,
           about: s.about,
-          head: pr.head,
-          step: 0,
-          round: 1,
-          stage: "running",
-          since: now,
-          stepSince: now,
-          reports: [],
-          approved: []
-        };
-        remy.log("factory run started", pr.url);
+          head: pr.head
+        });
+      }
+      const now = Date.now();
+      for (const [url, at] of Object.entries(starts))
+        if (now - at > KEEP_MS)
+          delete starts[url];
+      for (const r of env.reports()) {
+        if (r.kind !== "start" || !r.start || !r.head || now - r.at > KEEP_MS || r.at <= (starts[r.pr] ?? 0))
+          continue;
+        const had = runs[r.pr];
+        const { repo, number } = r.start;
+        if (had && (isActive(had) || had.since >= r.at) || await startRun({ ...r.start, pr: r.pr, head: r.head, session: `${repo.split("/").pop()}#${number}` }))
+          starts[r.pr] = r.at;
       }
       for (const [url, run] of Object.entries(runs)) {
         const f = await factoryAt(run.repoDir);
@@ -1544,6 +1630,12 @@ var createFactory = (world = {}) => (remy) => {
           remy.log("factory step failed", url, e?.message ?? e);
         }
         syncWaitingList(run);
+      }
+      const current = new Set(Object.values(runs).flatMap((r) => r.agent ? [r.agent.name] : []));
+      for (const s of remy.sessions().filter((s) => isOrphan(s, current) && !tried.has(s.sessionId))) {
+        tried.add(s.sessionId);
+        remy.log("closing orphaned factory agent", s.name);
+        await env.close({ name: s.name, id: s.sessionId });
       }
     } finally {
       save();
@@ -1566,7 +1658,7 @@ var createFactory = (world = {}) => (remy) => {
     run: (_, ctx) => formatRuns(Object.values(runs).filter((r) => r.workspace === ctx.workspace), (r) => loaded.get(r.repoDir)?.factory)
   });
   for (const run of Object.values(runs)) {
-    if (run.stage === "asking" && run.ask && run.ask.answer === undefined)
+    if (run.stage === "asking" && run.ask && run.ask.answer === undefined && !fixOfferLapsed(run, Date.now()))
       ask(run, run.ask.question);
     syncWaitingList(run);
   }
@@ -1987,6 +2079,7 @@ function formBody(params) {
       form.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
   return form;
 }
+var MARKDOWN_MAX = 12000;
 
 class Slack {
   token;
@@ -2013,10 +2106,11 @@ class Slack {
     const r = await this.call("conversations.open", { users: userId });
     return r.channel.id;
   }
-  async post(channel, text, threadTs) {
+  async post(channel, text, threadTs, markdown) {
     const r = await this.call("chat.postMessage", {
       channel,
       text,
+      blocks: markdown && text.length <= MARKDOWN_MAX ? [{ type: "markdown", text }] : undefined,
       thread_ts: threadTs,
       unfurl_links: false,
       unfurl_media: false
@@ -2181,7 +2275,8 @@ function cleanText(text, names) {
   return text.replace(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g, (_, id) => `@${names.get(id) ?? id}`).replace(/<#[A-Z0-9]+\|([^>]*)>/g, "#$1").replace(/<!(here|channel|everyone)>/g, "@$1").replace(/<(https?:[^|>]+)\|([^>]+)>/g, "$2 ($1)").replace(/<(https?:[^>]+)>/g, "$1").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 function requestText(text, botUserId) {
-  return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "").replace(/\s+/g, " ").trim();
+  return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "").replace(/[^\S\n]+/g, " ").replace(/ ?\n\s*/g, `
+`).trim().replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 function clock(ts) {
   const d = new Date(Number(ts) * 1000);
@@ -2430,7 +2525,7 @@ class SlackBridge {
     const ref = opts.thread || (opts.session ? this.threadOf(opts.session) : undefined);
     const thread = ref ? parseRef(ref) : undefined;
     const channel = thread?.channel;
-    const ts = await this.slack.post(channel ?? await this.ensureDm(), text, thread?.ts);
+    const ts = await this.slack.post(channel ?? await this.ensureDm(), text, thread?.ts, opts.markdown);
     const root = thread?.ts ?? ts;
     const prev = this.state.threads[root];
     if (opts.session || opts.expect_reply || prev || thread && !channel) {
@@ -3505,6 +3600,223 @@ async function prInfo(cwd, branch) {
   };
 }
 
+// src/sessions/gitbutler.ts
+import { closeSync, openSync, readSync, statSync as statSync7 } from "fs";
+var GITBUTLER_WORKSPACE = "gitbutler/workspace";
+async function resolveBranch(gitBranch, cwd, transcriptPath) {
+  if (gitBranch !== GITBUTLER_WORKSPACE)
+    return gitBranch;
+  return await sessionBranch(cwd, transcriptPath) ?? gitBranch;
+}
+async function sessionBranch(cwd, transcriptPath) {
+  if (!transcriptPath)
+    return;
+  const named = [...new Set(transcriptBranches(transcriptPath).toReversed())];
+  if (!named.length)
+    return;
+  const out = await run2(["git", "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes/origin"], cwd);
+  if (!out)
+    return;
+  const refs = new Set(out.split(`
+`));
+  return named.find((b) => refs.has(`refs/heads/${b}`) || refs.has(`refs/remotes/origin/${b}`));
+}
+var scans = new Map;
+function transcriptBranches(path) {
+  let scan = scans.get(path) ?? { offset: 0, branches: [] };
+  let fd;
+  try {
+    const size = statSync7(path).size;
+    if (size < scan.offset)
+      scan = { offset: 0, branches: [] };
+    if (size === scan.offset)
+      return scan.branches;
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(size - scan.offset);
+    readSync(fd, buf, 0, buf.length, scan.offset);
+    const end = buf.lastIndexOf(10) + 1;
+    const branches = [...scan.branches];
+    for (const line of buf.subarray(0, end).toString("utf8").split(`
+`)) {
+      if (line.includes('"name":"Bash"'))
+        branches.push(...lineBranches(line));
+    }
+    scan = { offset: scan.offset + end, branches };
+    scans.set(path, scan);
+    return scan.branches;
+  } catch {
+    return scan.branches;
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
+  }
+}
+function lineBranches(line) {
+  try {
+    const content = JSON.parse(line)?.message?.content;
+    if (!Array.isArray(content))
+      return [];
+    return content.filter((c) => c?.type === "tool_use" && c.name === "Bash" && typeof c.input?.command === "string").flatMap((c) => branchesNamed(c.input.command));
+  } catch {
+    return [];
+  }
+}
+function branchesNamed(command) {
+  return simpleCommands(command).map(branchOf).filter((b) => !!b && !b.startsWith("gitbutler/"));
+}
+function branchOf(words) {
+  const at = words.findIndex((w) => !/^\w+=/.test(w));
+  const program = words[at]?.split("/").pop();
+  const args = words.slice(at + 1);
+  if (program === "gh") {
+    let g = 0;
+    while (args[g]?.startsWith("-"))
+      g += args[g] === "-R" || args[g] === "--repo" ? 2 : 1;
+    if (args[g] !== "pr" || args[g + 1] !== "create")
+      return;
+    return optionValue(args, "-H", "--head")?.replace(/^[^:]*:/, "");
+  }
+  if (program !== "but")
+    return;
+  const sub = args.findIndex((w, j) => !w.startsWith("-") && args[j - 1] !== "-C" && args[j - 1] !== "--current-dir");
+  if (sub < 0)
+    return;
+  const [cmd, ...rest] = args.slice(sub);
+  if (cmd === "commit")
+    return optionValue(rest, "-b", "--branch");
+  if (cmd === "push")
+    return positional(rest, []);
+  if (cmd === "branch" && rest[0] === "new")
+    return positional(rest.slice(1), ["-A", "--above", "-B", "--below"]);
+  if (cmd === "pr" && rest[0] === "new")
+    return positional(rest.slice(1), ["-m", "--message", "-F", "--file"]);
+  return;
+}
+function optionValue(args, short, long) {
+  for (let i = 0;i < args.length; i++) {
+    const a = args[i];
+    if (a === short || a === long)
+      return args[i + 1];
+    if (a.startsWith(`${long}=`))
+      return a.slice(long.length + 1);
+  }
+  return;
+}
+function positional(args, valued) {
+  for (let i = 0;i < args.length; i++) {
+    const a = args[i];
+    if (valued.includes(a))
+      i++;
+    else if (!a.startsWith("-"))
+      return a;
+  }
+  return;
+}
+function simpleCommands(line) {
+  const commands = [];
+  let words = [];
+  let word;
+  let target = false;
+  const endWord = () => {
+    if (word !== undefined && !target)
+      words.push(word);
+    if (word !== undefined)
+      target = false;
+    word = undefined;
+  };
+  const heredocs = [];
+  const endCommand = () => {
+    endWord();
+    if (words.length)
+      commands.push(words);
+    words = [];
+    target = false;
+  };
+  for (let i = 0;i < line.length; i++) {
+    const c = line[i];
+    if (c === "'") {
+      const close = line.indexOf("'", i + 1);
+      const to = close < 0 ? line.length : close;
+      word = (word ?? "") + line.slice(i + 1, to);
+      i = to;
+    } else if (c === '"') {
+      word ??= "";
+      for (i++;i < line.length && line[i] !== '"'; i++) {
+        if (line[i] === "\\" && i + 1 < line.length && '"\\$`'.includes(line[i + 1]))
+          i++;
+        word += line[i];
+      }
+    } else if (c === "\\") {
+      if (line[i + 1] === `
+`)
+        i++;
+      else
+        word = (word ?? "") + (line[++i] ?? "");
+    } else if (c === "<" && line[i + 1] === "<" && line[i + 2] !== "<") {
+      if (word !== undefined && /^\d+$/.test(word))
+        word = undefined;
+      endWord();
+      const tabs = line[i + 2] === "-";
+      i += tabs ? 2 : 1;
+      while (line[i + 1] === " " || line[i + 1] === "\t")
+        i++;
+      let delimiter = "";
+      for (i++;i < line.length && !` 	
+;&|()<>`.includes(line[i]); i++) {
+        if (line[i] === "'" || line[i] === '"') {
+          const close = line.indexOf(line[i], i + 1);
+          const to = close < 0 ? line.length : close;
+          delimiter += line.slice(i + 1, to);
+          i = to;
+        } else
+          delimiter += line[i];
+      }
+      i--;
+      heredocs.push({ delimiter, tabs });
+    } else if (c === "#" && word === undefined) {
+      const eol = line.indexOf(`
+`, i);
+      i = eol < 0 ? line.length : eol - 1;
+    } else if (c === "<" || c === ">") {
+      if (word !== undefined && /^\d+$/.test(word))
+        word = undefined;
+      endWord();
+      while (line[i + 1] === "<" || line[i + 1] === ">")
+        i++;
+      if (line[i + 1] === "&")
+        while (/[&\d-]/.test(line[i + 1] ?? ""))
+          i++;
+      else
+        target = true;
+    } else if (c === " " || c === "\t")
+      endWord();
+    else if (`;&|()
+`.includes(c)) {
+      endCommand();
+      if (c === `
+`)
+        for (const h of heredocs.splice(0))
+          i = endOfHeredoc(line, i + 1, h.delimiter, h.tabs);
+    } else
+      word = (word ?? "") + c;
+  }
+  endCommand();
+  return commands;
+}
+function endOfHeredoc(text, from, delimiter, tabs) {
+  let start = from;
+  while (start < text.length) {
+    const eol = text.indexOf(`
+`, start);
+    const end = eol < 0 ? text.length : eol;
+    const row = text.slice(start, end);
+    if ((tabs ? row.replace(/^\t+/, "") : row) === delimiter)
+      return end;
+    start = end + 1;
+  }
+  return text.length;
+}
+
 // src/sessions/spawned.ts
 function spawnedEntry(spawned, name, sessionId) {
   const byId = Object.values(spawned).find((s) => s.id && sessionId.startsWith(s.id));
@@ -3523,20 +3835,19 @@ function noteSession(spawned, sessionId, transcript) {
 }
 
 // src/sessions/snapshot.ts
-var DEFAULT_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk"]);
+var NO_PR_BRANCHES = new Set(["main", "master", "develop", "dev", "trunk", GITBUTLER_WORKSPACE]);
 async function takeSnapshot() {
   const config = loadConfig();
   const spawned = readJson(PATHS.spawned, {});
   const nicknames = readJson(PATHS.nicknames, {});
   const agents = (await listAgents()).filter((a) => a.name !== config.coordinatorName && !spawnedEntry(spawned, a.name, a.sessionId)?.merged);
-  const latest = new Map;
-  for (const e of readEvents())
-    latest.set(e.session_id, e);
+  const latest = latestEvents(readEvents());
   const sessions = await Promise.all(agents.map(async (a) => {
     const ev = latest.get(a.sessionId);
     const cwd = ev?.cwd && ev.ts >= a.startedAt ? ev.cwd : a.cwd;
-    const { branch, repo } = await gitInfo(cwd);
-    const pr = branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
+    const git = await gitInfo(cwd);
+    const branch = await resolveBranch(git.branch, cwd, ev?.transcript_path);
+    const pr = branch && !NO_PR_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined;
     const spawn = spawnedEntry(spawned, a.name, a.sessionId);
     return {
       sessionId: a.sessionId,
@@ -3548,13 +3859,22 @@ async function takeSnapshot() {
       spawned: !!spawn,
       role: spawn?.role,
       about: aboutOf(spawn?.task) ?? nicknames[a.sessionId]?.about,
-      repo,
+      repo: git.repo,
       branch,
       pr,
       lastEvent: ev && { event: ev.event, type: ev.type, ts: ev.ts, text: ev.message ?? ev.last }
     };
   }));
   return { takenAt: Date.now(), sessions };
+}
+function latestEvents(events) {
+  const latest = new Map;
+  for (const e of events) {
+    const open = latest.get(e.session_id)?.event === "PermissionRequest";
+    if (!(open && e.event === "Notification" && e.type === "permission_prompt"))
+      latest.set(e.session_id, e);
+  }
+  return latest;
 }
 function findSession(sessions, name) {
   const exact = sessions.find((x) => x.name === name);
@@ -3722,6 +4042,8 @@ function questionOf(last) {
 function itemOf(s) {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;
+  if (s.status === "waiting" && s.lastEvent?.event === "PermissionRequest")
+    return { rank: 0, why: `asks: "${short(s.lastEvent.text ?? "pick an option")}"`, action: "reply to its thread" };
   if (s.status === "waiting" && s.lastEvent?.type === "permission_prompt")
     return {
       rank: 0,
@@ -3883,6 +4205,146 @@ function hookEvents(e, session) {
   return [];
 }
 
+// src/daemon/picker.ts
+function pickerText(name, questions) {
+  const many = questions.length > 1;
+  const blocks = questions.map((q, i) => {
+    const head = `${many ? `${i + 1}. ` : ""}${q.header ? `*${defang(q.header)}* \xB7 ` : ""}${defang(q.question)}`;
+    const options = q.options.map((o, j) => `   ${j + 1}. ${defang(o.label)}${o.description && o.description !== o.label ? ` \u2014 _${defang(o.description)}_` : ""}`);
+    return [head + (q.multiSelect ? " _(pick any)_" : ""), ...options].join(`
+`);
+  });
+  const how = many ? "Reply here with one line per question, in order: a number, or your own words." : "Reply here with a number, or in your own words.";
+  return `\u2753 *${name}* asks:
+${blocks.join(`
+
+`)}
+_${how}_`;
+}
+function picked(q, reply) {
+  const tokens = reply.split(/[\s,]+/).filter(Boolean);
+  const byNumber = tokens.every((t) => /^\d+$/.test(t) && Number(t) >= 1 && Number(t) <= q.options.length);
+  if (tokens.length && byNumber && (q.multiSelect || tokens.length === 1))
+    return [...new Set(tokens)].map((t) => q.options[Number(t) - 1].label).join(", ");
+  return q.options.find((o) => o.label.toLowerCase() === reply.toLowerCase())?.label;
+}
+function readAnswers(questions, reply) {
+  const text = reply.trim();
+  const lines = questions.length === 1 ? [text] : text.split(`
+`).map((l) => l.trim()).filter(Boolean);
+  if (!text || lines.length !== questions.length)
+    return { problem: `Answer each of the ${questions.length} questions on its own line, in order.` };
+  const answers = {};
+  for (const [i, q] of questions.entries()) {
+    const line = lines[i];
+    if (/^[\d\s,]+$/.test(line) && !picked(q, line))
+      return {
+        problem: `${q.header ?? q.question}: pick ${q.multiSelect ? "numbers" : "one number"} from 1 to ${q.options.length}, or answer in your own words.`
+      };
+    answers[q.question] = picked(q, line) ?? line;
+  }
+  return { answers };
+}
+function readPick(questions, message) {
+  const q = questions.length === 1 ? questions[0] : undefined;
+  const label = q && picked(q, message.trim());
+  return q && label ? { [q.question]: label } : undefined;
+}
+var answersLine = (answers) => Object.values(answers).map((a) => defang(a.replace(/\s+/g, " "))).join(" \xB7 ");
+
+// src/daemon/pickers.ts
+function createPickers(deps) {
+  const { log } = deps;
+  const pickers = new Map;
+  async function relay(a) {
+    if (!a?.sessionId || !Array.isArray(a.questions) || !a.questions.length)
+      return {};
+    const since = Date.now();
+    settle(a.sessionId);
+    const s = await deps.sessionInfo(a.sessionId);
+    return new Promise((resolve) => {
+      const p = { sessionId: a.sessionId, name: s.name, cwd: a.cwd, questions: a.questions, since, resolve };
+      pickers.set(a.sessionId, p);
+      p.timer = setTimeout(() => void post(p), s.unattended ? 0 : deps.graceMs);
+    });
+  }
+  async function post(p) {
+    if (pickers.get(p.sessionId) !== p)
+      return;
+    try {
+      const { bridge, thread } = await deps.route({ cwd: p.cwd, session: p.name });
+      const text = pickerText(p.name, p.questions);
+      const id = await bridge.post(text, { thread, session: p.name, expect_reply: true });
+      p.posted = { bridge, id, thread, text };
+    } catch (e) {
+      log("picker: posting failed", p.name, e?.message ?? e);
+      if (pickers.get(p.sessionId) === p) {
+        settle(p.sessionId);
+        deps.unposted({
+          sessionId: p.sessionId,
+          cwd: p.cwd,
+          question: p.questions.map((q) => q.question).join(`
+`)
+        });
+      }
+      return;
+    }
+    if (p.outcome)
+      return close(p);
+    deps.scheduleWaitingList();
+    deps.asks({ sessionId: p.sessionId, cwd: p.cwd, question: p.questions.map((q) => q.question).join(`
+`) });
+  }
+  function settle(sessionId, answers, outcome = "_Closed_") {
+    const p = pickers.get(sessionId);
+    if (!p)
+      return;
+    pickers.delete(sessionId);
+    clearTimeout(p.timer);
+    p.resolve({ answers });
+    p.outcome = outcome;
+    close(p);
+  }
+  async function close(p) {
+    if (!p.posted || !p.outcome)
+      return;
+    const { bridge, id, text } = p.posted;
+    bridge.answered(p.name);
+    deps.scheduleWaitingList();
+    await bridge.update(id, `${text.slice(0, text.lastIndexOf(`
+`))}
+${p.outcome}`).catch((e) => log("picker: update failed", p.name, e?.message ?? e));
+  }
+  function ended(e) {
+    const p = pickers.get(e.session_id);
+    if (!p || e.ts < p.since)
+      return;
+    if (e.event === "PostToolUse")
+      settle(e.session_id, undefined, `\u2705 _Answered in the terminal${e.message ? `: ${defang(e.message.replace(/\s*\n\s*/g, " \xB7 "))}` : ""}_`);
+    else if (e.event === "PostToolUseFailure" || e.event === "Stop" || e.event === "SessionEnd")
+      settle(e.session_id, undefined, "_Closed in the terminal_");
+  }
+  async function answer(meta, text) {
+    const name = meta.session || meta.awaiting;
+    const p = name ? [...pickers.values()].find((x) => x.posted && x.name === name) : undefined;
+    if (!p?.posted)
+      return false;
+    if (!meta.session) {
+      const answers = readPick(p.questions, text);
+      if (answers)
+        settle(p.sessionId, answers, `\u2705 _${answersLine(answers)}_`);
+      return !!answers;
+    }
+    const read = readAnswers(p.questions, text);
+    if ("answers" in read)
+      settle(p.sessionId, read.answers, `\u2705 _${answersLine(read.answers)}_`);
+    else
+      await p.posted.bridge.post(read.problem, { thread: p.posted.thread, session: p.name, expect_reply: true }).catch((e) => log("picker: posting failed", p.name, e?.message ?? e));
+    return true;
+  }
+  return { relay, ended, answer, has: (sessionId) => pickers.has(sessionId) };
+}
+
 // src/daemon/pinned-waiting-list.ts
 async function showWaitingList(m, prev, text, log) {
   if (prev?.text === text)
@@ -3939,17 +4401,17 @@ var originThread = (bridge, origin) => origin && bridge.workspace === origin.wor
 var agentUpdatesPostsIt = (e, s, agentUpdatesOn) => e.event === "Stop" && !!s.spawned && !s.role && agentUpdatesOn;
 
 // src/daemon/tail.ts
-import { closeSync, openSync, readSync, statSync as statSync7 } from "fs";
+import { closeSync as closeSync2, openSync as openSync2, readSync as readSync2, statSync as statSync8 } from "fs";
 function tailLines(path, onLine, everyMs = 2000) {
   let offset = 0;
   try {
-    offset = statSync7(path).size;
+    offset = statSync8(path).size;
   } catch {}
   let partial = "";
   return setInterval(() => {
     let size = 0;
     try {
-      size = statSync7(path).size;
+      size = statSync8(path).size;
     } catch {
       return;
     }
@@ -3957,10 +4419,10 @@ function tailLines(path, onLine, everyMs = 2000) {
       offset = 0;
     if (size === offset)
       return;
-    const fd = openSync(path, "r");
+    const fd = openSync2(path, "r");
     const buf = Buffer.alloc(size - offset);
-    readSync(fd, buf, 0, buf.length, offset);
-    closeSync(fd);
+    readSync2(fd, buf, 0, buf.length, offset);
+    closeSync2(fd);
     offset = size;
     const lines = (partial + buf.toString("utf8")).split(`
 `);
@@ -3991,6 +4453,8 @@ async function push(kind, content, meta = {}) {
   if (kind === "user_message")
     scheduleWaitingList(WAITING_LIST_AFTER_USER_MS);
   if (kind === "user_message" || kind === "task_request") {
+    if (kind === "user_message" && await pickers.answer(meta, content))
+      return log("answer for a picker", meta.session || meta.awaiting);
     if (kind === "user_message" && meta.session && host.answer(meta.session, content))
       return log("answer for an extension", meta.session);
     host.emit("message", {
@@ -4040,6 +4504,8 @@ async function request(name, args) {
   await ready;
   if (name === "tools")
     return coordinatorTools(active.workspaces.map((w) => `${w.name} (${describeMessengers(w)})`).join(", "));
+  if (name === "picker")
+    return pickers.relay(args);
   if (name === "call")
     return callTool(String(args?.name), args?.arguments ?? {});
   throw new Error(`unknown request: ${name}`);
@@ -4128,6 +4594,7 @@ function debounced(key, ms = 60000) {
   lastPushed.set(key, Date.now());
   return false;
 }
+var ATTENDED_GRACE_MS = 45000;
 var NEEDS_INPUT = new Set(["permission_prompt", "agent_needs_input", "elicitation_dialog"]);
 async function refOf(sessionId, cwd) {
   const seen = lastSnapshot?.sessions.find((s) => s.sessionId === sessionId);
@@ -4145,6 +4612,20 @@ async function refOf(sessionId, cwd) {
   };
 }
 var agentUpdatesOn = () => host.loaded.some((l) => l.name === "builtin:agent-updates" && !l.error);
+async function pingNeedsInput(a) {
+  if (debounced(`input:${a.sessionId}`))
+    return;
+  const reason = a.type === "permission_prompt" ? "permission_prompt" : "input";
+  emit([
+    { name: "session.asks", payload: { session: await refOf(a.sessionId, a.cwd), question: a.question, reason } }
+  ]);
+  await push("agent_needs_input", a.question, {
+    workspace: workspaceOf(a.cwd),
+    session: a.session,
+    reason: a.type ?? "",
+    cwd: a.cwd ?? ""
+  });
+}
 async function onEvent(e) {
   if (e.cwd)
     cwdById.set(e.session_id, e.cwd);
@@ -4152,6 +4633,7 @@ async function onEvent(e) {
   if (noteSession(spawned, e.session_id, e.transcript_path))
     writeJson(PATHS.spawned, spawned);
   scheduleWaitingList();
+  pickers.ended(e);
   const workspace = workspaceOf(e.cwd);
   if (e.event === "Notification" && e.type && NEEDS_INPUT.has(e.type)) {
     setTimeout(async () => {
@@ -4160,22 +4642,16 @@ async function onEvent(e) {
       const s = await sessionInfo(e.session_id);
       if (s.status && s.status !== "waiting")
         return;
-      if (debounced(`input:${e.session_id}`))
+      if (pickers.has(e.session_id))
         return;
-      const reason = e.type === "permission_prompt" ? "permission_prompt" : "input";
-      emit([
-        {
-          name: "session.asks",
-          payload: { session: await refOf(e.session_id, e.cwd), question: e.message ?? "waiting for input", reason }
-        }
-      ]);
-      await push("agent_needs_input", e.message ?? "waiting for input", {
-        workspace,
-        session: s.name,
-        reason: e.type ?? "",
-        cwd: e.cwd ?? ""
+      await pingNeedsInput({
+        sessionId: e.session_id,
+        cwd: e.cwd,
+        question: e.message ?? "waiting for input",
+        type: e.type,
+        session: s.name
       });
-    }, 45000);
+    }, ATTENDED_GRACE_MS);
     return;
   }
   if (e.event === "Stop" || e.event === "SessionEnd") {
@@ -4207,6 +4683,31 @@ function tailEvents() {
     } catch {}
   });
 }
+var pickers = createPickers({
+  route: async (a) => {
+    const where = {
+      workspace: workspaceOf(a.cwd),
+      session: a.session
+    };
+    const bridge = await route(where);
+    return { bridge, thread: where.thread };
+  },
+  sessionInfo: async (sessionId) => {
+    agentsCache.at = 0;
+    return sessionInfo(sessionId);
+  },
+  asks: async ({ sessionId, cwd, question }) => emit([{ name: "session.asks", payload: { session: await refOf(sessionId, cwd), question, reason: "question" } }]),
+  unposted: async ({ sessionId, cwd, question }) => {
+    agentsCache.at = 0;
+    const s = await sessionInfo(sessionId);
+    if (s.status && s.status !== "waiting")
+      return;
+    await pingNeedsInput({ sessionId, cwd, question, type: "agent_needs_input", session: s.name });
+  },
+  scheduleWaitingList: () => scheduleWaitingList(),
+  log,
+  graceMs: ATTENDED_GRACE_MS
+});
 async function digest() {
   try {
     const { snapshot, changes: diffed, first } = await snapshotDiff();
@@ -4312,7 +4813,8 @@ function newHost() {
       return (await route(where)).post(text, {
         thread: where.thread,
         session: where.session,
-        expect_reply: where.expect_reply
+        expect_reply: where.expect_reply,
+        markdown: where.markdown
       });
     },
     spawn: (opts) => spawnAgent(opts),
@@ -4575,9 +5077,55 @@ autonomy: ${lowerLevel(f.autonomy ?? "notify", c.autonomy)} (repo ${f.autonomy ?
     say(disabledNote("nothing runs the step again until you turn it back on") ?? `#${run.number} runs its held step again within a minute or so.`);
     return;
   }
+  if (positionals[0] === "start")
+    return start(positionals[1], runs);
   if (values.json)
     return console.log(JSON.stringify(runs, null, 2));
   say(formatRuns(Object.values(runs)), disabledNote("these PRs stay where they are"));
+}
+async function start(want, runs) {
+  if (!want)
+    throw new Error(`usage: ${import_picocolors.default.cyan("remy factory start <pr-url|number|branch>")}`);
+  const p = Bun.spawnSync(["gh", "pr", "view", want, "--json", "url,number,title,headRefName,headRefOid,state,isDraft"], { stdout: "pipe", stderr: "pipe" });
+  if (p.exitCode !== 0)
+    throw new Error(`gh pr view ${want}: ${p.stderr.toString().trim()}`);
+  const pr = JSON.parse(p.stdout.toString());
+  const c = loadConfig();
+  const had = runs[pr.url];
+  const repo = repoOfUrl(pr.url);
+  if (had && isActive(had) && pr.state === "OPEN")
+    return say(`${repo}#${pr.number} is already in the factory; \`remy factory\` shows where.`);
+  const root = trustedRepos(c).find((r) => r.root && githubRepoOf(r.root)?.toLowerCase() === repo.toLowerCase())?.root;
+  const l = root ? await loadFactory(root) : undefined;
+  appendReport(startReport(pr, c, root, l));
+  say(disabledNote("nothing starts it until you turn it back on") ?? `${repo}#${pr.number} starts its pipeline within a minute or so. A held run doesn't restart on new commits: start it again.`);
+}
+var repoOfUrl = (url) => {
+  const m = url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+  if (!m)
+    throw new Error(`${url} isn't a github.com/<owner>/<repo>/pull/<number> URL`);
+  return m[1];
+};
+function startReport(pr, c, root, l) {
+  const repo = repoOfUrl(pr.url);
+  if (pr.state !== "OPEN" || pr.isDraft)
+    throw new Error(`${repo}#${pr.number} is ${pr.isDraft ? "a draft" : pr.state.toLowerCase()}; the factory takes open PRs`);
+  if (!root)
+    throw new Error(`${repo} isn't in extensions.repos in ${PATHS.config}, so the factory doesn't run there`);
+  if (!l?.factory)
+    throw new Error(`${join11(root, ".remy", "factory.ts")}: ${l?.error ?? "not found"}`);
+  if (lowerLevel(l.factory.autonomy ?? "notify", c.autonomy) === "notify")
+    throw new Error(`autonomy is notify for ${repo}, so the factory only reports; \`remy factory check\` says why`);
+  const workspace = workspaceFor({ cwd: root, repo }, c)?.name;
+  if (!workspace)
+    throw new Error(`no workspace in ${PATHS.config} to report to`);
+  return {
+    pr: pr.url,
+    step: "",
+    kind: "start",
+    head: pr.headRefOid,
+    start: { number: pr.number, title: pr.title, repo, repoDir: root, branch: pr.headRefName, workspace }
+  };
 }
 async function report(args) {
   const { values, positionals } = parse(args, { pr: { type: "string" }, summary: { type: "string" } });
@@ -4642,7 +5190,7 @@ function rowOf(rows, name, spawn) {
     return rows.find((r) => r.sessionId.startsWith(spawn.id));
   return rows.filter((r) => r.name === name).sort((a, b) => b.startedAt - a.startedAt)[0];
 }
-var latestEvents = () => {
+var latestEvents2 = () => {
   const latest = new Map;
   for (const e of readEvents())
     latest.set(e.session_id, e);
@@ -4651,11 +5199,11 @@ var latestEvents = () => {
 var realToResumeWorld = {
   spawned: () => readJson(PATHS.spawned, {}),
   agents: () => listAgents(true),
-  latest: latestEvents,
+  latest: latestEvents2,
   exists: existsSync9,
   lookup: async (cwd) => {
     const { branch, repo } = await gitInfo(cwd);
-    return { repo, pr: branch && !DEFAULT_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
+    return { repo, pr: branch && !NO_PR_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
   }
 };
 async function toResume(now = Date.now(), world = {}) {
@@ -4799,7 +5347,7 @@ async function spawn(args) {
 
 // src/cli/commands/start.ts
 import { spawn as spawn2 } from "child_process";
-import { openSync as openSync2 } from "fs";
+import { openSync as openSync3 } from "fs";
 import { homedir as homedir4 } from "os";
 import { join as join12 } from "path";
 
@@ -4878,7 +5426,7 @@ async function doctor() {
 }
 
 // src/cli/commands/start.ts
-async function start(extra) {
+async function start2(extra) {
   const { rows } = await doctor();
   const c = loadConfig();
   const problems = blocking(rows);
@@ -4961,7 +5509,7 @@ async function ensureDaemon(cwd) {
     for (const until = Date.now() + 5000;Date.now() < until && await daemonStatus(); )
       await Bun.sleep(100);
   }
-  const out = openSync2(PATHS.log, "a");
+  const out = openSync3(PATHS.log, "a");
   const env = { ...process.env, REMY_DAEMON_SERVICE: "0" };
   spawn2(process.execPath, [join12(PLUGIN_ROOT, "dist", "cli.js"), "daemon"], {
     cwd,
@@ -5346,6 +5894,7 @@ async function trace(args) {
 }
 
 // src/cli/hook.ts
+var PICKER_WAIT_MS = 24 * 60 * 60000;
 async function runHook() {
   if (process.env.REMY_ROLE === "coordinator")
     return;
@@ -5364,13 +5913,15 @@ async function runHook() {
       console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", sessionTitle: name } }));
     return;
   }
+  if (input.hook_event_name === "PermissionRequest")
+    return relayPicker(input);
   const ev = {
     ts: Date.now(),
     event: input.hook_event_name,
-    type: input.notification_type ?? input.reason,
+    type: input.notification_type ?? input.reason ?? input.tool_name,
     session_id: input.session_id,
     cwd: input.cwd,
-    message: trim(input.message, 500),
+    message: trim(input.message ?? answered(input), 500),
     last: trim(input.last_assistant_message, 1500),
     transcript_path: input.transcript_path,
     permission_mode: input.permission_mode
@@ -5378,6 +5929,39 @@ async function runHook() {
   if (process.env.REMY_HOOK_DEBUG)
     ev.message = trim(JSON.stringify(Object.keys(input)), 500);
   appendEvent(ev);
+}
+async function relayPicker(input) {
+  const questions = input.tool_input?.questions;
+  if (input.tool_name !== "AskUserQuestion" || !Array.isArray(questions))
+    return;
+  appendEvent({
+    ts: Date.now(),
+    event: "PermissionRequest",
+    type: input.tool_name,
+    session_id: input.session_id,
+    cwd: input.cwd,
+    message: trim(questions.map((q) => q?.question).join(" \xB7 "), 500),
+    transcript_path: input.transcript_path,
+    permission_mode: input.permission_mode
+  });
+  const reply = await askDaemon(PATHS.socket, "picker", { sessionId: input.session_id, cwd: input.cwd, questions }, PICKER_WAIT_MS).catch(() => {
+    return;
+  });
+  if (!reply?.answers)
+    return;
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PermissionRequest",
+      decision: { behavior: "allow", updatedInput: { ...input.tool_input, answers: reply.answers } }
+    }
+  }));
+}
+function answered(input) {
+  const answers = input.tool_response?.answers ?? input.tool_input?.answers;
+  if (!answers || typeof answers !== "object")
+    return;
+  return Object.entries(answers).map(([q, a]) => `${q} \u2192 ${a}`).join(`
+`);
 }
 function trim(s, n) {
   if (typeof s !== "string" || !s)
@@ -7079,8 +7663,8 @@ var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, 
     "Carry on an agent's own session in the background, stopping it first if it's stuck; keeps its history and worktree"
   ],
   [
-    "factory [--json] | factory retry <pr> | factory check [repo]",
-    "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts"
+    "factory [--json] | factory start <pr> | factory retry <pr> | factory check [repo]",
+    "Where each PR stands in its factory pipeline; start runs one no session of yours is on; retry runs a held step again; check validates a repo's .remy/factory.ts"
   ],
   ["report <step> pass|fail|fixed --pr <url> --summary <text>", "A factory agent's verdict on its step"],
   [
@@ -7103,7 +7687,7 @@ var COMMANDS = {
   trace,
   post,
   setup: async (args) => setup(parse(args, {}).positionals[0]),
-  start,
+  start: start2,
   daemon,
   doctor: async () => {
     const { ok, rows } = await doctor();

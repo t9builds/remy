@@ -9,6 +9,9 @@ export function formBody(params: Record<string, unknown>) {
   return form;
 }
 
+/** What Slack takes in a message's markdown blocks; longer text goes as plain text. */
+const MARKDOWN_MAX = 12_000;
+
 /** Minimal Slack Web API client over fetch. Retries once on 429 using Retry-After. */
 export class Slack {
   constructor(private token: string) {}
@@ -36,10 +39,12 @@ export class Slack {
     return r.channel.id;
   }
 
-  async post(channel: string, text: string, threadTs?: string): Promise<string> {
+  /** `markdown` text goes in a markdown block, which Slack renders itself; `text` stays the notification's fallback. */
+  async post(channel: string, text: string, threadTs?: string, markdown?: boolean): Promise<string> {
     const r = await this.call("chat.postMessage", {
       channel,
       text,
+      blocks: markdown && text.length <= MARKDOWN_MAX ? [{ type: "markdown", text }] : undefined,
       thread_ts: threadTs,
       unfurl_links: false,
       unfurl_media: false,

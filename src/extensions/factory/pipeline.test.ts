@@ -278,6 +278,108 @@ describe("the ADR-0004 pipeline", () => {
     ]);
   });
 
+  describe("an unanswered question", () => {
+    const DAY = 24 * 60 * 60_000;
+
+    test("a fix offer expires after 3 days and the run ends", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      Object.assign(run, { step: 8, mergeSha: "mmm" });
+      await go(run, env);
+      w.report("fail", "500 on /login");
+      await go(run, env);
+      expect(run.stage).toBe("asking");
+      expect(run.ask!.purpose).toBe("fix");
+      w.t += 3 * DAY - 1000;
+      await go(run, env);
+      expect(run.stage).toBe("asking");
+      w.t += 2000;
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      expect(run.reason).toBe("no answer to the fix offer in 3 days");
+      expect(run.ask).toBeUndefined();
+    });
+
+    test("a yes before the expiry still ends the run as before", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      Object.assign(run, { step: 8, mergeSha: "mmm" });
+      await go(run, env);
+      w.report("fail", "500 on /login");
+      await go(run, env);
+      w.t += 2 * DAY;
+      run.ask!.answer = "yes";
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      expect(run.reason).toBe("a fix was started");
+    });
+
+    test("a run that expired stays done on later ticks", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      Object.assign(run, { step: 8, mergeSha: "mmm" });
+      await go(run, env);
+      w.report("fail", "500 on /login");
+      await go(run, env);
+      w.t += 4 * DAY;
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      expect(run.reason).toBe("no answer to the fix offer in 3 days");
+    });
+
+    test("an answer set after 3 days but before the next tick still counts", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      Object.assign(run, { step: 8, mergeSha: "mmm" });
+      await go(run, env);
+      w.report("fail", "500 on /login");
+      await go(run, env);
+      w.t += 4 * DAY;
+      run.ask!.answer = "yes";
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      expect(run.reason).toBe("a fix was started");
+    });
+
+    test("an empty answer is no answer: the offer still expires", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      Object.assign(run, { step: 8, mergeSha: "mmm" });
+      await go(run, env);
+      w.report("fail", "500 on /login");
+      await go(run, env);
+      run.ask!.answer = "";
+      w.t += 4 * DAY;
+      await go(run, env);
+      expect(run.stage).toBe("done");
+      expect(run.reason).toBe("no answer to the fix offer in 3 days");
+    });
+
+    test("an approval or a continue question waits however long it takes", async () => {
+      const { w, env } = world();
+      const run = newRun();
+      await go(run, env, ADR, "verify");
+      w.report("pass", "all good");
+      await go(run, env, ADR, "verify");
+      expect(run.ask!.purpose).toBe("approve");
+      w.t += 30 * DAY;
+      await go(run, env, ADR, "verify");
+      expect(run.stage).toBe("asking");
+
+      const second = newRun();
+      Object.assign(second, { step: 5, mergeSha: "mmm" });
+      await go(second, env);
+      w.report("fail", "touches billing");
+      await go(second, env);
+      expect(second.ask!.purpose).toBe("continue");
+      w.t += 30 * DAY;
+      await go(second, env);
+      expect(second.stage).toBe("asking");
+    });
+  });
+
   test("a failure that asks or alerts posts only its own message", async () => {
     const { w, env } = world();
     const run = newRun();
@@ -333,6 +435,87 @@ describe("the ADR-0004 pipeline", () => {
     w.builds.set("mmm:cloudbuild", { status: "failed", id: "b9", detail: "failure" });
     await go(run, env);
     expect(run.reason).toBe("the dev deploy of mmm failed (b9): failure");
+  });
+
+  const AUTH =
+    "ERROR: (gcloud.builds.list) There was a problem refreshing your current auth tokens: Reauthentication failed.";
+
+  test("an expired gcloud login holds the deploy wait at once, saying Remy couldn't check", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 3, mergeSha: "mmmmmmmm" });
+    w.builds.set("mmmmmmmm:cloudbuild", { status: "error", detail: AUTH });
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("couldn't check the dev deploy of mmmmmmm: gcloud needs a login; run `gcloud auth login`");
+  });
+
+  test("gcloud with no active account holds the deploy wait at once", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 3, mergeSha: "mmmmmmmm" });
+    w.builds.set("mmmmmmmm:cloudbuild", {
+      status: "error",
+      detail: "ERROR: (gcloud.builds.list) You do not currently have an active account selected.",
+    });
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("couldn't check the dev deploy of mmmmmmm: gcloud needs a login; run `gcloud auth login`");
+  });
+
+  test("gcloud with no valid credentials holds the deploy wait at once", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 3, mergeSha: "mmmmmmmm" });
+    w.builds.set("mmmmmmmm:cloudbuild", {
+      status: "error",
+      detail:
+        "ERROR: (gcloud.builds.list) Your current active account [you@example.com] does not have any valid credentials",
+    });
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("couldn't check the dev deploy of mmmmmmm: gcloud needs a login; run `gcloud auth login`");
+  });
+
+  test("a deploy that never shows up holds after the timeout saying there is no deploy", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 3, mergeSha: "mmm" });
+    w.builds.set("mmm:cloudbuild", { status: "none" });
+    await go(run, env);
+    expect(run.stage).toBe("running");
+    w.t += 61 * 60_000;
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe("no dev deploy of mmm after 60 min");
+  });
+
+  test("another check error waits out the timeout, then holds saying Remy couldn't check", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 3, mergeSha: "mmm" });
+    w.builds.set("mmm:cloudbuild", { status: "error", detail: "ERROR: network unreachable" });
+    await go(run, env);
+    expect(run.stage).toBe("running");
+    w.t += 61 * 60_000;
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(run.reason).toBe(`couldn't check the dev deploy of mmm after 60 min (ERROR: network unreachable)`);
+  });
+
+  test("a retry after a check error carries on from the deploy wait", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    Object.assign(run, { step: 3, mergeSha: "mmm" });
+    w.builds.set("mmm:cloudbuild", { status: "error", detail: AUTH });
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    w.builds.set("mmm:cloudbuild", { status: "success" });
+    w.t += 1000;
+    w.reports.push({ pr: URL, at: w.t, step: "", kind: "retry" });
+    await go(run, env);
+    expect(run.stage).not.toBe("held");
+    expect(run.step).toBeGreaterThan(3);
   });
 });
 
@@ -713,4 +896,51 @@ test("validate reports a broken pipeline", () => {
     'step 4 (action deploy): no environment "prod" in environments',
     'gate g: no agent step "nope"',
   ]);
+});
+
+describe("agents a run lets go of", () => {
+  test("a PR merged by hand while an agent is on the step closes that agent", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env);
+    expect(w.closed).toEqual([]);
+    w.pr = { ...w.pr, state: "MERGED", mergeSha: "mmm" };
+    // The agent is still working and never reports.
+    await go(run, env);
+    expect(w.closed).toEqual(["agent1"]);
+    expect(run.agent?.name).not.toBe("agent1");
+  });
+
+  test("a PR closed by hand closes the agent too", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env);
+    w.pr = { ...w.pr, state: "CLOSED" };
+    await go(run, env);
+    expect(run.stage).toBe("done");
+    expect(w.closed).toEqual(["agent1"]);
+  });
+
+  test("a retry of a run held on a stuck agent closes it", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env);
+    w.t += 61 * 60_000;
+    await go(run, env);
+    expect(run.stage).toBe("held");
+    expect(w.closed).toEqual([]);
+    w.t += 1000;
+    w.reports.push({ pr: URL, at: w.t, step: "", kind: "retry" });
+    await go(run, env);
+    expect(w.closed).toContain("agent1");
+  });
+
+  test("an agent that reported is closed once", async () => {
+    const { w, env } = world();
+    const run = newRun();
+    await go(run, env);
+    w.report("pass");
+    await go(run, env);
+    expect(w.closed.filter((n) => n === "agent1")).toEqual(["agent1"]);
+  });
 });

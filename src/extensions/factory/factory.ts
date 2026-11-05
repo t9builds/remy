@@ -3,9 +3,10 @@
  * its repo defines in `.remy/factory.ts`, for repos listed in `extensions.repos` only.
  *
  * On every tick it starts a run for each ready PR of a session on this machine (each person's Remy acts on its own
- * machine's PRs), moves every run on (pipeline.ts), and keeps the waiting list in step: a run in progress
- * keeps its session off the list, a held one is a judgment call on it. Autonomy is the lower of the repo's and
- * yours (ADR-0006). Step agents count against `maxFactoryAgents`, and a usage limit pauses new ones for a while.
+ * machine's PRs) and for each PR you named with `remy factory start` (ADR-0013), moves every run on (pipeline.ts),
+ * and keeps the waiting list in step: a run in progress keeps its session off the list, a held one is a judgment call
+ * on it. A start report is taken once: the `starts` state remembers it after its run is dropped. Autonomy is the lower of the repo's and yours (ADR-0006). Step agents count against `maxFactoryAgents`, and
+ * a usage limit pauses new ones for a while.
  */
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -14,7 +15,7 @@ import { type Factory, lowerLevel } from "../../sdk/factory";
 import { formatRuns } from "./format";
 import { deploy, deployed, mergePr, prDetail, readReports, repoRootOf } from "./live";
 import { type Loaded, loadFactory } from "./load";
-import { advance, type Env, isActive, type Run, YES } from "./pipeline";
+import { advance, type Env, fixOfferLapsed, isActive, type Run, YES } from "./pipeline";
 
 /** Claude Code's own words for a reached limit, e.g. "You've hit your session limit · resets 8:10pm (Europe/Prague)". */
 const LIMIT_NOTICE =
@@ -35,6 +36,8 @@ export const spawnHitUsageLimit = (message = "") =>
 const BACKOFF_MS = 30 * 60_000;
 /** Runs that need nothing more are dropped after this long. */
 const KEEP_MS = 7 * 24 * 3_600_000;
+/** What a run keeps about itself as it moves, rather than about its PR. */
+type NewRunState = "step" | "round" | "stage" | "since" | "stepSince" | "reports" | "approved";
 
 /** A PR the factory takes on: open, out of draft, not red, no changes requested, its author not mid-turn. */
 export const isReady = (s: SessionRef) =>
@@ -46,6 +49,9 @@ export const isReady = (s: SessionRef) =>
   s.pr.review !== "CHANGES_REQUESTED" &&
   s.status !== "busy";
 
+/** A step agent or fixer that no run has as its current agent. Sessions without the factory's role are never one. */
+const isOrphan = (s: SessionRef, current: Set<string>) => s.role === "factory" && !current.has(s.name);
+
 export default (remy: Remy) => createFactory()(remy);
 
 /** The factory extension; `world` replaces parts of the real gh/gcloud/claude world, for tests. */
@@ -55,9 +61,13 @@ export const createFactory =
     const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo] as const));
     const loaded = new Map<string, Loaded>();
     const runs = remy.state.get<Record<string, Run>>("runs", {});
+    // The `at` of the last start report taken for each PR: a report is used once, however long its run lives.
+    const starts = remy.state.get<Record<string, number>>("starts", {});
     let backoffUntil = remy.state.get("backoffUntil", 0);
+    const tried = new Set<string>();
     const save = () => {
       remy.state.set("runs", runs);
+      remy.state.set("starts", starts);
       remy.state.set("backoffUntil", backoffUntil);
     };
 
@@ -77,10 +87,17 @@ export const createFactory =
     const autonomy = (f: Factory) => lowerLevel(f.autonomy ?? "notify", remy.config.autonomy ?? "notify");
     const label = (r: Run) => `factory:${r.repo.split("/").pop()}#${r.number}`;
 
+    // Each run's pending ask, so a run that ends can withdraw its question.
+    const pendingAsks = new Map<string, AbortController>();
+
     function ask(run: Run, question: string) {
+      const ctl = new AbortController();
+      pendingAsks.set(run.pr, ctl);
       remy
-        .ask(question, { session: label(run), workspace: run.workspace })
+        .ask(question, { session: label(run), workspace: run.workspace, signal: ctl.signal })
+        // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 16); don't add to it
         .then(async (answer) => {
+          if (pendingAsks.get(run.pr) === ctl) pendingAsks.delete(run.pr);
           const r = runs[run.pr];
           if (!r?.ask || r.ask.answer !== undefined) return;
           if (r.ask.purpose === "fix" && YES.test(answer)) {
@@ -94,7 +111,10 @@ export const createFactory =
           r.ask.answer = answer;
           save();
         })
-        .catch((e) => remy.log("ask failed", run.pr, e?.message ?? e));
+        .catch((e) => {
+          if (pendingAsks.get(run.pr) === ctl) pendingAsks.delete(run.pr);
+          if (!ctl.signal.aborted) remy.log("ask failed", run.pr, e?.message ?? e);
+        });
     }
 
     const env: Env = {
@@ -106,7 +126,7 @@ export const createFactory =
       canStartAgent: () =>
         Date.now() >= backoffUntil &&
         Object.values(runs).filter((r) => (r.stage === "agent" || r.stage === "fixing") && r.agent).length <
-          (remy.config.maxFactoryAgents ?? 2),
+          (remy.config.maxFactoryAgents ?? 5),
       spawn: async (run, step, prompt) => {
         try {
           const r = await remy.spawn({
@@ -137,7 +157,12 @@ export const createFactory =
     /** The waiting list: a run in progress keeps its session off it; a held one is a judgment call on it. */
     function syncWaitingList(run: Run) {
       const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
-      if (run.stage === "done") return remy.waitingList.remove(run.pr);
+      if (run.stage === "done") {
+        // A run that ended with its question unanswered (an offer that lapsed, a merge by hand) withdraws it.
+        pendingAsks.get(run.pr)?.abort();
+        pendingAsks.delete(run.pr);
+        return remy.waitingList.remove(run.pr);
+      }
       if (run.stage === "held")
         return remy.waitingList.add({
           ...base,
@@ -148,8 +173,27 @@ export const createFactory =
       remy.waitingList.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
     }
 
+    /** A run from the first step, when the repo has a factory that may do more than notify. True when it made one. */
+    async function startRun(fields: Omit<Run, NewRunState>) {
+      const f = await factoryAt(fields.repoDir);
+      if (!f || autonomy(f) === "notify") return false;
+      const now = Date.now();
+      runs[fields.pr] = {
+        ...fields,
+        step: 0,
+        round: 1,
+        stage: "running",
+        since: now,
+        stepSince: now,
+        reports: [],
+        approved: [],
+      };
+      remy.log("factory run started", fields.pr);
+      return true;
+    }
+
     let ticking = false;
-    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 40); don't add to it
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 61); don't add to it
     remy.on("tick", async () => {
       if (ticking) return;
       ticking = true;
@@ -160,10 +204,7 @@ export const createFactory =
           // A held or finished run starts over once its PR has new commits.
           if (had && (isActive(had) || had.head === pr.head)) continue;
           const root = repoRootOf(s.cwd);
-          const f = await factoryAt(root);
-          if (!f || autonomy(f) === "notify") continue;
-          const now = Date.now();
-          runs[pr.url] = {
+          await startRun({
             pr: pr.url,
             number: pr.number,
             title: pr.title,
@@ -174,15 +215,24 @@ export const createFactory =
             workspace: s.workspace,
             about: s.about,
             head: pr.head!,
-            step: 0,
-            round: 1,
-            stage: "running",
-            since: now,
-            stepSince: now,
-            reports: [],
-            approved: [],
-          };
-          remy.log("factory run started", pr.url);
+          });
+        }
+        // `remy factory start`: a PR no session of yours is on. A start report is taken once: when it makes a run, or
+        // when its run is already going. The reports file is never pruned, so what was taken is remembered apart from
+        // the run (which is dropped after KEEP_MS), or an old report would start a dropped run over. One whose repo's
+        // factory can't load right now is tried again on later ticks, until it is KEEP_MS old.
+        const now = Date.now();
+        for (const [url, at] of Object.entries(starts)) if (now - at > KEEP_MS) delete starts[url];
+        for (const r of env.reports()) {
+          if (r.kind !== "start" || !r.start || !r.head || now - r.at > KEEP_MS || r.at <= (starts[r.pr] ?? 0))
+            continue;
+          const had = runs[r.pr];
+          const { repo, number } = r.start;
+          if (
+            (had && (isActive(had) || had.since >= r.at)) ||
+            (await startRun({ ...r.start, pr: r.pr, head: r.head, session: `${repo.split("/").pop()}#${number}` }))
+          )
+            starts[r.pr] = r.at;
         }
         for (const [url, run] of Object.entries(runs)) {
           const f = await factoryAt(run.repoDir);
@@ -197,6 +247,17 @@ export const createFactory =
             remy.log("factory step failed", url, e?.message ?? e);
           }
           syncWaitingList(run);
+        }
+        // A factory agent no run is waiting on has nothing left to do: the PR was merged or closed by hand, or the run
+        // went on, or is gone. Its PR isn't on the session (it works detached, or on a branch of its own), so the
+        // test is whether any run has it as its current agent; one that does is never closed here.
+        const current = new Set(Object.values(runs).flatMap((r) => (r.agent ? [r.agent.name] : [])));
+        // Each is tried once per daemon run: a worktree with unpushed work is stopped rather than removed and stays
+        // listed, and a close that fails would fail again, so retrying every tick would only respawn `claude`.
+        for (const s of remy.sessions().filter((s) => isOrphan(s, current) && !tried.has(s.sessionId))) {
+          tried.add(s.sessionId);
+          remy.log("closing orphaned factory agent", s.name);
+          await env.close({ name: s.name, id: s.sessionId });
         }
       } finally {
         save();
@@ -224,9 +285,11 @@ export const createFactory =
         ),
     });
 
-    // Questions asked before a restart wait for their answers again.
+    // Questions asked before a restart wait for their answers again, except a fix offer that lapsed while the daemon
+    // was down: the next tick ends that run, and posting the question only to withdraw it would show a stale prompt.
     for (const run of Object.values(runs)) {
-      if (run.stage === "asking" && run.ask && run.ask.answer === undefined) ask(run, run.ask.question);
+      if (run.stage === "asking" && run.ask && run.ask.answer === undefined && !fixOfferLapsed(run, Date.now()))
+        ask(run, run.ask.question);
       syncWaitingList(run);
     }
   };
