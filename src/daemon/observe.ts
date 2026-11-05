@@ -25,6 +25,7 @@ export const sessionRef = (s: SessionView, workspace: string): SessionRef => ({
 });
 
 /** Events between two snapshots. No previous snapshot: nothing, so a (re)start doesn't replay what already was. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 32); don't add to it
 export function snapshotEvents(
   prev: Snapshot | undefined,
   next: Snapshot,

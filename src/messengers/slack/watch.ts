@@ -60,6 +60,7 @@ export class ChannelWatcher {
     for (const [k, at] of Object.entries(state.handled)) if (at < old) delete state.handled[k];
   }
 
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 27); don't add to it
   private async scanChannel(ch: { id: string; name: string }) {
     const msgs = await this.slack.recent(ch.id, 100);
     const prev = this.opts.state.channels[ch.id];

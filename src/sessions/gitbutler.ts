@@ -80,6 +80,7 @@ export function branchesNamed(command: string): string[] {
     .filter((b): b is string => !!b && !b.startsWith("gitbutler/"));
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 18); don't add to it
 function branchOf(words: string[]): string | undefined {
   // The program is the first word after any `NAME=value` assignments, called by name or by path.
   const at = words.findIndex((w) => !/^\w+=/.test(w));
@@ -130,6 +131,7 @@ function positional(args: string[], valued: string[]): string | undefined {
  * parentheses and newlines outside quotes end a command. Heredoc bodies and `#` comments are text, not commands, and
  * are skipped. Enough to find `but` and `gh` in what agents run, not a shell.
  */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 77); don't add to it
 export function simpleCommands(line: string): string[][] {
   const commands: string[][] = [];
   let words: string[] = [];

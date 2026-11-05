@@ -116,6 +116,7 @@ async function general(c: Config) {
   saveConfig(c);
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 20); don't add to it
 async function workspaces(c: Config) {
   if (!c.workspaces.length)
     p.log.info(
@@ -405,6 +406,7 @@ async function setupTelegram(name: string, existing?: TelegramSettings): Promise
 }
 
 /** Learn the user's Telegram ID from the first message they send the bot. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 20); don't add to it
 async function pairTelegram(tg: Telegram, username: string, workspace: string): Promise<number> {
   p.log.info(
     `Open ${pc.cyan(`https://t.me/${username}`)} and press ${pc.bold("Start")} (or send the bot any message).`,

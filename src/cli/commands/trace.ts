@@ -66,6 +66,7 @@ function resolvePr(want: string, w: TraceWorld): string | undefined {
   return hits[0];
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 22); don't add to it
 export function buildTrace(want: string, w: TraceWorld): Trace {
   const pr = resolvePr(want, w);
   const entries = Object.entries(w.spawned).filter(([name, s]) =>
@@ -181,6 +182,7 @@ function verdictLine(r: Report) {
 }
 
 /** The trace as text; `calls` adds every tool call in order. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 74); don't add to it
 export function formatTrace(t: Trace, opts: { calls?: boolean } = {}) {
   const out: string[] = [];
   if (t.pr) {

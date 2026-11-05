@@ -1,0 +1,10 @@
+{
+  "path": ["src"],
+  "format": ["typescript"],
+  "ignore": ["**/*.test.ts"],
+  "minLines": 8,
+  "minTokens": 80,
+  "threshold": 0,
+  "reporters": ["console"],
+  "gitignore": true
+}

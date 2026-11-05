@@ -68,6 +68,7 @@ export function questionOf(last: string | undefined): string | undefined {
 }
 
 /** Why `s` waits on the user, if it does. A session counts once, under its most urgent reason. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 25); don't add to it
 function itemOf(s: SessionView): Omit<WaitingItem, "session" | "sessionId" | "cwd" | "repo" | "pr"> | undefined {
   const pr = s.pr?.state === "OPEN" ? s.pr : undefined;
   const asked = s.lastEvent?.event === "Stop" ? questionOf(s.lastEvent.text) : undefined;

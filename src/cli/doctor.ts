@@ -39,6 +39,7 @@ function daemonCheck(s: DaemonStatus | undefined): CheckRow {
   };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 18); don't add to it
 export async function doctor(): Promise<{ ok: boolean; rows: CheckRow[] }> {
   const rows: CheckRow[] = [];
   const v = sh(["claude", "--version"]).out.match(/(\d+)\.(\d+)\.(\d+)/);
