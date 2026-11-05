@@ -495,11 +495,25 @@ class ExtensionHost {
         this.handlers.set(event, [...this.handlers.get(event) ?? [], { ext, fn }]);
       },
       post: (text, { expectReply, ...opts } = {}) => deps.post(text, { ...opts, expect_reply: expectReply }),
-      ask: async (question, opts) => {
+      ask: async (question, { signal, ...opts }) => {
+        signal?.throwIfAborted();
         if (this.asks.has(opts.session))
           throw new Error(`"${opts.session}" already waits for an answer`);
-        const answer = new Promise((resolve) => this.asks.set(opts.session, { ext, resolve }));
         const key = `ask:${opts.session}`;
+        let pending;
+        const answer = new Promise((resolve, reject) => {
+          pending = { ext, resolve };
+          this.asks.set(opts.session, pending);
+          signal?.addEventListener("abort", () => {
+            if (this.asks.get(opts.session) !== pending)
+              return;
+            this.asks.delete(opts.session);
+            this.entries.delete(`${ext}\x00${key}`);
+            deps.waitingListChanged();
+            reject(signal.reason);
+          }, { once: true });
+        });
+        answer.catch(() => {});
         addEntry({
           key,
           rank: 0,
@@ -513,9 +527,11 @@ class ExtensionHost {
         try {
           await deps.post(question, { ...opts, expect_reply: true });
         } catch (e) {
-          this.asks.delete(opts.session);
-          this.entries.delete(`${ext}\x00${key}`);
-          deps.waitingListChanged();
+          if (this.asks.get(opts.session) === pending) {
+            this.asks.delete(opts.session);
+            this.entries.delete(`${ext}\x00${key}`);
+            deps.waitingListChanged();
+          }
           throw e;
         }
         return answer;
@@ -1005,6 +1021,8 @@ function mergeability(d) {
   return "clean";
 }
 var GRACE_MS = 3 * 60000;
+var FIX_OFFER_TTL_MS = 3 * 24 * 60 * 60000;
+var fixOfferLapsed = (run, now) => run.ask?.purpose === "fix" && !run.ask.answer && now - run.since > FIX_OFFER_TTL_MS;
 var PUSH_WAIT_MS = 30 * 60000;
 var UNKNOWN_WAIT_MS = 15 * 60000;
 var isActive = (r) => r.stage !== "held" && r.stage !== "done";
@@ -1218,8 +1236,14 @@ async function stillWorking(run, env) {
 }
 var lastPass = (run, name) => run.reports.findLast((r) => r.step === name && (r.verdict === "pass" || r.verdict === "fixed"));
 async function advance(run, f, autonomy, env) {
-  for (let i = 0;i < 50 && await stepOnce(run, f, autonomy, env); i++)
-    ;
+  for (let i = 0;i < 50; i++) {
+    const had = run.agent;
+    const again = await stepOnce(run, f, autonomy, env);
+    if (had && run.agent !== had)
+      await env.close(had);
+    if (!again)
+      break;
+  }
 }
 async function stepOnce(run, f, autonomy, env) {
   const now = env.now();
@@ -1239,6 +1263,11 @@ async function stepOnce(run, f, autonomy, env) {
     if (await mergedByHand(run, f, env))
       return true;
     const a = run.ask;
+    if (fixOfferLapsed(run, now)) {
+      run.ask = undefined;
+      enter(run, "done", now, "no answer to the fix offer in 3 days");
+      return false;
+    }
     if (!a?.answer)
       return false;
     const yes = YES.test(a.answer);
@@ -1327,10 +1356,15 @@ async function reportOf(run, step, env) {
       hold(run, now, `${step.name} (${agent.name}) stopped without reporting`);
     return;
   }
-  await env.close(agent);
   run.agent = undefined;
   run.reports.push(report);
   return report;
+}
+async function overtaken(run, f, env) {
+  if (run.stage === "held" || run.mergeSha)
+    return;
+  const d = await env.pr(run.pr);
+  return d && d.state !== "OPEN" ? closed(run, d, f, env) : undefined;
 }
 async function fixing(run, f, env) {
   const step = fixerStep(f);
@@ -1351,7 +1385,7 @@ async function fixing(run, f, env) {
   }
   const report = await reportOf(run, step, env);
   if (!report)
-    return false;
+    return await overtaken(run, f, env) ?? false;
   const now = env.now();
   await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "fail")
@@ -1400,7 +1434,7 @@ async function resolving(run, f, env) {
   }
   const report = await reportOf(run, step, env);
   if (!report)
-    return false;
+    return await overtaken(run, f, env) ?? false;
   await env.notify(run, verdictText(run, step.name, report)).catch(() => {});
   if (report.verdict === "fail")
     return hold(run, now, `conflicts with \`${run.base ?? "its base"}\` need your call: ${report.summary ?? ""}`);
@@ -1434,7 +1468,7 @@ async function agentStep(run, step, f, env) {
   }
   const report = await reportOf(run, step, env);
   if (!report)
-    return false;
+    return await overtaken(run, f, env) ?? false;
   const summary = report.summary ?? "";
   const onFail = step.onFail ?? (step.onHold === "ask-human" ? "ask-human" : "fix");
   const holds = onFail === "hold" || onFail === "fix" && !fixable(run, f);
@@ -1463,6 +1497,7 @@ ${run.pr}`);
     return fix(run, f, env, `${step.name} failed`, summary);
   return hold(run, now, `${step.name}: ${summary}`);
 }
+var LOGIN_EXPIRED = /reauthentication|problem refreshing your current auth tokens|do not currently have an active account|does not have any valid credentials/i;
 async function waitStep(run, step, f, env) {
   const now = env.now();
   const minutes = step.timeoutMinutes ?? 60;
@@ -1493,9 +1528,14 @@ async function waitStep(run, step, f, env) {
     return next(run, now);
   if (b.status === "failed")
     return hold(run, now, `the ${step.env} deploy of ${run.mergeSha.slice(0, 7)} failed${b.id ? ` (${b.id})` : ""}${b.detail ? `: ${b.detail}` : ""}`);
-  if (b.status === "error")
+  const sha = run.mergeSha.slice(0, 7);
+  if (b.status === "error") {
+    if (LOGIN_EXPIRED.test(b.detail ?? ""))
+      return hold(run, now, `couldn't check the ${step.env} deploy of ${sha}: gcloud needs a login; run \`gcloud auth login\``);
     run.reason = b.detail;
-  return late ? hold(run, now, `no ${step.env} deploy of ${run.mergeSha.slice(0, 7)} after ${minutes} min${run.reason ? ` (${run.reason})` : ""}`) : false;
+    return late ? hold(run, now, `couldn't check the ${step.env} deploy of ${sha} after ${minutes} min${b.detail ? ` (${b.detail})` : ""}`) : false;
+  }
+  return late ? hold(run, now, `no ${step.env} deploy of ${sha} after ${minutes} min`) : false;
 }
 async function gateStep(run, step, f, env) {
   const now = env.now();
@@ -1587,6 +1627,7 @@ function closed(run, d, f, env) {
     run.mergeSha = d.mergeSha;
     return next(run, env.now(), merge + 1);
   }
+  run.agent = undefined;
   enter(run, "done", env.now(), d.state === "MERGED" ? "merged" : "the PR was closed");
   return false;
 }
@@ -1601,14 +1642,18 @@ var spawnHitUsageLimit = (message = "") => message.split(/\n|: /).some((part) =>
 var BACKOFF_MS = 30 * 60000;
 var KEEP_MS = 7 * 24 * 3600000;
 var isReady = (s) => !s.role && !!s.pr?.head && s.pr.state === "OPEN" && !s.pr.draft && s.pr.ci !== "fail" && s.pr.review !== "CHANGES_REQUESTED" && s.status !== "busy";
+var isOrphan = (s, current) => s.role === "factory" && !current.has(s.name);
 var factory_default = (remy) => createFactory()(remy);
 var createFactory = (world = {}) => (remy) => {
   const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo]));
   const loaded = new Map;
   const runs = remy.state.get("runs", {});
+  const starts = remy.state.get("starts", {});
   let backoffUntil = remy.state.get("backoffUntil", 0);
+  const tried = new Set;
   const save = () => {
     remy.state.set("runs", runs);
+    remy.state.set("starts", starts);
     remy.state.set("backoffUntil", backoffUntil);
   };
   async function factoryAt(root) {
@@ -1627,8 +1672,13 @@ var createFactory = (world = {}) => (remy) => {
   }
   const autonomy = (f) => lowerLevel(f.autonomy ?? "notify", remy.config.autonomy ?? "notify");
   const label = (r) => `factory:${r.repo.split("/").pop()}#${r.number}`;
+  const pendingAsks = new Map;
   function ask(run, question) {
-    remy.ask(question, { session: label(run), workspace: run.workspace }).then(async (answer) => {
+    const ctl = new AbortController;
+    pendingAsks.set(run.pr, ctl);
+    remy.ask(question, { session: label(run), workspace: run.workspace, signal: ctl.signal }).then(async (answer) => {
+      if (pendingAsks.get(run.pr) === ctl)
+        pendingAsks.delete(run.pr);
       const r = runs[run.pr];
       if (!r?.ask || r.ask.answer !== undefined)
         return;
@@ -1642,7 +1692,12 @@ var createFactory = (world = {}) => (remy) => {
       }
       r.ask.answer = answer;
       save();
-    }).catch((e) => remy.log("ask failed", run.pr, e?.message ?? e));
+    }).catch((e) => {
+      if (pendingAsks.get(run.pr) === ctl)
+        pendingAsks.delete(run.pr);
+      if (!ctl.signal.aborted)
+        remy.log("ask failed", run.pr, e?.message ?? e);
+    });
   }
   const env = {
     now: Date.now,
@@ -1678,8 +1733,11 @@ var createFactory = (world = {}) => (remy) => {
   };
   function syncWaitingList(run) {
     const base = { key: run.pr, label: run.session, session: run.session, workspace: run.workspace, url: run.pr };
-    if (run.stage === "done")
+    if (run.stage === "done") {
+      pendingAsks.get(run.pr)?.abort();
+      pendingAsks.delete(run.pr);
       return remy.waitingList.remove(run.pr);
+    }
     if (run.stage === "held")
       return remy.waitingList.add({
         ...base,
@@ -1688,6 +1746,26 @@ var createFactory = (world = {}) => (remy) => {
         action: `decide, then \`remy factory retry ${run.pr}\``
       });
     remy.waitingList.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
+  }
+  async function startRun(fields) {
+    const f = await factoryAt(fields.repoDir);
+    if (!f || autonomy(f) === "notify")
+      return false;
+    const now = Date.now();
+    const had = runs[fields.pr];
+    runs[fields.pr] = {
+      ...fields,
+      step: 0,
+      round: 1,
+      stage: "running",
+      since: now,
+      stepSince: now,
+      reports: [],
+      approved: [],
+      earlier: had && [...had.earlier ?? [], ...had.agent ? [{ name: had.agent.name, id: had.agent.id }] : []]
+    };
+    remy.log("factory run started", fields.pr);
+    return true;
   }
   let ticking = false;
   remy.on("tick", async () => {
@@ -1701,11 +1779,7 @@ var createFactory = (world = {}) => (remy) => {
         if (had && (isActive(had) || had.head === pr.head))
           continue;
         const root = repoRootOf(s.cwd);
-        const f = await factoryAt(root);
-        if (!f || autonomy(f) === "notify")
-          continue;
-        const now = Date.now();
-        runs[pr.url] = {
+        await startRun({
           pr: pr.url,
           number: pr.number,
           title: pr.title,
@@ -1715,20 +1789,20 @@ var createFactory = (world = {}) => (remy) => {
           session: s.name,
           workspace: s.workspace,
           about: s.about,
-          head: pr.head,
-          step: 0,
-          round: 1,
-          stage: "running",
-          since: now,
-          stepSince: now,
-          reports: [],
-          approved: [],
-          earlier: had && [
-            ...had.earlier ?? [],
-            ...had.agent ? [{ name: had.agent.name, id: had.agent.id }] : []
-          ]
-        };
-        remy.log("factory run started", pr.url);
+          head: pr.head
+        });
+      }
+      const now = Date.now();
+      for (const [url, at] of Object.entries(starts))
+        if (now - at > KEEP_MS)
+          delete starts[url];
+      for (const r of env.reports()) {
+        if (r.kind !== "start" || !r.start || !r.head || now - r.at > KEEP_MS || r.at <= (starts[r.pr] ?? 0))
+          continue;
+        const had = runs[r.pr];
+        const { repo, number } = r.start;
+        if (had && (isActive(had) || had.since >= r.at) || await startRun({ ...r.start, pr: r.pr, head: r.head, session: `${repo.split("/").pop()}#${number}` }))
+          starts[r.pr] = r.at;
       }
       for (const [url, run] of Object.entries(runs)) {
         const f = await factoryAt(run.repoDir);
@@ -1744,6 +1818,12 @@ var createFactory = (world = {}) => (remy) => {
           remy.log("factory step failed", url, e?.message ?? e);
         }
         syncWaitingList(run);
+      }
+      const current = new Set(Object.values(runs).flatMap((r) => r.agent ? [r.agent.name] : []));
+      for (const s of remy.sessions().filter((s) => isOrphan(s, current) && !tried.has(s.sessionId))) {
+        tried.add(s.sessionId);
+        remy.log("closing orphaned factory agent", s.name);
+        await env.close({ name: s.name, id: s.sessionId });
       }
     } finally {
       save();
@@ -1766,7 +1846,7 @@ var createFactory = (world = {}) => (remy) => {
     run: (_, ctx) => formatRuns(Object.values(runs).filter((r) => r.workspace === ctx.workspace), (r) => loaded.get(r.repoDir)?.factory)
   });
   for (const run of Object.values(runs)) {
-    if (run.stage === "asking" && run.ask && run.ask.answer === undefined)
+    if (run.stage === "asking" && run.ask && run.ask.answer === undefined && !fixOfferLapsed(run, Date.now()))
       ask(run, run.ask.question);
     syncWaitingList(run);
   }
@@ -5192,9 +5272,55 @@ autonomy: ${lowerLevel(f.autonomy ?? "notify", c.autonomy)} (repo ${f.autonomy ?
     say(disabledNote("nothing runs the step again until you turn it back on") ?? `#${run.number} runs its held step again within a minute or so.`);
     return;
   }
+  if (positionals[0] === "start")
+    return start2(positionals[1], runs);
   if (values.json)
     return console.log(JSON.stringify(runs, null, 2));
   say(formatRuns(Object.values(runs)), disabledNote("these PRs stay where they are"));
+}
+async function start2(want, runs) {
+  if (!want)
+    throw new Error(`usage: ${import_picocolors.default.cyan("remy factory start <pr-url|number|branch>")}`);
+  const p = Bun.spawnSync(["gh", "pr", "view", want, "--json", "url,number,title,headRefName,headRefOid,state,isDraft"], { stdout: "pipe", stderr: "pipe" });
+  if (p.exitCode !== 0)
+    throw new Error(`gh pr view ${want}: ${p.stderr.toString().trim()}`);
+  const pr = JSON.parse(p.stdout.toString());
+  const c = loadConfig();
+  const had = runs[pr.url];
+  const repo = repoOfUrl(pr.url);
+  if (had && isActive(had) && pr.state === "OPEN")
+    return say(`${repo}#${pr.number} is already in the factory; \`remy factory\` shows where.`);
+  const root = trustedRepos(c).find((r) => r.root && githubRepoOf(r.root)?.toLowerCase() === repo.toLowerCase())?.root;
+  const l = root ? await loadFactory(root) : undefined;
+  appendReport(startReport(pr, c, root, l));
+  say(disabledNote("nothing starts it until you turn it back on") ?? `${repo}#${pr.number} starts its pipeline within a minute or so. A held run doesn't restart on new commits: start it again.`);
+}
+var repoOfUrl = (url) => {
+  const m = url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+  if (!m)
+    throw new Error(`${url} isn't a github.com/<owner>/<repo>/pull/<number> URL`);
+  return m[1];
+};
+function startReport(pr, c, root, l) {
+  const repo = repoOfUrl(pr.url);
+  if (pr.state !== "OPEN" || pr.isDraft)
+    throw new Error(`${repo}#${pr.number} is ${pr.isDraft ? "a draft" : pr.state.toLowerCase()}; the factory takes open PRs`);
+  if (!root)
+    throw new Error(`${repo} isn't in extensions.repos in ${PATHS.config}, so the factory doesn't run there`);
+  if (!l?.factory)
+    throw new Error(`${join11(root, ".remy", "factory.ts")}: ${l?.error ?? "not found"}`);
+  if (lowerLevel(l.factory.autonomy ?? "notify", c.autonomy) === "notify")
+    throw new Error(`autonomy is notify for ${repo}, so the factory only reports; \`remy factory check\` says why`);
+  const workspace = workspaceFor({ cwd: root, repo }, c)?.name;
+  if (!workspace)
+    throw new Error(`no workspace in ${PATHS.config} to report to`);
+  return {
+    pr: pr.url,
+    step: "",
+    kind: "start",
+    head: pr.headRefOid,
+    start: { number: pr.number, title: pr.title, repo, repoDir: root, branch: pr.headRefName, workspace }
+  };
 }
 async function report(args) {
   const { values, positionals } = parse(args, { pr: { type: "string" }, summary: { type: "string" } });
@@ -5495,7 +5621,7 @@ async function doctor() {
 }
 
 // src/cli/commands/start.ts
-async function start2(extra) {
+async function start3(extra) {
   const { rows } = await doctor();
   const c = loadConfig();
   const problems = blocking(rows);
@@ -7732,8 +7858,8 @@ var HELP = formatHelp("remy \u2014 a coordinator for your Claude Code sessions, 
     "Carry on an agent's own session in the background, stopping it first if it's stuck; keeps its history and worktree"
   ],
   [
-    "factory [--json] | factory retry <pr> | factory check [repo]",
-    "Where each PR stands in its factory pipeline; retry runs a held step again; check validates a repo's .remy/factory.ts"
+    "factory [--json] | factory start <pr> | factory retry <pr> | factory check [repo]",
+    "Where each PR stands in its factory pipeline; start runs one no session of yours is on; retry runs a held step again; check validates a repo's .remy/factory.ts"
   ],
   ["report <step> pass|fail|fixed --pr <url> --summary <text>", "A factory agent's verdict on its step"],
   [
@@ -7756,7 +7882,7 @@ var COMMANDS = {
   trace,
   post,
   setup: async (args) => setup(parse(args, {}).positionals[0]),
-  start: start2,
+  start: start3,
   daemon,
   doctor: async () => {
     const { ok, rows } = await doctor();

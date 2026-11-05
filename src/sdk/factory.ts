@@ -131,7 +131,7 @@ export type Fixer = {
 export const FIXER = "fix";
 
 /**
- * The agent that brings a PR up to date when it conflicts with its base, before the merge (ADR-0012). The base is the
+ * The agent that brings a PR up to date when it conflicts with its base, before the merge (ADR-0014). The base is the
  * trunk, or the branch of the PR below it in a stack.
  */
 export type Conflicts = {

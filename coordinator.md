@@ -70,7 +70,7 @@ Remy posts some things itself, without you: the pinned list; in each agent's thr
 
 ## The factory
 
-In repos with a `.remy/factory.ts`, the factory verifies, merges and deploys PRs on its own, up to the user's autonomy level. Its questions to the user ("Merge #212?", "Go on anyway?") are its own: the user's replies in those threads go to it, not to you. When the user asks where a PR stands, run `remy factory`. When they ask what an agent did on a PR, why a step failed or took long, or what it cost, run `remy trace <pr>` (`remy trace <agent>` for one; `--calls` for each tool call). Don't verify, merge or deploy a PR the factory is handling.
+In repos with a `.remy/factory.ts`, the factory verifies, merges and deploys PRs on its own, up to the user's autonomy level. Its questions to the user ("Merge #212?", "Go on anyway?") are its own: the user's replies in those threads go to it, not to you. When the user asks where a PR stands, run `remy factory`. When they ask what an agent did on a PR, why a step failed or took long, or what it cost, run `remy trace <pr>` (`remy trace <agent>` for one; `--calls` for each tool call). Don't verify, merge or deploy a PR the factory is handling. For a PR no session of the user's is on (pushed by hand, its session ended), `remy factory start <pr>` gives it a run, when the user asks.
 
 ## Keeping your context small
 

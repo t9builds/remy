@@ -3,13 +3,15 @@
  * work while the daemon is down, and say so when `extensions.disabled` turns the factory off.
  */
 import { join } from "node:path";
-import { loadConfig } from "../../config/config";
+import { loadConfig, workspaceFor } from "../../config/config";
 import { resolveRepo, trustedRepos } from "../../config/repos";
 import { formatRuns } from "../../extensions/factory/format";
 import { appendReport, headOf, repoRootOf } from "../../extensions/factory/live";
-import { loadFactory } from "../../extensions/factory/load";
-import type { Run } from "../../extensions/factory/pipeline";
+import { type Loaded, loadFactory } from "../../extensions/factory/load";
+import { isActive, type Run } from "../../extensions/factory/pipeline";
+import type { Config } from "../../sdk/config";
 import { type Factory, lowerLevel } from "../../sdk/factory";
+import { githubRepoOf } from "../../sessions/git";
 import { readJson } from "../../shared/json-file";
 import { PATHS } from "../../shared/paths";
 import { parse } from "../args";
@@ -22,7 +24,7 @@ const disabledNote = (what: string) =>
 
 const say = (...lines: (string | undefined)[]) => console.log(lines.filter(Boolean).join("\n"));
 
-/** How a PR that conflicts with its base is handled, as `remy factory check` shows it (ADR-0012). */
+/** How a PR that conflicts with its base is handled, as `remy factory check` shows it (ADR-0014). */
 export function conflictsLine(f: Factory) {
   const c = f.conflicts;
   if (c === false) return "conflicts with the base: held for you";
@@ -61,8 +63,75 @@ export async function factory(args: string[]) {
     );
     return;
   }
+  if (positionals[0] === "start") return start(positionals[1], runs);
   if (values.json) return console.log(JSON.stringify(runs, null, 2));
   say(formatRuns(Object.values(runs)), disabledNote("these PRs stay where they are"));
+}
+
+/**
+ * `remy factory start <pr>`: a run for a PR no session of yours is on, such as one pushed by hand (ADR-0013). Everything
+ * the run needs is resolved here, so a mistake fails now rather than silently in the daemon.
+ */
+async function start(want: string | undefined, runs: Record<string, Run>) {
+  if (!want) throw new Error(`usage: ${pc.cyan("remy factory start <pr-url|number|branch>")}`);
+  const p = Bun.spawnSync(
+    ["gh", "pr", "view", want, "--json", "url,number,title,headRefName,headRefOid,state,isDraft"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (p.exitCode !== 0) throw new Error(`gh pr view ${want}: ${p.stderr.toString().trim()}`);
+  const pr: GhPr = JSON.parse(p.stdout.toString());
+  const c = loadConfig();
+  const had = runs[pr.url];
+  const repo = repoOfUrl(pr.url);
+  if (had && isActive(had) && pr.state === "OPEN")
+    return say(`${repo}#${pr.number} is already in the factory; \`remy factory\` shows where.`);
+  const root = trustedRepos(c).find((r) => r.root && githubRepoOf(r.root)?.toLowerCase() === repo.toLowerCase())?.root;
+  const l = root ? await loadFactory(root) : undefined;
+  appendReport(startReport(pr, c, root, l));
+  say(
+    disabledNote("nothing starts it until you turn it back on") ??
+      `${repo}#${pr.number} starts its pipeline within a minute or so. A held run doesn't restart on new commits: start it again.`,
+  );
+}
+
+/** What `gh pr view --json url,number,title,headRefName,headRefOid,state,isDraft` says. */
+export type GhPr = {
+  url: string;
+  number: number;
+  title: string;
+  headRefName: string;
+  headRefOid: string;
+  state: string;
+  isDraft: boolean;
+};
+
+/** The owner/name a PR's URL names. */
+export const repoOfUrl = (url: string) => {
+  const m = url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+  if (!m) throw new Error(`${url} isn't a github.com/<owner>/<repo>/pull/<number> URL`);
+  return m[1]!;
+};
+
+/** The start report for `pr`, or why the factory can't take it: `root` is the listed repo's checkout, `l` its factory. */
+export function startReport(pr: GhPr, c: Config, root: string | undefined, l: Loaded | undefined) {
+  const repo = repoOfUrl(pr.url);
+  if (pr.state !== "OPEN" || pr.isDraft)
+    throw new Error(
+      `${repo}#${pr.number} is ${pr.isDraft ? "a draft" : pr.state.toLowerCase()}; the factory takes open PRs`,
+    );
+  if (!root) throw new Error(`${repo} isn't in extensions.repos in ${PATHS.config}, so the factory doesn't run there`);
+  if (!l?.factory) throw new Error(`${join(root, ".remy", "factory.ts")}: ${l?.error ?? "not found"}`);
+  if (lowerLevel(l.factory.autonomy ?? "notify", c.autonomy) === "notify")
+    throw new Error(`autonomy is notify for ${repo}, so the factory only reports; \`remy factory check\` says why`);
+  const workspace = workspaceFor({ cwd: root, repo }, c)?.name;
+  if (!workspace) throw new Error(`no workspace in ${PATHS.config} to report to`);
+  return {
+    pr: pr.url,
+    step: "",
+    kind: "start" as const,
+    head: pr.headRefOid,
+    start: { number: pr.number, title: pr.title, repo, repoDir: root, branch: pr.headRefName, workspace },
+  };
 }
 
 export async function report(args: string[]) {

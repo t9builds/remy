@@ -284,7 +284,7 @@ In any channel the bot is in, mention it in a thread (`@bot fix this, it's in ap
 
 Only your own mentions and reactions count, so teammates sharing the Slack app don't start tasks on your machine. A mention that asks a question rather than for work gets an answer in the thread instead of an agent.
 
-From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy resume <name>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`, `remy factory`, `remy trace`.
+From a terminal: `remy status` (`remy status <name>` for one session in detail, `--merged` for closed agents), `remy queue`, `remy spawn --repo <repo> <task>`, `remy resume <name>`, `remy changes`, `remy doctor`, `remy daemon` (in the foreground) and `remy daemon stop`, `remy factory` (with `start`, `retry` and `check`), `remy trace`.
 
 ### Tracing what agents did
 
@@ -377,7 +377,7 @@ export default (remy: Remy) => {
 | Actions | |
 |---|---|
 | `post(text, { workspace, session, thread, expectReply, markdown })` | Post to you; with `session`, in that agent's thread (the Slack thread its task came from, else its DM thread). Text is Slack mrkdwn; with `markdown`, standard Markdown, which Slack renders as rich text (headings, lists, tables, code) |
-| `ask(question, { session })` | Ask you and wait: it's on the waiting list until you reply in its thread, and the reply goes to the extension, not the coordinator |
+| `ask(question, { session, signal? })` | Ask you and wait: it's on the waiting list until you reply in its thread, and the reply goes to the extension, not the coordinator. Aborting `signal` withdraws the question: it leaves the list, the promise rejects, and a later reply is an ordinary message |
 | `spawn({ repo, task })`, `close(session)` | Start an agent, close a session |
 | `waitingList.add(entry)`, `waitingList.remove(key)`, `waitingList.text(workspace)` | Put something on the waiting list, take it off, read the list |
 | `coordinator.tell(text)` | Hand something to the coordinator for a turn |
@@ -427,7 +427,7 @@ export default defineFactory({
 
 | Step | Done by | What it does |
 |---|---|---|
-| `agent(name, { skill })` | a fresh agent running the skill | Works on the PR in its own worktree and finishes with `remy report <name> pass\|fail\|fixed --pr <url> --summary "…"`. `fixed` with `repeat: "until-clean"` hands the step to another fresh agent once CI is green on the fixes. `fail` goes to the fixer before the merge (`onFail: "fix"`, the default; after the merge it waits for you), waits for you (`"hold"`), asks you whether to go on (`"ask-human"`, or `onHold`), or tells you at once and offers a fix (`"notify-author"`) |
+| `agent(name, { skill })` | a fresh agent running the skill | Works on the PR in its own worktree and finishes with `remy report <name> pass\|fail\|fixed --pr <url> --summary "…"`. `fixed` with `repeat: "until-clean"` hands the step to another fresh agent once CI is green on the fixes. `fail` goes to the fixer before the merge (`onFail: "fix"`, the default; after the merge it waits for you), waits for you (`"hold"`), asks you whether to go on (`"ask-human"`, or `onHold`), or tells you at once and offers a fix (`"notify-author"`; the offer lapses after 3 days unanswered) |
 | `wait("ci")`, `wait("deploy", { env })` | Remy | CI green on the PR's head; the merge commit deployed, seen by Cloud Build (`detector: "cloudbuild"`) or a `check` command that exits 0 |
 | `gate(name, { maxLines, protect })` | Remy | Changed lines, protected paths, CI, and that each verdict covers the PR's current head; new commits send the PR back to the step that hasn't seen them |
 | `action("merge" \| "deploy" \| "notify")` | Remy | Merges with `gh pr merge --match-head-commit`, runs the environment's `deploy` command, tells you the change is through |
@@ -463,7 +463,7 @@ How far Remy goes on its own is the lower of the repo's `autonomy` and yours in 
 
 A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a failure the fixer couldn't fix, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
 
-The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. Sessions sharing a [GitButler](https://gitbutler.com) workspace each get the PR of the branch they named, so one session's PR never runs as another's. Step agents, fixers and resolvers count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` (including `fixer` and `conflicts`) and shows the autonomy that applies and how conflicts are resolved.
+The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. For a PR no session of yours is on, such as one pushed by hand, `remy factory start <pr>` (a URL, number or branch) starts its run. Start it again after new commits if it was held. Sessions sharing a [GitButler](https://gitbutler.com) workspace each get the PR of the branch they named, so one session's PR never runs as another's. Step agents, fixers and resolvers count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` (including `fixer` and `conflicts`) and shows the autonomy that applies and how conflicts are resolved.
 
 ## Limits
 

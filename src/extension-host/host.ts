@@ -153,10 +153,28 @@ export class ExtensionHost {
         this.handlers.set(event, [...(this.handlers.get(event) ?? []), { ext, fn }]);
       },
       post: (text, { expectReply, ...opts } = {}) => deps.post(text, { ...opts, expect_reply: expectReply }),
-      ask: async (question, opts) => {
+      ask: async (question, { signal, ...opts }) => {
+        signal?.throwIfAborted();
         if (this.asks.has(opts.session)) throw new Error(`"${opts.session}" already waits for an answer`);
-        const answer = new Promise<string>((resolve) => this.asks.set(opts.session, { ext, resolve }));
         const key = `ask:${opts.session}`;
+        let pending!: { ext: string; resolve: (text: string) => void };
+        const answer = new Promise<string>((resolve, reject) => {
+          pending = { ext, resolve };
+          this.asks.set(opts.session, pending);
+          // Withdraw only this ask: after an answer it is gone, and a newer ask for the session is not ours.
+          signal?.addEventListener(
+            "abort",
+            () => {
+              if (this.asks.get(opts.session) !== pending) return;
+              this.asks.delete(opts.session);
+              this.entries.delete(`${ext}\0${key}`);
+              deps.waitingListChanged();
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+        answer.catch(() => {});
         addEntry({
           key,
           rank: 0,
@@ -169,9 +187,11 @@ export class ExtensionHost {
         try {
           await deps.post(question, { ...opts, expect_reply: true });
         } catch (e) {
-          this.asks.delete(opts.session);
-          this.entries.delete(`${ext}\0${key}`);
-          deps.waitingListChanged();
+          if (this.asks.get(opts.session) === pending) {
+            this.asks.delete(opts.session);
+            this.entries.delete(`${ext}\0${key}`);
+            deps.waitingListChanged();
+          }
           throw e;
         }
         return answer;

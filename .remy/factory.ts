@@ -12,7 +12,7 @@ export default defineFactory({
       "Run `bun install` first. `bun run check` is every check CI runs; after changing src/, run `bun run build` and commit dist/ with it. To reproduce a failure seen in verify, follow the verify-remy skill (.claude/skills/verify-remy/SKILL.md): never run the checkout's code against ~/.remy or the running daemon. Run `remy report` without the run's REMY_DIR, or the daemon never sees your verdict.",
   },
   // A PR that conflicts with its base (main, or the PR below it in a stack) gets the base merged in by a resolver,
-  // then runs again from the review (ADR-0012).
+  // then runs again from the review (ADR-0014).
   conflicts: {
     instructions:
       "Run `bun install` first. Resolve conflicts in dist/ by taking the base's version and running `bun run build` once the source is resolved; never edit dist/ by hand. `bun run check` must pass before you push. Run `remy report` without the run's REMY_DIR, or the daemon never sees your verdict.",
