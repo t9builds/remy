@@ -17,7 +17,7 @@ In your first message, in your own words: the goal, the problem it solves, and t
 
 A task that isn't a code change (a question, an investigation) ends here: do it, answer with evidence, and open no PR.
 
-A task about an existing PR (it names one, or a branch with an open PR) works on that PR: check out its branch and work there. You push to it and open no second PR.
+A task about an existing PR (the request itself asks you to change that PR, or a branch with an open PR) works on that PR: check out its branch and work there. You push to it and open no second PR. A PR that is only mentioned, in a Slack thread, an attachment or as background, is information: the task gets its own PR.
 
 Done when the goal, the problem and the expected change are written down.
 
