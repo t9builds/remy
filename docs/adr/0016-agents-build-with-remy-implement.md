@@ -26,5 +26,5 @@ The playbooks and principles are adapted from pstack's `poteto-mode`, `architect
 
 - An agent Remy starts spends more of its run before the first line of code: grounding, a sketch, sometimes a second sketch from a subagent.
 - A `spawnTemplate` in `config.json` is kept, and `remy setup` writes one, so installs set up before this keep `{task}`; they switch by setting it to `/remy:implement {task}`. A config without the key gets the new default. No migration: it would override a value the user saw and accepted in setup.
-- An agent working on an existing PR is on a detached HEAD, so Remy's waiting list shows it "stopped without a PR" when it ends; it names the PR in its last message. Teaching the PR lookup to read a detached HEAD is left for a later change.
+- An agent working on an existing PR is on a detached HEAD, so Remy's waiting list shows it "stopped without a PR" when it ends; it names the PR in its last message. The same missing PR means `merged-cleanup` never closes it when that PR merges: its session and worktree stay until someone removes them (`claude rm <session>`). Teaching the PR lookup to read a detached HEAD is left for a later change.
 - A change to the design lens changes what writers aim at and what reviewers judge, together.

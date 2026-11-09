@@ -17,7 +17,7 @@ In your first message, in your own words: the goal, the problem it solves, and t
 
 A task that isn't a code change (a question, an investigation) ends here: do it, answer with evidence, and open no PR.
 
-A task about an existing PR (the request itself asks you to change that PR, or a branch with an open PR) works on that PR: `gh pr checkout <n> --detach` (its branch is usually checked out in another worktree, so stay on a detached HEAD), and push with `git push origin HEAD:<branch>`. You open no second PR; if the push is rejected, don't force or rebase: say the PR moved and stop. End your last message with the PR's link: Remy finds a session's PR by its branch, and a detached HEAD has none, so its waiting list shows you stopped without a PR. A PR that is only mentioned, in a Slack thread, an attachment or as background, is information: the task gets its own PR.
+A task about an existing PR (the request itself asks you to change that PR, or a branch with an open PR) works on that PR: `gh pr checkout <n> --detach` (its branch is usually checked out in another worktree, so stay on a detached HEAD), and push with `git push origin HEAD:<branch>`. You open no second PR; if the push is rejected, don't force or rebase: say the PR moved and stop. Put the PR's link in your last message, before its `Next:` line: Remy finds a session's PR by its branch, and a detached HEAD has none, so its waiting list shows you stopped without a PR. A PR that is only mentioned, in a Slack thread, an attachment or as background, is information: the task gets its own PR.
 
 Done when the goal, the problem and the expected change are written down.
 
