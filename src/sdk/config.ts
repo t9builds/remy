@@ -61,7 +61,7 @@ export type LinearSettings = {
   /**
    * The workflow state for each phase, by name. Defaults: working "In Progress" (a draft PR), review "In Review"
    * (ready, or in the factory), merged: none (stays in review until the factory is through), done "Done", closed
-   * "Canceled" (closed unmerged). "" leaves the issue where it is in that phase; a name the team lacks is skipped.
+   * "Canceled" (closed unmerged; only for an issue Remy created, a found one stays). "" leaves the issue where it is in that phase; a name the team lacks is skipped.
    */
   states?: Partial<Record<LinearPhase, string>>;
 };

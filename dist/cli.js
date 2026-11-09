@@ -1993,6 +1993,7 @@ function stateFor(settings, phase, states) {
   return name ? states.find((s) => s.name.toLowerCase() === name) : undefined;
 }
 var movesTo = (from, to, phase) => from.id !== to.id && (phase === "closed" || !atOrBeyond(from, to));
+var movesIssue = (t, phase) => phase !== "closed" || !!t.created;
 var linear_default = (remy) => createLinear()(remy);
 var createLinear = (world = {}) => (remy) => {
   const w = { api: linearApi, pr: prView, now: Date.now, ...world };
@@ -2062,7 +2063,8 @@ var createLinear = (world = {}) => (remy) => {
     const phase = phaseOf(t);
     if (!isForward(t.phase, phase))
       return;
-    await setState(api, t, settings, phase, url);
+    if (movesIssue(t, phase))
+      await setState(api, t, settings, phase, url);
     t.phase = phase;
     if (FINAL.includes(phase)) {
       delete tracked[url];
@@ -2135,7 +2137,6 @@ var createLinear = (world = {}) => (remy) => {
     await api.link(t.issueId, url, title ?? s.pr.title);
     t.linked = true;
     const verb = t.created ? "created" : "linked";
-    delete t.created;
     save();
     await remy.post(`Linear <${t.url}|${t.identifier}> ${verb} for PR <${url}|#${s.pr.number}>`, {
       workspace: s.workspace,

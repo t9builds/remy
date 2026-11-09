@@ -338,9 +338,49 @@ test("an issue already further along is left where it is, not pulled back", asyn
   // Same type, later position, as well: In Review is before QA.
   await w.h.emit("pr.ready", { session: session(), pr: pr() });
   expect(w.calls.filter((c) => c.includes("stateId"))).toEqual([]);
-  // But canceling still goes from there.
-  await w.h.emit("pr.merged", { session: session({ pr: pr({ state: "CLOSED" }) }), pr: pr({ state: "CLOSED" }) });
-  expect(w.calls.at(-1)).toBe('update ENG-42 {"stateId":"s-canceled"}');
+});
+
+const savedTracked = (stateDir: string) =>
+  JSON.parse(readFileSync(join(stateDir, "builtin_linear.json"), "utf8")).tracked as Record<string, unknown>;
+const closedPr = { session: session({ pr: pr({ state: "CLOSED" }) }), pr: pr({ state: "CLOSED" }) };
+
+test("a PR closed unmerged cancels an issue Remy made, from wherever it is, and an issue it found stays where it is", async () => {
+  const stateDir = join(dir, "state-closed-created");
+  const made = await setup({ stateDir });
+  await made.h.emit("pr.opened", { session: session(), pr: pr() });
+  made.issues.get("ENG-100")!.state = byId("s-qa");
+  await made.h.emit("pr.merged", closedPr);
+  expect(made.calls.at(-1)).toBe('update ENG-100 {"stateId":"s-canceled"}');
+  expect(savedTracked(stateDir)[PR_URL]).toBeUndefined();
+
+  // Found by its branch: it may be shared by several PRs, or continued by another one.
+  const foundDir = join(dir, "state-closed-found");
+  const found = await setup({ stateDir: foundDir, seed: [existing], view: { branch: "tom/eng-42-fix-login" } });
+  await found.h.emit("pr.opened", { session: session(), pr: pr() });
+  await found.h.emit("pr.merged", closedPr);
+  expect(found.calls.filter((c) => c.includes("canceled"))).toEqual([]);
+  expect(found.issues.get("ENG-42")!.state.id).toBe("s-review");
+  expect(savedTracked(foundDir)[PR_URL]).toBeUndefined();
+  // Merged, a found issue is done as a created one is.
+  const mergedDir = join(dir, "state-merged-found");
+  const merged = await setup({ stateDir: mergedDir, seed: [existing], view: { branch: "tom/eng-42-fix-login" } });
+  await merged.h.emit("pr.opened", { session: session(), pr: pr() });
+  await merged.h.emit("pr.merged", { session: session({ pr: pr({ state: "MERGED" }) }), pr: pr({ state: "MERGED" }) });
+  expect(merged.calls.at(-1)).toBe('update ENG-42 {"stateId":"s-done"}');
+  expect(savedTracked(mergedDir)[PR_URL]).toBeUndefined();
+});
+
+test("an issue someone completed stays completed when its PR is then closed unmerged, and the PR is forgotten", async () => {
+  const stateDir = join(dir, "state-closed-ended");
+  const w = await setup({ stateDir });
+  await w.h.emit("pr.opened", { session: session(), pr: pr() });
+  expect(savedTracked(stateDir)[PR_URL]).toBeDefined();
+  w.issues.get("ENG-100")!.state = byId("s-done");
+  w.calls.length = 0;
+  await w.h.emit("pr.merged", closedPr);
+  expect(w.calls).toEqual([]);
+  expect(w.issues.get("ENG-100")!.state.id).toBe("s-done");
+  expect(savedTracked(stateDir)[PR_URL]).toBeUndefined();
 });
 
 test("a merged run with steps to go, raised before the PR was tracked, keeps the issue from Done", async () => {

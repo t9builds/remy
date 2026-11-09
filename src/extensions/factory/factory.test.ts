@@ -185,6 +185,73 @@ test("a run tells other extensions where it is with factory.run, once each time 
   ]);
 });
 
+const STEPS = `import { action, agent, defineFactory } from "remy/factory";
+export default defineFactory({ autonomy: "merge", steps: [agent("review", { skill: "/remy:review" }), agent("verify", { skill: "/remy:verify" }), action("merge"), agent("confirm", { skill: "/remy:verify" })] });
+`;
+
+test("factory.run is raised again when a run changes step or gains a merge, and an asking run is held", async () => {
+  const root = repo("api-announce-moves", STEPS);
+  const asking = { ...savedRun(root, 8, "asking"), ask: { purpose: "approve" as const, question: "go on?" } };
+  const working = { ...savedRun(root, 7, "agent"), agent: { name: "basil-agent", startedAt: Date.now() } };
+  const reports: Report[] = [];
+  let merged: Partial<PrDetail> | undefined;
+  const { h } = await hostWithRuns(
+    [working, asking],
+    { extensions: { repos: ["api-announce-moves"] } },
+    {
+      reports: () => reports,
+      pr: async (url) => (url === asking.pr ? (merged as PrDetail | undefined) : undefined),
+      canStartAgent: () => false,
+      agentStatus: async () => "busy",
+      close: async () => {},
+      notify: async () => {},
+    },
+  );
+  const seen: string[] = [];
+  await h.load("listener", "test", (remy) =>
+    remy.on("factory.run", ({ run }) => void seen.push(`#${run.number} ${run.state} ${run.step} ${run.merged}`)),
+  );
+  const tick = async (at: number) => {
+    await h.emit("tick", { at });
+    await Bun.sleep(0);
+  };
+  await tick(1);
+  await tick(2);
+  expect(seen).toEqual(["#7 running review false", "#8 held review false"]);
+  // The agent passes review: another step, the same state.
+  reports.push({ pr: working.pr, at: Date.now() + 1, step: "review", verdict: "pass" });
+  await tick(3);
+  expect(seen.slice(2)).toEqual(["#7 running verify false"]);
+  // The person merges by hand while the run waits: the same run, now merged.
+  merged = { state: "MERGED", mergeSha: "abc1234" };
+  await tick(4);
+  expect(seen.slice(3)).toEqual(["#8 running confirm true"]);
+});
+
+test("factory.run is raised again when a run gains a merge on a step of the same name and state", async () => {
+  // Autonomy stops at verify, so the run asks before each merge step: held on a step called "merge" before and after.
+  const root = repo(
+    "api-announce-merge",
+    STEPS.replace(/steps: \[.*\] \}\)/, 'steps: [action("merge"), action("merge")] })'),
+  );
+  const asking = { ...savedRun(root, 9, "asking"), ask: { purpose: "approve" as const, question: "merge?" } };
+  let merged: Partial<PrDetail> | undefined;
+  const { h } = await hostWithRuns(
+    [asking],
+    { autonomy: "verify", extensions: { repos: ["api-announce-merge"] } },
+    { pr: async () => merged as PrDetail | undefined, ask: () => {} },
+  );
+  const seen: string[] = [];
+  await h.load("listener", "test", (remy) =>
+    remy.on("factory.run", ({ run }) => void seen.push(`${run.state} ${run.step} ${run.merged}`)),
+  );
+  await h.emit("tick", { at: 1 });
+  merged = { state: "MERGED", mergeSha: "abc1234" };
+  await h.emit("tick", { at: 2 });
+  await Bun.sleep(0);
+  expect(seen).toEqual(["held merge false", "held merge true"]);
+});
+
 test("a run saved before a restart isn't announced while the factory loads; the first tick announces it, once", async () => {
   const root = repo("api-announce-load", GOOD);
   const held = savedRun(root, 7, "held", "basil-agent");

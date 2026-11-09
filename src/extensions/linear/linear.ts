@@ -3,7 +3,7 @@
  * issue: the one that already has the PR attached, else one its branch, title or body names (ENG-123), else a new one
  * in the workspace's team, assigned to you. The PR is attached to it, and the issue moves forward as the PR and its
  * factory run go: in progress while a draft, in review once ready and through the factory, done when merged and
- * through the pipeline, canceled when closed unmerged. Code decides every move (ADR-0007, ADR-0017); Remy never moves an
+ * through the pipeline, canceled when closed unmerged (only an issue Remy made; a found one may be shared). Code decides every move (ADR-0007, ADR-0017); Remy never moves an
  * issue back, nor one someone completed or canceled.
  */
 import type { LinearPhase, LinearSettings } from "../../sdk/config";
@@ -43,7 +43,7 @@ export type Tracked = {
   phase?: LinearPhase;
   /** False while the PR isn't attached to the issue yet, so a failed attach is retried without making another issue. */
   linked?: boolean;
-  /** Whether Remy made the issue (not found), for the post once the PR is attached. */
+  /** Whether Remy made the issue (not found): only such an issue is canceled when the PR closes, and the post says so. */
   created?: boolean;
 };
 
@@ -96,6 +96,9 @@ function stateFor(settings: LinearSettings, phase: LinearPhase, states: Workflow
 /** Whether the issue's state `from` should change to `to`: not there already, and, but for canceling, not beyond it. */
 const movesTo = (from: WorkflowState, to: WorkflowState, phase: LinearPhase) =>
   from.id !== to.id && (phase === "closed" || !atOrBeyond(from, to));
+
+/** Whether the PR's phase changes its issue's state: a found issue may be shared by several PRs or continued by another, so closing this PR leaves it. */
+const movesIssue = (t: Pick<Tracked, "created">, phase: LinearPhase) => phase !== "closed" || !!t.created;
 
 /** The parts of the world the tracker uses; tests replace them. */
 export type World = {
@@ -181,7 +184,7 @@ export const createLinear =
       if (!t || !settings || !api) return;
       const phase = phaseOf(t);
       if (!isForward(t.phase, phase)) return;
-      await setState(api, t, settings, phase, url);
+      if (movesIssue(t, phase)) await setState(api, t, settings, phase, url);
       t.phase = phase;
       // A PR in a final phase needs nothing more: forget it, so the state file stays small.
       if (FINAL.includes(phase)) {
@@ -258,7 +261,6 @@ export const createLinear =
       await api.link(t.issueId, url, title ?? s.pr!.title);
       t.linked = true;
       const verb = t.created ? "created" : "linked";
-      delete t.created;
       save();
       await remy.post(`Linear <${t.url}|${t.identifier}> ${verb} for PR <${url}|#${s.pr!.number}>`, {
         workspace: s.workspace,

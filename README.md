@@ -485,13 +485,13 @@ Give a workspace `linear` settings (`remy setup` asks, along with a [personal AP
 | `review` | The PR is ready, or in the [factory](#factory) | In Review |
 | `merged` | Merged, with factory steps still to go (a deploy, a check on production) | none: it stays in review |
 | `done` | Merged, and the factory's run, if any, is through | Done |
-| `closed` | Closed without a merge | Canceled |
+| `closed` | Closed without a merge | Canceled, for an issue Remy created; one it found stays where it is |
 
 ```json
 { "name": "work", "repos": ["acme-corp/*"], "linear": { "team": "ENG", "states": { "merged": "Deploying" } } }
 ```
 
-`linear.states` names your team's states per phase; `""` leaves the issue where it is in that phase. Remy never moves an issue back, nor one someone completed or canceled. Factory agents' PRs and PRs started with `remy factory start` don't get an issue. See [ADR-0017](docs/adr/0017-prs-tracked-in-linear.md).
+`linear.states` names your team's states per phase; `""` leaves the issue where it is in that phase. Remy never moves an issue back, nor one someone completed or canceled. A found issue may be shared by several PRs, or continued by another, so a PR closed unmerged cancels only an issue Remy created. Factory agents' PRs and PRs started with `remy factory start` don't get an issue. See [ADR-0017](docs/adr/0017-prs-tracked-in-linear.md).
 
 ## Limits
 
