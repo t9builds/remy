@@ -25,7 +25,7 @@ function migrateWorkspace(w: any): Workspace {
 export const DEFAULTS: Config = {
   workspaces: [],
   repoRoots: [join(homedir(), "Repositories")],
-  spawnTemplate: "{task}",
+  spawnTemplate: "/remy:implement {task}",
   spawnPermissionMode: "auto",
   spawnWorktree: true,
   digestMinutes: 15,
