@@ -58,6 +58,7 @@ function fakeLinear(seed: Issue[] = []) {
   const links = new Map<string, string>();
   const calls: string[] = [];
   let linkFailures = 0;
+  let failAssign = false;
   let next = 100;
   const find = (id: string) => [...issues.values()].find((i) => i.id === id)!;
   const api: LinearApi = {
@@ -87,6 +88,7 @@ function fakeLinear(seed: Issue[] = []) {
       return i;
     },
     update: async (id, input) => {
+      if (failAssign && input.assigneeId) throw new Error("not allowed to assign");
       calls.push(`update ${find(id).identifier} ${JSON.stringify(input)}`);
       if (input.stateId) find(id).state = byId(input.stateId);
       if (input.assigneeId) find(id).assigneeId = input.assigneeId;
@@ -105,6 +107,9 @@ function fakeLinear(seed: Issue[] = []) {
     issues,
     calls,
     links,
+    failAssigns: () => {
+      failAssign = true;
+    },
     failLinks: (n: number) => {
       linkFailures = n;
     },
@@ -390,14 +395,35 @@ test("a PR saved unlinked isn't marked linked or posted while there is no key; i
   expect(saved().linked).toBe(true);
 });
 
-test("a run of a workspace without linear settings, or a finished run of an untracked PR, doesn't seed a later adoption", async () => {
+test("a run of a workspace without linear settings doesn't seed a later adoption", async () => {
   const stateDir = join(dir, "state-runs");
   const sessions = [session()];
   const w = await setup({ stateDir, sessions });
   await w.h.emit("factory.run", { run: run({ workspace: "other", merged: true }) });
+  await w.h.emit("pr.opened", { session: sessions[0]!, pr: pr() });
+  const saved = JSON.parse(readFileSync(join(stateDir, "builtin_linear.json"), "utf8"));
+  expect(saved.tracked[PR_URL].run).toBeUndefined();
+  expect(saved.tracked[PR_URL].pr.state).toBe("OPEN");
+});
+
+test("a finished run of an untracked PR doesn't seed a later adoption", async () => {
+  const stateDir = join(dir, "state-runs-done");
+  const sessions = [session()];
+  const w = await setup({ stateDir, sessions });
+  await w.h.emit("factory.run", { run: run({ state: "running", merged: true }) });
   await w.h.emit("factory.run", { run: run({ state: "done", merged: true }) });
   await w.h.emit("pr.opened", { session: sessions[0]!, pr: pr() });
   const saved = JSON.parse(readFileSync(join(stateDir, "builtin_linear.json"), "utf8"));
   expect(saved.tracked[PR_URL].run).toBeUndefined();
   expect(saved.tracked[PR_URL].pr.state).toBe("OPEN");
+});
+
+test("an assign Linear refuses doesn't keep a found issue from being tracked, linked and announced", async () => {
+  const sessions = [session()];
+  const w = await setup({ sessions, seed: [existing], view: { branch: "tom/eng-42-fix-login" } });
+  w.failAssigns();
+  await w.h.emit("pr.opened", { session: sessions[0]!, pr: pr() });
+  expect(w.calls).toEqual(["link ENG-42", 'update ENG-42 {"stateId":"s-review"}']);
+  expect(w.posts).toHaveLength(1);
+  expect(w.logs.some((l) => l.includes("couldn't assign ENG-42"))).toBe(true);
 });

@@ -2104,8 +2104,11 @@ var createLinear = (world = {}) => (remy) => {
     const me = await api.viewer();
     const found = await existingIssue(api, url, view);
     const made = !found;
-    if (found && !found.assigneeId)
-      await api.update(found.id, { assigneeId: me });
+    if (found && !found.assigneeId) {
+      await api.update(found.id, { assigneeId: me }).catch((e) => {
+        remy.log(`couldn't assign ${found.identifier} to you`, e?.message ?? e);
+      });
+    }
     const issue = found ?? await createIssue(s, settings, api, view, me);
     const seenRun = runs.get(url);
     tracked[url] = {

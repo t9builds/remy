@@ -225,7 +225,12 @@ export const createLinear =
       const me = await api.viewer();
       const found = await existingIssue(api, url, view);
       const made = !found;
-      if (found && !found.assigneeId) await api.update(found.id, { assigneeId: me });
+      // A courtesy: Linear refusing it (a team you can't assign in) mustn't keep the PR from being tracked.
+      if (found && !found.assigneeId) {
+        await api.update(found.id, { assigneeId: me }).catch((e) => {
+          remy.log(`couldn't assign ${found.identifier} to you`, e?.message ?? e);
+        });
+      }
       const issue = found ?? (await createIssue(s, settings, api, view, me));
       // What `factory.run` said while this was looking, or before the PR was tracked.
       const seenRun = runs.get(url);
