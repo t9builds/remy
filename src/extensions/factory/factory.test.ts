@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DEFAULTS } from "../../config/config";
 import { ExtensionHost } from "../../extension-host/host";
 import type { Config } from "../../sdk/config";
-import type { SessionRef } from "../../sdk/extension";
+import type { FactoryRun, SessionRef } from "../../sdk/extension";
 import { PLUGIN_ROOT } from "../../shared/paths";
 import { createFactory, endedOnUsageLimit, isReady, spawnHitUsageLimit } from "./factory";
 import { formatRuns } from "./format";
@@ -155,6 +155,31 @@ test("a ready PR in a listed repo starts a run; an unlisted repo's or a notify-l
   const notify = await hostWith({ ...config, autonomy: "notify" }, sessions);
   await notify.h.emit("tick", { at: 1 });
   expect(notify.h.waitingEntries()).toEqual([]);
+});
+
+test("a run tells other extensions where it is with factory.run, once each time it moves", async () => {
+  const root = repo("api-announce", GOOD);
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-announce"] } };
+  const { h } = await hostWith(config, [ref({ cwd: root })]);
+  const seen: FactoryRun[] = [];
+  await h.load("listener", "test", (remy) => remy.on("factory.run", ({ run }) => void seen.push(run)));
+  await h.emit("tick", { at: 1 });
+  await h.emit("tick", { at: 2 });
+  await Bun.sleep(0);
+  expect(seen).toEqual([
+    {
+      pr: pr.url,
+      number: 7,
+      title: "Fix login",
+      repo: "acme-corp/api",
+      session: "basil",
+      workspace: "work",
+      state: "running",
+      step: "review",
+      merged: false,
+      reason: undefined,
+    },
+  ]);
 });
 
 test("formatRuns", () => {

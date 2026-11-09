@@ -2,6 +2,7 @@
 import type { Extension } from "../sdk/extension";
 import agentUpdates from "./agent-updates";
 import factory from "./factory/factory";
+import linear from "./linear/linear";
 import mergedCleanup from "./merged-cleanup";
 import slackTasks from "./slack-tasks";
 import waitingListCommand from "./waiting-list-command";
@@ -13,4 +14,5 @@ export const BUILTINS: Record<string, Extension> = {
   "agent-updates": agentUpdates,
   queue: waitingListCommand, // named after `/queue`; users' `extensions.disabled` lists it by this name
   factory,
+  linear,
 };

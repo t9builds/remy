@@ -1,0 +1,284 @@
+import { afterAll, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DEFAULTS } from "../../config/config";
+import { ExtensionHost } from "../../extension-host/host";
+import type { Config, LinearSettings } from "../../sdk/config";
+import type { FactoryRun, Pr, SessionRef } from "../../sdk/extension";
+import type { Issue, LinearApi, PrView, WorkflowState } from "./api";
+import { createLinear, isForward, issueRefs, phaseOf } from "./linear";
+
+const dir = mkdtempSync(join(tmpdir(), "remy-linear-"));
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+test("issue identifiers come from a Linear branch, a title, or a link, once each", () => {
+  expect(issueRefs("tom/eng-123-fix-login", "ENG-123: Fix login", "See https://linear.app/acme/issue/OPS-7/x")).toEqual(
+    ["ENG-123", "OPS-7"],
+  );
+  expect(issueRefs("feature/linear-issue-tracking", "Fix login", "")).toEqual([]);
+  expect(issueRefs("a-1 b-2 c-3 d-4 e-5 f-6")).toHaveLength(5);
+});
+
+test("a PR's phase: draft in progress, ready or in the factory in review, merged with steps to go, then done", () => {
+  const open = { state: "OPEN", draft: false };
+  expect(phaseOf({ pr: { ...open, draft: true } })).toBe("working");
+  expect(phaseOf({ pr: open })).toBe("review");
+  expect(phaseOf({ pr: { ...open, draft: true }, run: { state: "running", merged: false } })).toBe("review");
+  expect(phaseOf({ pr: { ...open, state: "MERGED" } })).toBe("done");
+  expect(phaseOf({ pr: open, run: { state: "running", merged: true } })).toBe("merged");
+  expect(phaseOf({ pr: open, run: { state: "held", merged: true } })).toBe("merged");
+  expect(phaseOf({ pr: open, run: { state: "done", merged: true } })).toBe("done");
+  expect(phaseOf({ pr: { ...open, state: "CLOSED" }, run: { state: "done", merged: false } })).toBe("closed");
+});
+
+test("issues only move forward, and never out of done or closed", () => {
+  expect(isForward(undefined, "working")).toBeTrue();
+  expect(isForward("working", "review")).toBeTrue();
+  expect(isForward("review", "working")).toBeFalse();
+  expect(isForward("review", "review")).toBeFalse();
+  expect(isForward("review", "closed")).toBeTrue();
+  expect(isForward("done", "closed")).toBeFalse();
+  expect(isForward("closed", "review")).toBeFalse();
+});
+
+const STATES: WorkflowState[] = [
+  { id: "s-backlog", name: "Backlog", type: "backlog" },
+  { id: "s-progress", name: "In Progress", type: "started" },
+  { id: "s-review", name: "In Review", type: "started" },
+  { id: "s-done", name: "Done", type: "completed" },
+  { id: "s-canceled", name: "Canceled", type: "canceled" },
+];
+const byId = (id: string) => STATES.find((s) => s.id === id)!;
+
+/** Linear in memory: team ENG, its states, the issues and their links, and every call made. */
+function fakeLinear(seed: Issue[] = []) {
+  const issues = new Map(seed.map((i) => [i.identifier, { ...i }]));
+  const links = new Map<string, string>();
+  const calls: string[] = [];
+  let next = 100;
+  const find = (id: string) => [...issues.values()].find((i) => i.id === id)!;
+  const api: LinearApi = {
+    viewer: async () => "me",
+    issue: async (ref) => issues.get(ref) ?? [...issues.values()].find((i) => i.id === ref),
+    issueWithLink: async (url) => {
+      const id = links.get(url);
+      return id ? find(id) : undefined;
+    },
+    team: async (key) => {
+      // OPS names its review state differently, so a state of ENG's would be wrong there.
+      if (key === "OPS") return { id: "t-ops", states: [{ id: "s-ops-qa", name: "In Review", type: "started" }] };
+      return key === "ENG" ? { id: "t-eng", states: STATES } : undefined;
+    },
+    create: async (input) => {
+      calls.push(`create ${input.title} ${input.stateId} ${input.assigneeId}`);
+      const i: Issue = {
+        id: `i-${next}`,
+        identifier: `ENG-${next++}`,
+        url: "https://linear.app/acme/issue/x",
+        state: byId(input.stateId ?? "s-backlog"),
+        assigneeId: input.assigneeId,
+        team: "ENG",
+      };
+      issues.set(i.identifier, i);
+      return i;
+    },
+    update: async (id, input) => {
+      calls.push(`update ${find(id).identifier} ${JSON.stringify(input)}`);
+      if (input.stateId) find(id).state = byId(input.stateId);
+      if (input.assigneeId) find(id).assigneeId = input.assigneeId;
+    },
+    link: async (issueId, url) => {
+      calls.push(`link ${find(issueId).identifier}`);
+      links.set(url, issueId);
+    },
+  };
+  return { api, issues, calls, links };
+}
+
+const PR_URL = "https://github.com/acme-corp/api/pull/7";
+const pr = (over: Partial<Pr> = {}): Pr => ({
+  number: 7,
+  url: PR_URL,
+  title: "Fix login",
+  state: "OPEN",
+  draft: false,
+  review: "",
+  ci: "pass",
+  failing: [],
+  ...over,
+});
+const session = (over: Partial<SessionRef> = {}): SessionRef => ({
+  name: "basil",
+  sessionId: "s1",
+  cwd: "/r",
+  spawned: true,
+  status: "idle",
+  workspace: "work",
+  about: "Users can't log in with SSO",
+  pr: pr(),
+  ...over,
+});
+const run = (over: Partial<FactoryRun> = {}): FactoryRun => ({
+  pr: PR_URL,
+  number: 7,
+  title: "Fix login",
+  repo: "acme-corp/api",
+  session: "basil",
+  workspace: "work",
+  state: "running",
+  merged: false,
+  ...over,
+});
+
+async function setup(
+  opts: {
+    linear?: LinearSettings | undefined;
+    seed?: Issue[];
+    view?: Partial<PrView>;
+    key?: string;
+    sessions?: SessionRef[];
+  } = {},
+) {
+  const fake = fakeLinear(opts.seed);
+  const config: Config = {
+    ...DEFAULTS,
+    workspaces: [{ name: "work", ...("linear" in opts ? { linear: opts.linear } : { linear: { team: "ENG" } }) }],
+  };
+  const posts: string[] = [];
+  const logs: string[] = [];
+  const sessions = opts.sessions ?? [];
+  let view: PrView = { title: "Fix login", body: "", branch: "fix-login", state: "OPEN", draft: false, ...opts.view };
+  const h = new ExtensionHost({
+    post: async (text) => (posts.push(text), "id"),
+    spawn: async () => ({ name: "x", label: "x", cwd: "/", worktree: true, output: "" }),
+    close: async () => "",
+    tell: () => {},
+    sessions: () => sessions,
+    config,
+    waitingListChanged: () => {},
+    waitingListText: async () => "",
+    log: (...a) => void logs.push(a.join(" ")),
+    stateDir: join(dir, `state-${Math.random()}`),
+    token: () => ("key" in opts ? opts.key : "lin_api_test"),
+  });
+  await h.load("builtin:linear", "test", createLinear({ api: () => fake.api, pr: async () => view, now: () => 0 }));
+  const setView = (v: Partial<PrView>) => {
+    view = { ...view, ...v };
+  };
+  return { h, ...fake, posts, logs, sessions, setView };
+}
+
+test("a new PR without an issue gets one, assigned to you, in review, with the PR attached", async () => {
+  const w = await setup();
+  await w.h.emit("pr.opened", { session: session(), pr: pr() });
+  expect(w.calls).toEqual(["create Fix login s-review me", "link ENG-100"]);
+  expect(w.posts).toEqual([`Linear <https://linear.app/acme/issue/x|ENG-100> created for PR <${PR_URL}|#7>`]);
+});
+
+test("a draft PR's new issue is in progress", async () => {
+  const w = await setup({ view: { draft: true } });
+  await w.h.emit("pr.opened", { session: session({ pr: pr({ draft: true }) }), pr: pr({ draft: true }) });
+  expect(w.calls[0]).toBe("create Fix login s-progress me");
+});
+
+const existing: Issue = {
+  id: "i-1",
+  identifier: "ENG-42",
+  url: "https://linear.app/acme/issue/ENG-42",
+  state: byId("s-backlog"),
+  team: "ENG",
+};
+
+test("an issue the branch names is used: assigned to you when it has nobody, linked, and moved to review", async () => {
+  const w = await setup({ seed: [existing], view: { branch: "tom/eng-42-fix-login" } });
+  await w.h.emit("pr.opened", { session: session(), pr: pr() });
+  expect(w.calls).toEqual(['update ENG-42 {"assigneeId":"me"}', "link ENG-42", 'update ENG-42 {"stateId":"s-review"}']);
+  expect(w.posts[0]).toContain("ENG-42> linked");
+});
+
+test("an issue that already has the PR attached is used as it is, someone else's assignee kept", async () => {
+  const w = await setup({ seed: [{ ...existing, assigneeId: "ann", state: byId("s-review") }] });
+  w.links.set(PR_URL, "i-1");
+  await w.h.emit("pr.opened", { session: session(), pr: pr() });
+  expect(w.calls).toEqual(["link ENG-42"]);
+});
+
+test("through the factory: review while it runs, still review after the merge with steps to go, done at its end", async () => {
+  const w = await setup();
+  await w.h.emit("pr.opened", { session: session(), pr: pr() });
+  w.calls.length = 0;
+  await w.h.emit("factory.run", { run: run({ step: "review" }) });
+  await w.h.emit("factory.run", { run: run({ step: "verify-prod", merged: true }) });
+  // The merged session's own event comes too, and doesn't jump ahead of the factory.
+  await w.h.emit("pr.merged", { session: session({ pr: pr({ state: "MERGED" }) }), pr: pr({ state: "MERGED" }) });
+  expect(w.calls).toEqual([]);
+  await w.h.emit("factory.run", { run: run({ state: "done", merged: true, reason: "through the pipeline" }) });
+  expect(w.calls).toEqual(['update ENG-100 {"stateId":"s-done"}']);
+  // Done is final: the PR is forgotten.
+  await w.h.emit("factory.run", { run: run({ state: "done", merged: true }) });
+  expect(w.calls).toHaveLength(1);
+});
+
+test("a PR merged without a factory run is done; one closed unmerged is canceled", async () => {
+  const merged = await setup();
+  await merged.h.emit("pr.opened", { session: session(), pr: pr() });
+  await merged.h.emit("pr.merged", { session: session({ pr: pr({ state: "MERGED" }) }), pr: pr({ state: "MERGED" }) });
+  expect(merged.calls.at(-1)).toBe('update ENG-100 {"stateId":"s-done"}');
+
+  const closed = await setup();
+  await closed.h.emit("pr.opened", { session: session(), pr: pr() });
+  await closed.h.emit("factory.run", { run: run() });
+  closed.setView({ state: "CLOSED" });
+  await closed.h.emit("factory.run", { run: run({ state: "done", reason: "the PR was closed" }) });
+  expect(closed.calls.at(-1)).toBe('update ENG-100 {"stateId":"s-canceled"}');
+});
+
+test("an issue someone moved to another team moves through that team's states", async () => {
+  const w = await setup({ view: { draft: true } });
+  await w.h.emit("pr.opened", { session: session({ pr: pr({ draft: true }) }), pr: pr({ draft: true }) });
+  w.issues.get("ENG-100")!.team = "OPS";
+  await w.h.emit("pr.ready", { session: session(), pr: pr() });
+  expect(w.calls.at(-1)).toBe('update ENG-100 {"stateId":"s-ops-qa"}');
+});
+
+test("an issue someone completed is left alone, and nothing moves it back", async () => {
+  const w = await setup();
+  await w.h.emit("pr.opened", { session: session(), pr: pr() });
+  w.issues.get("ENG-100")!.state = byId("s-done");
+  w.calls.length = 0;
+  await w.h.emit("pr.merged", { session: session({ pr: pr({ state: "MERGED" }) }), pr: pr({ state: "MERGED" }) });
+  expect(w.calls).toEqual([]);
+});
+
+test("a PR opened before the tracker saw it is adopted on a tick; a state named '' is skipped", async () => {
+  const sessions = [session({ pr: pr({ draft: true }) })];
+  const w = await setup({ sessions, linear: { team: "ENG", states: { working: "" } }, view: { draft: true } });
+  await w.h.emit("tick", { at: 1 });
+  expect(w.calls).toEqual(["create Fix login undefined me", "link ENG-100"]);
+  // Ready on a later look: in review.
+  sessions[0] = session();
+  await w.h.emit("tick", { at: 2 });
+  expect(w.calls.at(-1)).toBe('update ENG-100 {"stateId":"s-review"}');
+});
+
+test("nothing is tracked without settings, without a key, for a factory agent's PR, or for an untracked PR's run", async () => {
+  const none = await setup({ linear: undefined });
+  await none.h.emit("pr.opened", { session: session(), pr: pr() });
+  const noKey = await setup({ key: undefined });
+  await noKey.h.emit("pr.opened", { session: session(), pr: pr() });
+  await noKey.h.emit("pr.opened", { session: session(), pr: pr() });
+  const agent = await setup();
+  await agent.h.emit("pr.opened", { session: session({ role: "factory" }), pr: pr() });
+  await agent.h.emit("factory.run", { run: run() });
+  expect([...none.calls, ...noKey.calls, ...agent.calls]).toEqual([]);
+  expect(noKey.logs.filter((l) => l.includes("no Linear API key"))).toHaveLength(1);
+});
+
+test("a failure is logged and tried again after a while, not on every event", async () => {
+  const w = await setup({ linear: { team: "NOPE" } });
+  await w.h.emit("pr.opened", { session: session(), pr: pr() });
+  await w.h.emit("pr.ready", { session: session(), pr: pr() });
+  expect(w.logs.filter((l) => l.includes('no Linear team with the key "NOPE"'))).toHaveLength(1);
+  expect(w.calls).toEqual([]);
+});

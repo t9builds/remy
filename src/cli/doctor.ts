@@ -5,6 +5,7 @@ import { askDaemon } from "../link/client";
 import type { DaemonStatus } from "../link/protocol";
 import { blocking } from "../messengers/messenger";
 import { checkWorkspace } from "../messengers/workspaces";
+import type { Config } from "../sdk/config";
 import { PATHS } from "../shared/paths";
 import { VERSION } from "../shared/version";
 import type { CheckRow } from "./ui";
@@ -39,6 +40,18 @@ function daemonCheck(s: DaemonStatus | undefined): CheckRow {
   };
 }
 
+/** A workspace that tracks PRs in Linear needs its API key; without one the tracker only logs. */
+const linearChecks = (c: Config): CheckRow[] =>
+  c.workspaces
+    .filter((ws) => ws.linear)
+    .map((ws) => ({
+      label: `Linear API key (team ${ws.linear!.team})`,
+      ok: !!readToken(ws.name, "linear"),
+      optional: true,
+      workspace: ws.name,
+      hint: `run \`remy setup ${ws.name}\`, or set REMY_LINEAR_TOKEN_${ws.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`,
+    }));
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 18); don't add to it
 export async function doctor(): Promise<{ ok: boolean; rows: CheckRow[] }> {
   const rows: CheckRow[] = [];
@@ -62,6 +75,7 @@ export async function doctor(): Promise<{ ok: boolean; rows: CheckRow[] }> {
     c.workspaces.map(async (ws) => (await checkWorkspace(ws)).map((r) => ({ ...r, workspace: ws.name }))),
   );
   rows.push(...perWorkspace.flat());
+  rows.push(...linearChecks(c));
   // Telegram gives a bot's messages to one reader, so two workspaces can't share a bot.
   const byBot = new Map<string, string>();
   for (const ws of c.workspaces.filter((w) => w.telegram)) {

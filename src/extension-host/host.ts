@@ -4,6 +4,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { readToken, type TokenKind } from "../config/config";
 import { trustedRepos } from "../config/repos";
 import type { Config } from "../sdk/config";
 import type {
@@ -36,6 +37,8 @@ export type HostDeps = {
   stateDir: string;
   /** How long `emit` waits for one handler (default 10 s); a slower one, e.g. one awaiting `ask`, runs on unwaited. */
   handlerWaitMs?: number;
+  /** Where tokens come from; default `readToken` (env, keychain, file). Tests replace it. */
+  token?: (workspace: string, kind: TokenKind) => string | undefined;
 };
 
 export type Loaded = { name: string; from: string; error?: string };
@@ -152,6 +155,7 @@ export class ExtensionHost {
       on: (event, fn) => {
         this.handlers.set(event, [...(this.handlers.get(event) ?? []), { ext, fn }]);
       },
+      emit: (event, payload) => this.emit(event, payload),
       post: (text, { expectReply, ...opts } = {}) => deps.post(text, { ...opts, expect_reply: expectReply }),
       ask: async (question, { signal, ...opts }) => {
         signal?.throwIfAborted();
@@ -227,6 +231,7 @@ export class ExtensionHost {
       },
       sessions: () => deps.sessions(),
       trustedRepos: () => trustedRepos(deps.config).filter((r): r is TrustedRepo => r.root !== undefined),
+      token: (workspace, kind) => (deps.token ?? readToken)(workspace, kind),
       config: deps.config,
       log: (...a) => deps.log(`[${ext}]`, ...a),
     };
