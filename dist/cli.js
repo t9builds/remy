@@ -2126,7 +2126,10 @@ var createLinear = (world = {}) => (remy) => {
     const t = tracked[url];
     if (t?.linked !== false)
       return;
-    await apiOf(t.workspace)?.link(t.issueId, url, title ?? s.pr.title);
+    const api = apiOf(t.workspace);
+    if (!api)
+      return;
+    await api.link(t.issueId, url, title ?? s.pr.title);
     t.linked = true;
     const verb = t.created ? "created" : "linked";
     delete t.created;
@@ -2186,11 +2189,17 @@ var createLinear = (world = {}) => (remy) => {
     await Promise.all(remy.sessions().map(seen));
     await Promise.all(Object.keys(tracked).map(moveIfDue));
   });
+  function remember(run) {
+    if (settingsOf(run.workspace) && run.state !== "done")
+      runs.set(run.pr, run);
+    else
+      runs.delete(run.pr);
+  }
   remy.on("factory.run", async ({ run }) => {
-    runs.set(run.pr, run);
     const t = tracked[run.pr];
     if (!t)
-      return;
+      return remember(run);
+    runs.set(run.pr, run);
     t.run = { state: run.state, merged: run.merged };
     if (run.merged)
       t.pr = { ...t.pr, state: "MERGED" };

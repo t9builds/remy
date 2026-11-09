@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS } from "../../config/config";
@@ -177,6 +177,7 @@ async function setup(
     waitingListText: async () => "",
     log: (...a) => void logs.push(a.join(" ")),
     stateDir: opts.stateDir ?? join(dir, `state-${Math.random()}`),
+    // Read at each call, so a test can add the key later.
     token: () => ("key" in opts ? opts.key : "lin_api_test"),
   });
   await h.load(
@@ -361,4 +362,42 @@ test("a PR's change is saved when seen, so it survives a restart before the move
   await w.h.emit("pr.merged", { session: session({ pr: pr({ state: "MERGED" }) }), pr: pr({ state: "MERGED" }) });
   const saved = JSON.parse(readFileSync(join(stateDir, "builtin_linear.json"), "utf8"));
   expect(saved.tracked[PR_URL].pr.state).toBe("MERGED");
+});
+
+test("a PR saved unlinked isn't marked linked or posted while there is no key; it is attached once there is one", async () => {
+  const stateDir = join(dir, "state-nokey");
+  mkdirSync(stateDir, { recursive: true });
+  const entry = {
+    issueId: "i-1",
+    identifier: "ENG-42",
+    url: existing.url,
+    workspace: "work",
+    pr: { state: "OPEN", draft: false },
+    linked: false,
+  };
+  writeFileSync(join(stateDir, "builtin_linear.json"), JSON.stringify({ tracked: { [PR_URL]: entry } }));
+  const opts: Parameters<typeof setup>[0] = { stateDir, sessions: [session()], seed: [existing], key: undefined };
+  const w = await setup(opts);
+  const saved = () => JSON.parse(readFileSync(join(stateDir, "builtin_linear.json"), "utf8")).tracked[PR_URL];
+  await w.h.emit("tick", { at: 1 });
+  expect(w.posts).toEqual([]);
+  expect(w.calls).toEqual([]);
+  expect(saved().linked).toBe(false);
+  opts.key = "lin_api_test";
+  await w.h.emit("tick", { at: 2 });
+  expect(w.calls).toContain("link ENG-42");
+  expect(w.posts).toHaveLength(1);
+  expect(saved().linked).toBe(true);
+});
+
+test("a run of a workspace without linear settings, or a finished run of an untracked PR, doesn't seed a later adoption", async () => {
+  const stateDir = join(dir, "state-runs");
+  const sessions = [session()];
+  const w = await setup({ stateDir, sessions });
+  await w.h.emit("factory.run", { run: run({ workspace: "other", merged: true }) });
+  await w.h.emit("factory.run", { run: run({ state: "done", merged: true }) });
+  await w.h.emit("pr.opened", { session: sessions[0]!, pr: pr() });
+  const saved = JSON.parse(readFileSync(join(stateDir, "builtin_linear.json"), "utf8"));
+  expect(saved.tracked[PR_URL].run).toBeUndefined();
+  expect(saved.tracked[PR_URL].pr.state).toBe("OPEN");
 });
