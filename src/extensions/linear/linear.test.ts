@@ -370,6 +370,15 @@ test("a PR closed unmerged cancels an issue Remy made, from wherever it is, and 
   expect(savedTracked(mergedDir)[PR_URL]).toBeUndefined();
 });
 
+test("an issue Remy made is still canceled by a PR closed unmerged after a restart", async () => {
+  const stateDir = join(dir, "state-closed-restart");
+  const first = await setup({ stateDir });
+  await first.h.emit("pr.opened", { session: session(), pr: pr() });
+  const restarted = await setup({ stateDir, seed: [...first.issues.values()] });
+  await restarted.h.emit("pr.merged", closedPr);
+  expect(restarted.calls.at(-1)).toBe('update ENG-100 {"stateId":"s-canceled"}');
+});
+
 test("an issue someone completed stays completed when its PR is then closed unmerged, and the PR is forgotten", async () => {
   const stateDir = join(dir, "state-closed-ended");
   const w = await setup({ stateDir });
