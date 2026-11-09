@@ -5,13 +5,14 @@ export type Issue = {
   id: string;
   identifier: string;
   url: string;
-  state: { id: string; name: string; type: string };
+  state: WorkflowState;
   assigneeId?: string;
   /** Its team's key: workflow states belong to a team. */
   team: string;
 };
 
-export type WorkflowState = { id: string; name: string; type: string };
+/** `position` orders the states of one type in the team's workflow. */
+export type WorkflowState = { id: string; name: string; type: string; position: number };
 
 /** What the tracker asks Linear; one per API key. */
 export type LinearApi = {
@@ -36,10 +37,10 @@ export type LinearApi = {
 };
 
 const ENDPOINT = "https://api.linear.app/graphql";
-const ISSUE = "id identifier url state { id name type } assignee { id } team { key }";
+const ISSUE = "id identifier url state { id name type position } assignee { id } team { key }";
 
 type RawIssue = Omit<Issue, "assigneeId" | "team"> & { assignee?: { id: string } | null; team: { key: string } };
-const issueOf = (i: RawIssue | null | undefined): Issue | undefined =>
+export const issueOf = (i: RawIssue | null | undefined): Issue | undefined =>
   i
     ? { id: i.id, identifier: i.identifier, url: i.url, state: i.state, assigneeId: i.assignee?.id, team: i.team.key }
     : undefined;
@@ -83,7 +84,7 @@ export function linearApi(key: string, fetcher: typeof fetch = fetch): LinearApi
     },
     team: async (teamKey) => {
       const d = await gql<{ teams: { nodes: { id: string; states: { nodes: WorkflowState[] } }[] } }>(
-        `query($key: String!) { teams(filter: { key: { eqIgnoreCase: $key } }) { nodes { id states { nodes { id name type } } } } }`,
+        `query($key: String!) { teams(filter: { key: { eqIgnoreCase: $key } }) { nodes { id states { nodes { id name type position } } } } }`,
         { key: teamKey },
       );
       const t = d.teams.nodes[0];

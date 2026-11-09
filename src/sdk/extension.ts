@@ -93,6 +93,9 @@ export type Events = {
 
 export type EventName = keyof Events;
 
+/** The events an extension may raise with `emit`; the daemon's own (`pr.merged`, `message`, `tick`…) are its alone. */
+export type ExtensionEventName = "factory.run";
+
 /** A PR's factory run as other extensions see it, in the `factory.run` event. */
 export type FactoryRun = {
   pr: string;
@@ -168,10 +171,10 @@ export interface Remy {
   readonly name: string;
   on<E extends EventName>(event: E, handler: (e: Events[E]) => void | Promise<void>): void;
   /**
-   * Raise an event for every extension's handlers, as the factory raises `factory.run`. Resolves once they are done
+   * Raise an event an extension may raise (see `ExtensionEventName`) for every extension's handlers, as the factory raises `factory.run`. Resolves once they are done
    * or have had 10 s each, so a handler that must not wait on others doesn't await it.
    */
-  emit<E extends EventName>(event: E, payload: Events[E]): Promise<void>;
+  emit<E extends ExtensionEventName>(event: E, payload: Events[E]): Promise<void>;
   /** Post to the user. Returns the message id. */
   post(text: string, opts?: PostOptions): Promise<string>;
   /**

@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS } from "../../config/config";
@@ -43,11 +43,12 @@ test("issues only move forward, and never out of done or closed", () => {
 });
 
 const STATES: WorkflowState[] = [
-  { id: "s-backlog", name: "Backlog", type: "backlog" },
-  { id: "s-progress", name: "In Progress", type: "started" },
-  { id: "s-review", name: "In Review", type: "started" },
-  { id: "s-done", name: "Done", type: "completed" },
-  { id: "s-canceled", name: "Canceled", type: "canceled" },
+  { id: "s-backlog", name: "Backlog", type: "backlog", position: 0 },
+  { id: "s-progress", name: "In Progress", type: "started", position: 1 },
+  { id: "s-review", name: "In Review", type: "started", position: 2 },
+  { id: "s-qa", name: "QA", type: "started", position: 3 },
+  { id: "s-done", name: "Done", type: "completed", position: 4 },
+  { id: "s-canceled", name: "Canceled", type: "canceled", position: 5 },
 ];
 const byId = (id: string) => STATES.find((s) => s.id === id)!;
 
@@ -56,6 +57,7 @@ function fakeLinear(seed: Issue[] = []) {
   const issues = new Map(seed.map((i) => [i.identifier, { ...i }]));
   const links = new Map<string, string>();
   const calls: string[] = [];
+  let linkFailures = 0;
   let next = 100;
   const find = (id: string) => [...issues.values()].find((i) => i.id === id)!;
   const api: LinearApi = {
@@ -67,7 +69,8 @@ function fakeLinear(seed: Issue[] = []) {
     },
     team: async (key) => {
       // OPS names its review state differently, so a state of ENG's would be wrong there.
-      if (key === "OPS") return { id: "t-ops", states: [{ id: "s-ops-qa", name: "In Review", type: "started" }] };
+      if (key === "OPS")
+        return { id: "t-ops", states: [{ id: "s-ops-qa", name: "In Review", type: "started", position: 9 }] };
       return key === "ENG" ? { id: "t-eng", states: STATES } : undefined;
     },
     create: async (input) => {
@@ -89,11 +92,23 @@ function fakeLinear(seed: Issue[] = []) {
       if (input.assigneeId) find(id).assigneeId = input.assigneeId;
     },
     link: async (issueId, url) => {
+      if (linkFailures > 0) {
+        linkFailures--;
+        throw new Error("Linear is down");
+      }
       calls.push(`link ${find(issueId).identifier}`);
       links.set(url, issueId);
     },
   };
-  return { api, issues, calls, links };
+  return {
+    api,
+    issues,
+    calls,
+    links,
+    failLinks: (n: number) => {
+      linkFailures = n;
+    },
+  };
 }
 
 const PR_URL = "https://github.com/acme-corp/api/pull/7";
@@ -138,6 +153,7 @@ async function setup(
     view?: Partial<PrView>;
     key?: string;
     sessions?: SessionRef[];
+    stateDir?: string;
   } = {},
 ) {
   const fake = fakeLinear(opts.seed);
@@ -148,6 +164,7 @@ async function setup(
   const posts: string[] = [];
   const logs: string[] = [];
   const sessions = opts.sessions ?? [];
+  const clock = { at: 0 };
   let view: PrView = { title: "Fix login", body: "", branch: "fix-login", state: "OPEN", draft: false, ...opts.view };
   const h = new ExtensionHost({
     post: async (text) => (posts.push(text), "id"),
@@ -159,14 +176,18 @@ async function setup(
     waitingListChanged: () => {},
     waitingListText: async () => "",
     log: (...a) => void logs.push(a.join(" ")),
-    stateDir: join(dir, `state-${Math.random()}`),
+    stateDir: opts.stateDir ?? join(dir, `state-${Math.random()}`),
     token: () => ("key" in opts ? opts.key : "lin_api_test"),
   });
-  await h.load("builtin:linear", "test", createLinear({ api: () => fake.api, pr: async () => view, now: () => 0 }));
+  await h.load(
+    "builtin:linear",
+    "test",
+    createLinear({ api: () => fake.api, pr: async () => view, now: () => clock.at }),
+  );
   const setView = (v: Partial<PrView>) => {
     view = { ...view, ...v };
   };
-  return { h, ...fake, posts, logs, sessions, setView };
+  return { h, ...fake, posts, logs, sessions, setView, clock };
 }
 
 test("a new PR without an issue gets one, assigned to you, in review, with the PR attached", async () => {
@@ -281,4 +302,63 @@ test("a failure is logged and tried again after a while, not on every event", as
   await w.h.emit("pr.ready", { session: session(), pr: pr() });
   expect(w.logs.filter((l) => l.includes('no Linear team with the key "NOPE"'))).toHaveLength(1);
   expect(w.calls).toEqual([]);
+});
+
+test("a link that fails doesn't make a second issue: the tracked PR is attached on a later tick, and posted once", async () => {
+  const sessions = [session()];
+  const w = await setup({ sessions });
+  w.failLinks(1);
+  await w.h.emit("pr.opened", { session: sessions[0]!, pr: pr() });
+  expect(w.calls).toEqual(["create Fix login s-review me"]);
+  expect(w.posts).toEqual([]);
+  // Too soon: waits.
+  await w.h.emit("tick", { at: 1 });
+  expect(w.calls).toHaveLength(1);
+  w.clock.at = 11 * 60_000;
+  await w.h.emit("tick", { at: 2 });
+  await w.h.emit("tick", { at: 3 });
+  expect(w.calls).toEqual(["create Fix login s-review me", "link ENG-100"]);
+  expect(w.links.get(PR_URL)).toBe("i-100");
+  expect(w.posts).toHaveLength(1);
+});
+
+test("an issue already further along is left where it is, not pulled back", async () => {
+  const w = await setup({
+    seed: [{ ...existing, state: byId("s-qa") }],
+    view: { branch: "tom/eng-42-fix-login", draft: true },
+  });
+  await w.h.emit("pr.opened", { session: session({ pr: pr({ draft: true }) }), pr: pr({ draft: true }) });
+  expect(w.calls.filter((c) => c.includes("stateId"))).toEqual([]);
+  // Same type, later position, as well: In Review is before QA.
+  await w.h.emit("pr.ready", { session: session(), pr: pr() });
+  expect(w.calls.filter((c) => c.includes("stateId"))).toEqual([]);
+  // But canceling still goes from there.
+  await w.h.emit("pr.merged", { session: session({ pr: pr({ state: "CLOSED" }) }), pr: pr({ state: "CLOSED" }) });
+  expect(w.calls.at(-1)).toBe('update ENG-42 {"stateId":"s-canceled"}');
+});
+
+test("a merged run with steps to go, raised before the PR was tracked, keeps the issue from Done", async () => {
+  const sessions = [session()];
+  const w = await setup({ sessions });
+  await w.h.emit("factory.run", { run: run({ step: "verify-prod", merged: true }) });
+  await w.h.emit("pr.opened", { session: sessions[0]!, pr: pr() });
+  w.calls.length = 0;
+  await w.h.emit("pr.merged", { session: session({ pr: pr({ state: "MERGED" }) }), pr: pr({ state: "MERGED" }) });
+  expect(w.calls).toEqual([]);
+  await w.h.emit("factory.run", { run: run({ state: "done", merged: true }) });
+  expect(w.calls).toEqual(['update ENG-100 {"stateId":"s-done"}']);
+});
+
+test("a PR's change is saved when seen, so it survives a restart before the move succeeds", async () => {
+  const stateDir = join(dir, "state-persist");
+  const sessions = [session({ pr: pr({ draft: true }) })];
+  const w = await setup({ stateDir, sessions, view: { draft: true } });
+  await w.h.emit("pr.opened", { session: sessions[0]!, pr: pr({ draft: true }) });
+  // The move fails: Linear is unreachable for the lookup.
+  w.api.issue = async () => {
+    throw new Error("down");
+  };
+  await w.h.emit("pr.merged", { session: session({ pr: pr({ state: "MERGED" }) }), pr: pr({ state: "MERGED" }) });
+  const saved = JSON.parse(readFileSync(join(stateDir, "builtin_linear.json"), "utf8"));
+  expect(saved.tracked[PR_URL].pr.state).toBe("MERGED");
 });

@@ -1879,13 +1879,12 @@ var createFactory = (world = {}) => (remy) => {
     if (run.stage === "asking" && run.ask && run.ask.answer === undefined && !fixOfferLapsed(run, Date.now()))
       ask(run, run.ask.question);
     syncWaitingList(run);
-    announce(run);
   }
 };
 
 // src/extensions/linear/api.ts
 var ENDPOINT = "https://api.linear.app/graphql";
-var ISSUE = "id identifier url state { id name type } assignee { id } team { key }";
+var ISSUE = "id identifier url state { id name type position } assignee { id } team { key }";
 var issueOf = (i) => i ? { id: i.id, identifier: i.identifier, url: i.url, state: i.state, assigneeId: i.assignee?.id, team: i.team.key } : undefined;
 function linearApi(key, fetcher = fetch) {
   async function gql(query, variables = {}) {
@@ -1918,7 +1917,7 @@ function linearApi(key, fetcher = fetch) {
       return issueOf(d.attachmentsForURL.nodes[0]?.issue);
     },
     team: async (teamKey) => {
-      const d = await gql(`query($key: String!) { teams(filter: { key: { eqIgnoreCase: $key } }) { nodes { id states { nodes { id name type } } } } }`, { key: teamKey });
+      const d = await gql(`query($key: String!) { teams(filter: { key: { eqIgnoreCase: $key } }) { nodes { id states { nodes { id name type position } } } } }`, { key: teamKey });
       const t = d.teams.nodes[0];
       return t && { id: t.id, states: t.states.nodes };
     },
@@ -1958,6 +1957,12 @@ var DEFAULT_STATES = {
 var ENDED = new Set(["completed", "canceled"]);
 var RETRY_MS = 10 * 60000;
 var MAX_REFS = 5;
+var TYPE_ORDER = ["triage", "backlog", "unstarted", "started", "completed", "canceled"];
+function atOrBeyond(from, to) {
+  const f = TYPE_ORDER.indexOf(from.type);
+  const t = TYPE_ORDER.indexOf(to.type);
+  return f !== t ? f > t : from.position >= to.position;
+}
 function issueRefs(...texts) {
   const refs = new Set;
   for (const t of texts)
@@ -1987,6 +1992,7 @@ function stateFor(settings, phase, states) {
   const name = stateName(settings, phase).toLowerCase();
   return name ? states.find((s) => s.name.toLowerCase() === name) : undefined;
 }
+var movesTo = (from, to, phase) => from.id !== to.id && (phase === "closed" || !atOrBeyond(from, to));
 var linear_default = (remy) => createLinear()(remy);
 var createLinear = (world = {}) => (remy) => {
   const w = { api: linearApi, pr: prView, now: Date.now, ...world };
@@ -1995,6 +2001,7 @@ var createLinear = (world = {}) => (remy) => {
   const busy = new Set;
   const retryAt = new Map;
   const warned = new Set;
+  const runs = new Map;
   const apis = new Map;
   const teams = new Map;
   const settingsOf = (workspace) => remy.config.workspaces.find((ws) => ws.name === workspace)?.linear;
@@ -2041,7 +2048,7 @@ var createLinear = (world = {}) => (remy) => {
         remy.log(`team ${issue.team} has no state "${name}"; ${issue.identifier} stays where it is`);
       return;
     }
-    if (issue.state.id === target.id)
+    if (!movesTo(issue.state, target, phase))
       return;
     await api.update(issue.id, { stateId: target.id });
     remy.log(`${issue.identifier} \u2192 ${target.name} (${url})`);
@@ -2057,8 +2064,10 @@ var createLinear = (world = {}) => (remy) => {
       return;
     await setState(api, t, settings, phase, url);
     t.phase = phase;
-    if (FINAL.includes(phase))
+    if (FINAL.includes(phase)) {
       delete tracked[url];
+      runs.delete(url);
+    }
     save();
   }
   async function existingIssue(api, url, view) {
@@ -2072,6 +2081,19 @@ var createLinear = (world = {}) => (remy) => {
     }
     return;
   }
+  async function createIssue(s, settings, api, view, me) {
+    const team = await teamOf(s.workspace, api, settings.team);
+    const phase = phaseOf({ pr: { state: view.state, draft: view.draft } });
+    return api.create({
+      teamId: team.id,
+      title: view.title,
+      description: [s.about, `PR: ${s.pr.url}`].filter(Boolean).join(`
+
+`),
+      assigneeId: me,
+      stateId: stateFor(settings, phase, team.states)?.id
+    });
+  }
   async function adopt(s, settings, api) {
     const url = s.pr.url;
     const view = await w.pr(url);
@@ -2080,33 +2102,36 @@ var createLinear = (world = {}) => (remy) => {
     if (view.state !== "OPEN")
       return;
     const me = await api.viewer();
-    let issue = await existingIssue(api, url, view);
-    const made = !issue;
-    if (!issue) {
-      const team = await teamOf(s.workspace, api, settings.team);
-      const phase = phaseOf({ pr: { state: view.state, draft: view.draft } });
-      issue = await api.create({
-        teamId: team.id,
-        title: view.title,
-        description: [s.about, `PR: ${url}`].filter(Boolean).join(`
-
-`),
-        assigneeId: me,
-        stateId: stateFor(settings, phase, team.states)?.id
-      });
-    } else if (!issue.assigneeId)
-      await api.update(issue.id, { assigneeId: me });
-    await api.link(issue.id, url, view.title);
+    const found = await existingIssue(api, url, view);
+    const made = !found;
+    if (found && !found.assigneeId)
+      await api.update(found.id, { assigneeId: me });
+    const issue = found ?? await createIssue(s, settings, api, view, me);
+    const seenRun = runs.get(url);
     tracked[url] = {
       issueId: issue.id,
       identifier: issue.identifier,
       url: issue.url,
       workspace: s.workspace,
-      pr: { state: view.state, draft: view.draft }
+      pr: { state: seenRun?.merged ? "MERGED" : view.state, draft: view.draft },
+      ...seenRun && { run: { state: seenRun.state, merged: seenRun.merged } },
+      linked: false,
+      created: made
     };
     save();
-    const verb = made ? "created" : "linked";
-    await remy.post(`Linear <${issue.url}|${issue.identifier}> ${verb} for PR <${url}|#${s.pr.number}>`, {
+    await attach(s, view.title);
+  }
+  async function attach(s, title) {
+    const url = s.pr.url;
+    const t = tracked[url];
+    if (t?.linked !== false)
+      return;
+    await apiOf(t.workspace)?.link(t.issueId, url, title ?? s.pr.title);
+    t.linked = true;
+    const verb = t.created ? "created" : "linked";
+    delete t.created;
+    save();
+    await remy.post(`Linear <${t.url}|${t.identifier}> ${verb} for PR <${url}|#${s.pr.number}>`, {
       workspace: s.workspace,
       session: s.name
     });
@@ -2125,16 +2150,26 @@ var createLinear = (world = {}) => (remy) => {
       busy.delete(url);
     }
   }
+  function syncPr(t, pr) {
+    if (t.pr.state === pr.state && t.pr.draft === pr.draft)
+      return;
+    t.pr = { state: pr.state, draft: pr.draft };
+    save();
+  }
+  async function seenTracked(s, t) {
+    syncPr(t, s.pr);
+    if (t.linked === false)
+      return once(s.pr.url, () => attach(s).then(() => move(s.pr.url)));
+    return moveIfDue(s.pr.url);
+  }
   async function seen(s) {
     const pr = s.pr;
     const settings = settingsOf(s.workspace);
     if (s.role || !pr || !settings)
       return;
     const t = tracked[pr.url];
-    if (t) {
-      t.pr = { state: pr.state, draft: pr.draft };
-      return moveIfDue(pr.url);
-    }
+    if (t)
+      return seenTracked(s, t);
     const api = pr.state === "OPEN" ? apiOf(s.workspace) : undefined;
     if (api)
       await once(pr.url, () => adopt(s, settings, api).then(() => move(pr.url)));
@@ -2152,6 +2187,7 @@ var createLinear = (world = {}) => (remy) => {
     await Promise.all(Object.keys(tracked).map(moveIfDue));
   });
   remy.on("factory.run", async ({ run }) => {
+    runs.set(run.pr, run);
     const t = tracked[run.pr];
     if (!t)
       return;

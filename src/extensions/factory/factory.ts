@@ -313,7 +313,7 @@ export const createFactory =
     for (const run of Object.values(runs)) {
       if (run.stage === "asking" && run.ask && run.ask.answer === undefined && !fixOfferLapsed(run, Date.now()))
         ask(run, run.ask.question);
+      // Not announced here: extensions loaded after this one have no handlers yet. The first tick announces every run.
       syncWaitingList(run);
-      announce(run);
     }
   };

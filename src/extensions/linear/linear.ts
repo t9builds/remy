@@ -41,7 +41,21 @@ export type Tracked = {
   run?: { state: FactoryRun["state"]; merged: boolean };
   /** The phase Remy last moved the issue to. */
   phase?: LinearPhase;
+  /** False while the PR isn't attached to the issue yet, so a failed attach is retried without making another issue. */
+  linked?: boolean;
+  /** Whether Remy made the issue (not found), for the post once the PR is attached. */
+  created?: boolean;
 };
+
+/** Linear's state types from earliest to latest; an issue is never moved to an earlier one. */
+const TYPE_ORDER = ["triage", "backlog", "unstarted", "started", "completed", "canceled"];
+
+/** Whether `from` is at or beyond `to` in the workflow: a later type, or the same type and no earlier position. */
+function atOrBeyond(from: WorkflowState, to: WorkflowState): boolean {
+  const f = TYPE_ORDER.indexOf(from.type);
+  const t = TYPE_ORDER.indexOf(to.type);
+  return f !== t ? f > t : from.position >= to.position;
+}
 
 /** Issue identifiers a PR names, first seen first: "ENG-123", or one inside a Linear link or a branch like "tom/eng-123-fix". */
 export function issueRefs(...texts: string[]): string[] {
@@ -79,6 +93,10 @@ function stateFor(settings: LinearSettings, phase: LinearPhase, states: Workflow
   return name ? states.find((s) => s.name.toLowerCase() === name) : undefined;
 }
 
+/** Whether the issue's state `from` should change to `to`: not there already, and, but for canceling, not beyond it. */
+const movesTo = (from: WorkflowState, to: WorkflowState, phase: LinearPhase) =>
+  from.id !== to.id && (phase === "closed" || !atOrBeyond(from, to));
+
 /** The parts of the world the tracker uses; tests replace them. */
 export type World = {
   api(key: string): LinearApi;
@@ -97,6 +115,8 @@ export const createLinear =
     const busy = new Set<string>();
     const retryAt = new Map<string, number>();
     const warned = new Set<string>();
+    // The last `factory.run` per PR, also for PRs not tracked yet: a state raised while one is adopted isn't raised again.
+    const runs = new Map<string, FactoryRun>();
     const apis = new Map<string, LinearApi>();
     const teams = new Map<string, Promise<{ id: string; states: WorkflowState[] } | undefined>>();
 
@@ -148,7 +168,7 @@ export const createLinear =
         if (name) remy.log(`team ${issue.team} has no state "${name}"; ${issue.identifier} stays where it is`);
         return;
       }
-      if (issue.state.id === target.id) return;
+      if (!movesTo(issue.state, target, phase)) return;
       await api.update(issue.id, { stateId: target.id });
       remy.log(`${issue.identifier} → ${target.name} (${url})`);
     }
@@ -164,7 +184,10 @@ export const createLinear =
       await setState(api, t, settings, phase, url);
       t.phase = phase;
       // A PR in a final phase needs nothing more: forget it, so the state file stays small.
-      if (FINAL.includes(phase)) delete tracked[url];
+      if (FINAL.includes(phase)) {
+        delete tracked[url];
+        runs.delete(url);
+      }
       save();
     }
 
@@ -179,7 +202,20 @@ export const createLinear =
       return undefined;
     }
 
-    /** Find or make the issue of an open PR of a session's, attach the PR, and start tracking it. */
+    /** A new issue for the PR in the workspace's team, in the state of the PR's phase. */
+    async function createIssue(s: SessionRef, settings: LinearSettings, api: LinearApi, view: PrView, me: string) {
+      const team = await teamOf(s.workspace, api, settings.team);
+      const phase = phaseOf({ pr: { state: view.state, draft: view.draft } });
+      return api.create({
+        teamId: team.id,
+        title: view.title,
+        description: [s.about, `PR: ${s.pr!.url}`].filter(Boolean).join("\n\n"),
+        assigneeId: me,
+        stateId: stateFor(settings, phase, team.states)?.id,
+      });
+    }
+
+    /** Find or make the issue of an open PR of a session's, and track it at once, so a failure later never makes another. */
     async function adopt(s: SessionRef, settings: LinearSettings, api: LinearApi) {
       const url = s.pr!.url;
       const view = await w.pr(url);
@@ -187,30 +223,37 @@ export const createLinear =
       if (!view) throw new Error("gh couldn't read the PR");
       if (view.state !== "OPEN") return;
       const me = await api.viewer();
-      let issue = await existingIssue(api, url, view);
-      const made = !issue;
-      if (!issue) {
-        const team = await teamOf(s.workspace, api, settings.team);
-        const phase = phaseOf({ pr: { state: view.state, draft: view.draft } });
-        issue = await api.create({
-          teamId: team.id,
-          title: view.title,
-          description: [s.about, `PR: ${url}`].filter(Boolean).join("\n\n"),
-          assigneeId: me,
-          stateId: stateFor(settings, phase, team.states)?.id,
-        });
-      } else if (!issue.assigneeId) await api.update(issue.id, { assigneeId: me });
-      await api.link(issue.id, url, view.title);
+      const found = await existingIssue(api, url, view);
+      const made = !found;
+      if (found && !found.assigneeId) await api.update(found.id, { assigneeId: me });
+      const issue = found ?? (await createIssue(s, settings, api, view, me));
+      // What `factory.run` said while this was looking, or before the PR was tracked.
+      const seenRun = runs.get(url);
       tracked[url] = {
         issueId: issue.id,
         identifier: issue.identifier,
         url: issue.url,
         workspace: s.workspace,
-        pr: { state: view.state, draft: view.draft },
+        pr: { state: seenRun?.merged ? "MERGED" : view.state, draft: view.draft },
+        ...(seenRun && { run: { state: seenRun.state, merged: seenRun.merged } }),
+        linked: false,
+        created: made,
       };
       save();
-      const verb = made ? "created" : "linked";
-      await remy.post(`Linear <${issue.url}|${issue.identifier}> ${verb} for PR <${url}|#${s.pr!.number}>`, {
+      await attach(s, view.title);
+    }
+
+    /** Attach a tracked PR to its issue and say so once; a failure leaves it unlinked, for `once` to retry. */
+    async function attach(s: SessionRef, title?: string) {
+      const url = s.pr!.url;
+      const t = tracked[url];
+      if (t?.linked !== false) return;
+      await apiOf(t.workspace)?.link(t.issueId, url, title ?? s.pr!.title);
+      t.linked = true;
+      const verb = t.created ? "created" : "linked";
+      delete t.created;
+      save();
+      await remy.post(`Linear <${t.url}|${t.identifier}> ${verb} for PR <${url}|#${s.pr!.number}>`, {
         workspace: s.workspace,
         session: s.name,
       });
@@ -231,16 +274,27 @@ export const createLinear =
       }
     }
 
+    /** Keep the PR as the session shows it, saved so a restart before the move succeeds doesn't lose it. */
+    function syncPr(t: Tracked, pr: { state: string; draft: boolean }) {
+      if (t.pr.state === pr.state && t.pr.draft === pr.draft) return;
+      t.pr = { state: pr.state, draft: pr.draft };
+      save();
+    }
+
+    /** A tracked PR's session looked again: keep what it shows, attach the PR if that failed, else move when due. */
+    async function seenTracked(s: SessionRef, t: Tracked) {
+      syncPr(t, s.pr!);
+      if (t.linked === false) return once(s.pr!.url, () => attach(s).then(() => move(s.pr!.url)));
+      return moveIfDue(s.pr!.url);
+    }
+
     /** A session's PR as Remy last saw it: adopt it when it's new and open, or move its issue when it changed. */
     async function seen(s: SessionRef) {
       const pr = s.pr;
       const settings = settingsOf(s.workspace);
       if (s.role || !pr || !settings) return;
       const t = tracked[pr.url];
-      if (t) {
-        t.pr = { state: pr.state, draft: pr.draft };
-        return moveIfDue(pr.url);
-      }
+      if (t) return seenTracked(s, t);
       const api = pr.state === "OPEN" ? apiOf(s.workspace) : undefined;
       if (api) await once(pr.url, () => adopt(s, settings, api).then(() => move(pr.url)));
     }
@@ -261,6 +315,7 @@ export const createLinear =
       await Promise.all(Object.keys(tracked).map(moveIfDue));
     });
     remy.on("factory.run", async ({ run }) => {
+      runs.set(run.pr, run);
       const t = tracked[run.pr];
       if (!t) return;
       t.run = { state: run.state, merged: run.merged };
