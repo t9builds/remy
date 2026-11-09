@@ -12,7 +12,7 @@ Encode the domain in a structure instead of scattering it through conditionals: 
 
 ## Subtract before you add
 
-Remove what's dead before building: code, wrappers, guards, references. Build on the simpler base, and leave the design a little smaller than you found it.
+Remove what's dead in the code this change touches before building: code, wrappers, guards, references. Build on the simpler base, and leave the design a little smaller than you found it.
 
 ## Integrate, don't bolt on
 
