@@ -2001,7 +2001,7 @@ var createLinear = (world = {}) => (remy) => {
   const save = () => remy.state.set("tracked", tracked);
   const busy = new Set;
   const retryAt = new Map;
-  const warned = new Set;
+  const noKeyAt = new Map;
   const runs = new Map;
   const apis = new Map;
   const teams = new Map;
@@ -2010,13 +2010,17 @@ var createLinear = (world = {}) => (remy) => {
     const had = apis.get(workspace);
     if (had)
       return had;
+    const missed = noKeyAt.get(workspace);
+    if (missed !== undefined && w.now() - missed < RETRY_MS)
+      return;
     const key = remy.token(workspace, "linear");
     if (!key) {
-      if (!warned.has(workspace))
+      if (missed === undefined)
         remy.log(`workspace ${workspace} has linear settings but no Linear API key; run remy setup`);
-      warned.add(workspace);
+      noKeyAt.set(workspace, w.now());
       return;
     }
+    noKeyAt.delete(workspace);
     const api = w.api(key);
     apis.set(workspace, api);
     return api;

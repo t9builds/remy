@@ -117,7 +117,8 @@ export const createLinear =
     const save = () => remy.state.set("tracked", tracked);
     const busy = new Set<string>();
     const retryAt = new Map<string, number>();
-    const warned = new Set<string>();
+    // When a workspace's missing key was last looked for: reading it may spawn the keychain, which blocks the daemon.
+    const noKeyAt = new Map<string, number>();
     // The last `factory.run` per PR, also for PRs not tracked yet: a state raised while one is adopted isn't raised again.
     const runs = new Map<string, FactoryRun>();
     const apis = new Map<string, LinearApi>();
@@ -125,17 +126,20 @@ export const createLinear =
 
     const settingsOf = (workspace: string) => remy.config.workspaces.find((ws) => ws.name === workspace)?.linear;
 
-    /** The workspace's API, or undefined (said once) when it has no key. */
+    /** The workspace's API, or undefined when it has no key (said once, and looked for again at most every RETRY_MS). */
     function apiOf(workspace: string) {
       const had = apis.get(workspace);
       if (had) return had;
+      const missed = noKeyAt.get(workspace);
+      if (missed !== undefined && w.now() - missed < RETRY_MS) return undefined;
       const key = remy.token(workspace, "linear");
       if (!key) {
-        if (!warned.has(workspace))
+        if (missed === undefined)
           remy.log(`workspace ${workspace} has linear settings but no Linear API key; run remy setup`);
-        warned.add(workspace);
+        noKeyAt.set(workspace, w.now());
         return undefined;
       }
+      noKeyAt.delete(workspace);
       const api = w.api(key);
       apis.set(workspace, api);
       return api;

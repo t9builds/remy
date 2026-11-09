@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS } from "../../config/config";
@@ -170,6 +170,7 @@ async function setup(
   const logs: string[] = [];
   const sessions = opts.sessions ?? [];
   const clock = { at: 0 };
+  const tokenCalls = { n: 0 };
   let view: PrView = { title: "Fix login", body: "", branch: "fix-login", state: "OPEN", draft: false, ...opts.view };
   const h = new ExtensionHost({
     post: async (text) => (posts.push(text), "id"),
@@ -183,7 +184,10 @@ async function setup(
     log: (...a) => void logs.push(a.join(" ")),
     stateDir: opts.stateDir ?? join(dir, `state-${Math.random()}`),
     // Read at each call, so a test can add the key later.
-    token: () => ("key" in opts ? opts.key : "lin_api_test"),
+    token: () => {
+      tokenCalls.n++;
+      return "key" in opts ? opts.key : "lin_api_test";
+    },
   });
   await h.load(
     "builtin:linear",
@@ -193,7 +197,7 @@ async function setup(
   const setView = (v: Partial<PrView>) => {
     view = { ...view, ...v };
   };
-  return { h, ...fake, posts, logs, sessions, setView, clock };
+  return { h, ...fake, posts, logs, sessions, setView, clock, tokenCalls };
 }
 
 test("a new PR without an issue gets one, assigned to you, in review, with the PR attached", async () => {
@@ -438,6 +442,7 @@ test("a PR saved unlinked isn't marked linked or posted while there is no key; i
   expect(w.calls).toEqual([]);
   expect(saved().linked).toBe(false);
   opts.key = "lin_api_test";
+  w.clock.at = 11 * 60_000;
   await w.h.emit("tick", { at: 2 });
   expect(w.calls).toContain("link ENG-42");
   expect(w.posts).toHaveLength(1);
@@ -475,4 +480,72 @@ test("an assign Linear refuses doesn't keep a found issue from being tracked, li
   expect(w.calls).toEqual(["link ENG-42", 'update ENG-42 {"stateId":"s-review"}']);
   expect(w.posts).toHaveLength(1);
   expect(w.logs.some((l) => l.includes("couldn't assign ENG-42"))).toBe(true);
+});
+
+test("a tick retries a failed move for a PR whose session is gone", async () => {
+  const sessions = [session()];
+  const w = await setup({ sessions });
+  await w.h.emit("pr.opened", { session: sessions[0]!, pr: pr() });
+  const lookup = w.api.issue;
+  w.api.issue = async () => {
+    throw new Error("down");
+  };
+  await w.h.emit("pr.merged", { session: session({ pr: pr({ state: "MERGED" }) }), pr: pr({ state: "MERGED" }) });
+  expect(w.issues.get("ENG-100")!.state.id).toBe("s-review");
+  w.api.issue = lookup;
+  sessions.length = 0;
+  w.clock.at = 11 * 60_000;
+  await w.h.emit("tick", { at: 1 });
+  expect(w.issues.get("ENG-100")!.state.id).toBe("s-done");
+});
+
+test("a PR gh says isn't open gets no issue, though its session still says OPEN", async () => {
+  for (const state of ["MERGED", "CLOSED"]) {
+    const stateDir = join(dir, `state-notopen-${state}`);
+    const w = await setup({ stateDir, view: { state } });
+    await w.h.emit("pr.opened", { session: session(), pr: pr() });
+    expect(w.calls).toEqual([]);
+    expect(w.posts).toEqual([]);
+    expect(
+      existsSync(join(stateDir, "builtin_linear.json")) ? savedTracked(stateDir)[PR_URL] : undefined,
+    ).toBeUndefined();
+  }
+});
+
+test("two events for one new PR while it is being adopted make one issue", async () => {
+  const w = await setup();
+  let release = () => {};
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  w.api.viewer = async () => {
+    await gate;
+    return "me";
+  };
+  const first = w.h.emit("pr.opened", { session: session(), pr: pr() });
+  await Bun.sleep(0);
+  const second = w.h.emit("tick", { at: 1 });
+  const third = w.h.emit("pr.ready", { session: session(), pr: pr() });
+  await Bun.sleep(0);
+  release();
+  await Promise.all([first, second, third]);
+  expect(w.calls.filter((c) => c.startsWith("create"))).toHaveLength(1);
+});
+
+test("a workspace without a key is looked up at most every ten minutes, and a key added later is picked up", async () => {
+  const sessions = [session()];
+  const opts: Parameters<typeof setup>[0] = { sessions, key: undefined };
+  const w = await setup(opts);
+  await w.h.emit("tick", { at: 1 });
+  await w.h.emit("tick", { at: 2 });
+  await w.h.emit("pr.opened", { session: sessions[0]!, pr: pr() });
+  expect(w.tokenCalls.n).toBe(1);
+  expect(w.calls).toEqual([]);
+  opts.key = "lin_api_test";
+  await w.h.emit("tick", { at: 3 });
+  expect(w.calls).toEqual([]);
+  w.clock.at = 11 * 60_000;
+  await w.h.emit("tick", { at: 4 });
+  expect(w.calls).toEqual(["create Fix login s-review me", "link ENG-100"]);
+  expect(w.logs.filter((l) => l.includes("no Linear API key"))).toHaveLength(1);
 });
