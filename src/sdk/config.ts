@@ -47,10 +47,31 @@ export type TelegramSettings = {
  */
 export type BothMode = "mirror" | "pings" | "follow";
 
+/** Remy's phases of a PR, in order, each mapped to a Linear workflow state by name. */
+export type LinearPhase = "working" | "review" | "merged" | "done" | "closed";
+
+/**
+ * Track your PRs in Linear (extensions/linear/): each PR a session of yours opens gets an issue, found or created and
+ * assigned to you, and Remy moves it forward as the PR and its factory run go. The API key is the workspace's
+ * `linear` token (`remy setup`).
+ */
+export type LinearSettings = {
+  /** Key of the team new issues are created in, e.g. "ENG". */
+  team: string;
+  /**
+   * The workflow state for each phase, by name. Defaults: working "In Progress" (a draft PR), review "In Review"
+   * (ready, or in the factory), merged: none (stays in review until the factory is through), done "Done", closed
+   * "Canceled" (closed unmerged; only for an issue Remy created, a found one stays). "" leaves the issue where it is in that phase; a name the team lacks is skipped.
+   */
+  states?: Partial<Record<LinearPhase, string>>;
+};
+
 /** Where remy talks to you about a set of sessions: Slack, Telegram, or both. */
 export type Workspace = Routing & {
   slack?: SlackSettings;
   telegram?: TelegramSettings;
+  /** Track this workspace's PRs in Linear. */
+  linear?: LinearSettings;
   /** How Slack and Telegram work together when both are set. Default "mirror". */
   both?: BothMode;
   /** The app that gets everything with "pings", and that "follow" starts with. Default "slack". */
@@ -93,7 +114,7 @@ export type Config = {
     repos?: string[];
     /** npm packages installed in ~/.remy. */
     packages?: string[];
-    /** Extensions not to load, by name: a built-in ("merged-cleanup", "slack-tasks", "queue", "factory"), a file name, "<repo>/<file>" or a package. */
+    /** Extensions not to load, by name: a built-in ("merged-cleanup", "slack-tasks", "agent-updates", "queue", "factory", "linear"), a file name, "<repo>/<file>" or a package. */
     disabled?: string[];
   };
 };

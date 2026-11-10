@@ -347,7 +347,8 @@ function readToken(workspace, kind) {
 var TOKEN_FORMAT = {
   "slack-bot": { pattern: /^xoxb-[\w-]+$/, example: "xoxb-\u2026" },
   "slack-app": { pattern: /^xapp-[\w-]+$/, example: "xapp-\u2026" },
-  "telegram-bot": { pattern: /^\d+:[\w-]{30,}$/, example: "123456789:AA\u2026" }
+  "telegram-bot": { pattern: /^\d+:[\w-]{30,}$/, example: "123456789:AA\u2026" },
+  linear: { pattern: /^lin_api_\w+$/, example: "lin_api_\u2026" }
 };
 function storeToken(workspace, kind, token) {
   ensureDir();
@@ -494,6 +495,7 @@ class ExtensionHost {
       on: (event, fn) => {
         this.handlers.set(event, [...this.handlers.get(event) ?? [], { ext, fn }]);
       },
+      emit: (event, payload) => this.emit(event, payload),
       post: (text, { expectReply, ...opts } = {}) => deps.post(text, { ...opts, expect_reply: expectReply }),
       ask: async (question, { signal, ...opts }) => {
         signal?.throwIfAborted();
@@ -570,6 +572,7 @@ class ExtensionHost {
       },
       sessions: () => deps.sessions(),
       trustedRepos: () => trustedRepos(deps.config).filter((r) => r.root !== undefined),
+      token: (workspace, kind) => (deps.token ?? readToken)(workspace, kind),
       config: deps.config,
       log: (...a) => deps.log(`[${ext}]`, ...a)
     };
@@ -1759,6 +1762,20 @@ var createFactory = (world = {}) => (remy) => {
       });
     remy.waitingList.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
   }
+  const announced = new Map;
+  function announce(run) {
+    const state = run.stage === "done" ? "done" : run.stage === "held" || run.stage === "asking" ? "held" : "running";
+    const step = loaded.get(run.repoDir)?.factory?.steps[run.step]?.name;
+    const merged = !!run.mergeSha;
+    const key = `${state} ${step} ${merged}`;
+    if (announced.get(run.pr) === key)
+      return;
+    announced.set(run.pr, key);
+    const { pr, number, title, repo, session, workspace, reason } = run;
+    remy.emit("factory.run", {
+      run: { pr, number, title, repo, session, workspace, state, step, merged, reason }
+    });
+  }
   async function startRun(fields) {
     const f = await factoryAt(fields.repoDir);
     if (!f || autonomy(f) === "notify")
@@ -1830,6 +1847,7 @@ var createFactory = (world = {}) => (remy) => {
           remy.log("factory step failed", url, e?.message ?? e);
         }
         syncWaitingList(run);
+        announce(run);
       }
       const current = new Set(Object.values(runs).flatMap((r) => r.agent ? [r.agent.name] : []));
       for (const s of remy.sessions().filter((s) => isOrphan(s, current) && !tried.has(s.sessionId))) {
@@ -1862,6 +1880,345 @@ var createFactory = (world = {}) => (remy) => {
       ask(run, run.ask.question);
     syncWaitingList(run);
   }
+};
+
+// src/extensions/linear/api.ts
+var ENDPOINT = "https://api.linear.app/graphql";
+var ISSUE = "id identifier url state { id name type position } assignee { id } team { key }";
+var issueOf = (i) => i ? { id: i.id, identifier: i.identifier, url: i.url, state: i.state, assigneeId: i.assignee?.id, team: i.team.key } : undefined;
+function linearApi(key, fetcher = fetch) {
+  async function gql(query, variables = {}) {
+    const res = await fetcher(ENDPOINT, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: key },
+      body: JSON.stringify({ query, variables }),
+      signal: AbortSignal.timeout(20000)
+    });
+    const j = await res.json().catch(() => ({}));
+    if (j.errors?.length || !res.ok)
+      throw new Error(`Linear: ${j.errors?.[0]?.message ?? `HTTP ${res.status}`}`);
+    return j.data;
+  }
+  return {
+    viewer: async () => (await gql("{ viewer { id } }")).viewer.id,
+    issue: async (idOrIdentifier) => {
+      try {
+        return issueOf((await gql(`query($id: String!) { issue(id: $id) { ${ISSUE} } }`, {
+          id: idOrIdentifier
+        })).issue);
+      } catch (e) {
+        if (/not found|entity not found|could not find/i.test(String(e?.message)))
+          return;
+        throw e;
+      }
+    },
+    issueWithLink: async (url) => {
+      const d = await gql(`query($url: String!) { attachmentsForURL(url: $url, first: 1) { nodes { issue { ${ISSUE} } } } }`, { url });
+      return issueOf(d.attachmentsForURL.nodes[0]?.issue);
+    },
+    team: async (teamKey) => {
+      const d = await gql(`query($key: String!) { teams(filter: { key: { eqIgnoreCase: $key } }) { nodes { id states { nodes { id name type position } } } } }`, { key: teamKey });
+      const t = d.teams.nodes[0];
+      return t && { id: t.id, states: t.states.nodes };
+    },
+    create: async (input) => {
+      const d = await gql(`mutation($input: IssueCreateInput!) { issueCreate(input: $input) { issue { ${ISSUE} } } }`, { input });
+      return issueOf(d.issueCreate.issue);
+    },
+    update: async (id, input) => void await gql(`mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }`, {
+      id,
+      input
+    }),
+    link: async (issueId, url, title) => void await gql("mutation($issueId: String!, $url: String!, $title: String) { attachmentLinkURL(issueId: $issueId, url: $url, title: $title) { success } }", { issueId, url, title })
+  };
+}
+async function prView(url) {
+  const p = Bun.spawn(["gh", "pr", "view", url, "--json", "title,body,headRefName,state,isDraft"], {
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
+  if (code !== 0)
+    return;
+  const j = JSON.parse(out);
+  return { title: j.title ?? "", body: j.body ?? "", branch: j.headRefName ?? "", state: j.state, draft: !!j.isDraft };
+}
+
+// src/extensions/linear/linear.ts
+var ORDER = ["working", "review", "merged", "done"];
+var FINAL = ["done", "closed"];
+var DEFAULT_STATES = {
+  working: "In Progress",
+  review: "In Review",
+  merged: "",
+  done: "Done",
+  closed: "Canceled"
+};
+var ENDED = new Set(["completed", "canceled"]);
+var RETRY_MS = 10 * 60000;
+var MAX_REFS = 5;
+var TYPE_ORDER = ["triage", "backlog", "unstarted", "started", "completed", "canceled"];
+function atOrBeyond(from, to) {
+  const f = TYPE_ORDER.indexOf(from.type);
+  const t = TYPE_ORDER.indexOf(to.type);
+  return f !== t ? f > t : from.position >= to.position;
+}
+function issueRefs(...texts) {
+  const refs = new Set;
+  for (const t of texts)
+    for (const m of t.matchAll(/(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]{0,6})-(\d{1,7})(?![0-9])/g))
+      refs.add(`${m[1].toUpperCase()}-${m[2]}`);
+  return [...refs].slice(0, MAX_REFS);
+}
+function phaseOf(t) {
+  const merged = t.pr.state === "MERGED" || !!t.run?.merged;
+  if (merged)
+    return t.run && t.run.state !== "done" ? "merged" : "done";
+  if (t.pr.state === "CLOSED")
+    return "closed";
+  return t.pr.draft && !t.run ? "working" : "review";
+}
+function isForward(from, to) {
+  if (!from)
+    return true;
+  if (FINAL.includes(from))
+    return false;
+  if (to === "closed")
+    return true;
+  return ORDER.indexOf(to) > ORDER.indexOf(from);
+}
+var stateName = (settings, phase) => (settings.states?.[phase] ?? DEFAULT_STATES[phase]).trim();
+function stateFor(settings, phase, states) {
+  const name = stateName(settings, phase).toLowerCase();
+  return name ? states.find((s) => s.name.toLowerCase() === name) : undefined;
+}
+var movesTo = (from, to, phase) => from.id !== to.id && (phase === "closed" || !atOrBeyond(from, to));
+var movesIssue = (t, phase) => phase !== "closed" || !!t.created;
+var linear_default = (remy) => createLinear()(remy);
+var createLinear = (world = {}) => (remy) => {
+  const w = { api: linearApi, pr: prView, now: Date.now, ...world };
+  const tracked = remy.state.get("tracked", {});
+  const save = () => remy.state.set("tracked", tracked);
+  const busy = new Set;
+  const retryAt = new Map;
+  const noKeyAt = new Map;
+  const runs = new Map;
+  const apis = new Map;
+  const teams = new Map;
+  const settingsOf = (workspace) => remy.config.workspaces.find((ws) => ws.name === workspace)?.linear;
+  function apiOf(workspace) {
+    const had = apis.get(workspace);
+    if (had)
+      return had;
+    const missed = noKeyAt.get(workspace);
+    if (missed !== undefined && w.now() - missed < RETRY_MS)
+      return;
+    const key = remy.token(workspace, "linear");
+    if (!key) {
+      if (missed === undefined)
+        remy.log(`workspace ${workspace} has linear settings but no Linear API key; run remy setup`);
+      noKeyAt.set(workspace, w.now());
+      return;
+    }
+    noKeyAt.delete(workspace);
+    const api = w.api(key);
+    apis.set(workspace, api);
+    return api;
+  }
+  async function teamOf(workspace, api, key) {
+    const at = `${workspace}\x00${key.toUpperCase()}`;
+    let t = teams.get(at);
+    if (!t) {
+      t = api.team(key);
+      teams.set(at, t);
+    }
+    const team = await t.catch(() => {
+      return;
+    });
+    if (!team) {
+      teams.delete(at);
+      throw new Error(`no Linear team with the key "${key}"`);
+    }
+    return team;
+  }
+  async function setState(api, t, settings, phase, url) {
+    const issue = await api.issue(t.issueId);
+    if (!issue || ENDED.has(issue.state.type))
+      return;
+    const team = await teamOf(t.workspace, api, issue.team);
+    const target = stateFor(settings, phase, team.states);
+    const name = stateName(settings, phase);
+    if (!target) {
+      if (name)
+        remy.log(`team ${issue.team} has no state "${name}"; ${issue.identifier} stays where it is`);
+      return;
+    }
+    if (!movesTo(issue.state, target, phase))
+      return;
+    await api.update(issue.id, { stateId: target.id });
+    remy.log(`${issue.identifier} \u2192 ${target.name} (${url})`);
+  }
+  async function move(url) {
+    const t = tracked[url];
+    const settings = t && settingsOf(t.workspace);
+    const api = t && apiOf(t.workspace);
+    if (!t || !settings || !api)
+      return;
+    const phase = phaseOf(t);
+    if (!isForward(t.phase, phase))
+      return;
+    if (movesIssue(t, phase))
+      await setState(api, t, settings, phase, url);
+    t.phase = phase;
+    if (FINAL.includes(phase)) {
+      delete tracked[url];
+      runs.delete(url);
+    }
+    save();
+  }
+  async function existingIssue(api, url, view) {
+    const linked = await api.issueWithLink(url);
+    if (linked)
+      return linked;
+    for (const ref of issueRefs(view.branch, view.title, view.body)) {
+      const issue = await api.issue(ref);
+      if (issue)
+        return issue;
+    }
+    return;
+  }
+  async function createIssue(s, settings, api, view, me) {
+    const team = await teamOf(s.workspace, api, settings.team);
+    const phase = phaseOf({ pr: { state: view.state, draft: view.draft } });
+    return api.create({
+      teamId: team.id,
+      title: view.title,
+      description: [s.about, `PR: ${s.pr.url}`].filter(Boolean).join(`
+
+`),
+      assigneeId: me,
+      stateId: stateFor(settings, phase, team.states)?.id
+    });
+  }
+  async function adopt(s, settings, api) {
+    const url = s.pr.url;
+    const view = await w.pr(url);
+    if (!view)
+      throw new Error("gh couldn't read the PR");
+    if (view.state !== "OPEN")
+      return;
+    const me = await api.viewer();
+    const found = await existingIssue(api, url, view);
+    const made = !found;
+    if (found && !found.assigneeId) {
+      await api.update(found.id, { assigneeId: me }).catch((e) => {
+        remy.log(`couldn't assign ${found.identifier} to you`, e?.message ?? e);
+      });
+    }
+    const issue = found ?? await createIssue(s, settings, api, view, me);
+    const seenRun = runs.get(url);
+    tracked[url] = {
+      issueId: issue.id,
+      identifier: issue.identifier,
+      url: issue.url,
+      workspace: s.workspace,
+      pr: { state: seenRun?.merged ? "MERGED" : view.state, draft: view.draft },
+      ...seenRun && { run: { state: seenRun.state, merged: seenRun.merged } },
+      linked: false,
+      created: made
+    };
+    save();
+    await attach(s, view.title);
+  }
+  async function attach(s, title) {
+    const url = s.pr.url;
+    const t = tracked[url];
+    if (t?.linked !== false)
+      return;
+    const api = apiOf(t.workspace);
+    if (!api)
+      return;
+    await api.link(t.issueId, url, title ?? s.pr.title);
+    t.linked = true;
+    const verb = t.created ? "created" : "linked";
+    save();
+    await remy.post(`Linear <${t.url}|${t.identifier}> ${verb} for PR <${url}|#${s.pr.number}>`, {
+      workspace: s.workspace,
+      session: s.name
+    });
+  }
+  async function once(url, work) {
+    if (busy.has(url) || (retryAt.get(url) ?? 0) > w.now())
+      return;
+    busy.add(url);
+    try {
+      await work();
+      retryAt.delete(url);
+    } catch (e) {
+      retryAt.set(url, w.now() + RETRY_MS);
+      remy.log("linear failed", url, e?.message ?? e);
+    } finally {
+      busy.delete(url);
+    }
+  }
+  function syncPr(t, pr) {
+    if (t.pr.state === pr.state && t.pr.draft === pr.draft)
+      return;
+    t.pr = { state: pr.state, draft: pr.draft };
+    save();
+  }
+  async function seenTracked(s, t) {
+    syncPr(t, s.pr);
+    if (t.linked === false)
+      return once(s.pr.url, () => attach(s).then(() => move(s.pr.url)));
+    return moveIfDue(s.pr.url);
+  }
+  async function seen(s) {
+    const pr = s.pr;
+    const settings = settingsOf(s.workspace);
+    if (s.role || !pr || !settings)
+      return;
+    const t = tracked[pr.url];
+    if (t)
+      return seenTracked(s, t);
+    const api = pr.state === "OPEN" ? apiOf(s.workspace) : undefined;
+    if (api)
+      await once(pr.url, () => adopt(s, settings, api).then(() => move(pr.url)));
+  }
+  async function moveIfDue(url) {
+    const t = tracked[url];
+    if (t && isForward(t.phase, phaseOf(t)))
+      await once(url, () => move(url));
+  }
+  remy.on("pr.opened", ({ session }) => seen(session));
+  remy.on("pr.ready", ({ session }) => seen(session));
+  remy.on("pr.merged", ({ session }) => seen(session));
+  remy.on("tick", async () => {
+    await Promise.all(remy.sessions().map(seen));
+    await Promise.all(Object.keys(tracked).map(moveIfDue));
+  });
+  function remember(run) {
+    if (settingsOf(run.workspace) && run.state !== "done")
+      runs.set(run.pr, run);
+    else
+      runs.delete(run.pr);
+  }
+  remy.on("factory.run", async ({ run }) => {
+    const t = tracked[run.pr];
+    if (!t)
+      return remember(run);
+    runs.set(run.pr, run);
+    t.run = { state: run.state, merged: run.merged };
+    if (run.merged)
+      t.pr = { ...t.pr, state: "MERGED" };
+    if (run.state === "done" && !run.merged) {
+      const view = await w.pr(run.pr);
+      if (view)
+        t.pr = { state: view.state, draft: view.draft };
+    }
+    save();
+    await moveIfDue(run.pr);
+  });
 };
 
 // src/extensions/merged-cleanup.ts
@@ -1910,7 +2267,8 @@ var BUILTINS = {
   "slack-tasks": slackTasks,
   "agent-updates": agentUpdates,
   queue: waitingListCommand,
-  factory: factory_default
+  factory: factory_default,
+  linear: linear_default
 };
 
 // src/extension-host/load.ts
@@ -5582,6 +5940,13 @@ function daemonCheck(s) {
     hint: `${why}; \`remy start\` restarts the daemon, or restart its service`
   };
 }
+var linearChecks = (c) => c.workspaces.filter((ws) => ws.linear).map((ws) => ({
+  label: `Linear API key (team ${ws.linear.team})`,
+  ok: !!readToken(ws.name, "linear"),
+  optional: true,
+  workspace: ws.name,
+  hint: `run \`remy setup ${ws.name}\`, or set REMY_LINEAR_TOKEN_${ws.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`
+}));
 async function doctor() {
   const rows = [];
   const v = sh(["claude", "--version"]).out.match(/(\d+)\.(\d+)\.(\d+)/);
@@ -5606,6 +5971,7 @@ async function doctor() {
   rows.push({ label: "at least one workspace", ok: c.workspaces.length > 0, hint: "run `remy setup`" });
   const perWorkspace = await Promise.all(c.workspaces.map(async (ws) => (await checkWorkspace(ws)).map((r) => ({ ...r, workspace: ws.name }))));
   rows.push(...perWorkspace.flat());
+  rows.push(...linearChecks(c));
   const byBot = new Map;
   for (const ws of c.workspaces.filter((w) => w.telegram)) {
     const token = readToken(ws.name, "telegram-bot");
@@ -7649,6 +8015,7 @@ async function setupWorkspace(c, name) {
     ws.slack = await setupSlack(name, existing?.slack);
   if (kinds.includes("telegram"))
     ws.telegram = await setupTelegram(name, existing?.telegram);
+  ws.linear = await setupLinear(name, existing?.linear);
   c.workspaces = existing ? c.workspaces.map((w) => w === existing ? ws : w) : [...c.workspaces, ws];
   saveConfig(c);
   const s = spinner();
@@ -7803,6 +8170,34 @@ async function setupTelegram(name, existing) {
   if (changed || !userId || !await answer(confirm({ message: `Stay paired with Telegram user ${userId}?`, initialValue: true })))
     userId = await pairTelegram(tg, username, name);
   return { userId };
+}
+async function setupLinear(name, existing) {
+  const on = await answer(confirm({
+    message: `Track your PRs in Linear? ${import_picocolors.default.dim("(an issue per PR, assigned to you, moved along as it ships)")}`,
+    initialValue: !!existing
+  }));
+  if (!on)
+    return;
+  const team = await answer(text({
+    message: "Key of the Linear team new issues go to",
+    placeholder: "ENG",
+    initialValue: existing?.team ?? "",
+    validate: (v) => /^[A-Za-z][A-Za-z0-9]{0,6}$/.test(v?.trim() ?? "") ? undefined : "A team key, like ENG"
+  }));
+  if (!readToken(name, "linear"))
+    note(`Linear \u2192 Settings \u2192 Security & access \u2192 ${import_picocolors.default.bold("Personal API keys")} \u2192 New key (lin_api_\u2026)`, "Linear");
+  await askToken(name, "linear", "Linear API key", async (key) => {
+    const res = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: key },
+      body: JSON.stringify({ query: "{ viewer { name } }" })
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!j.data?.viewer)
+      throw new Error("Linear doesn't accept this key");
+    return `Connected to Linear as ${j.data.viewer.name}`;
+  });
+  return { ...existing, team: team.trim().toUpperCase() };
 }
 async function pairTelegram(tg, username, workspace) {
   log2.info(`Open ${import_picocolors.default.cyan(`https://t.me/${username}`)} and press ${import_picocolors.default.bold("Start")} (or send the bot any message).`);

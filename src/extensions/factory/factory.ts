@@ -175,6 +175,23 @@ export const createFactory =
       remy.waitingList.add({ ...base, rank: 3, why: "in the factory", action: "nothing yet", hide: true });
     }
 
+    // What each run last told other extensions, so `factory.run` is raised when a run moves rather than every tick.
+    const announced = new Map<string, string>();
+
+    /** `factory.run` for other extensions (an issue tracker, say), unawaited so their handlers never slow a tick. */
+    function announce(run: Run) {
+      const state = run.stage === "done" ? "done" : run.stage === "held" || run.stage === "asking" ? "held" : "running";
+      const step = loaded.get(run.repoDir)?.factory?.steps[run.step]?.name;
+      const merged = !!run.mergeSha;
+      const key = `${state} ${step} ${merged}`;
+      if (announced.get(run.pr) === key) return;
+      announced.set(run.pr, key);
+      const { pr, number, title, repo, session, workspace, reason } = run;
+      void remy.emit("factory.run", {
+        run: { pr, number, title, repo, session, workspace, state, step, merged, reason },
+      });
+    }
+
     /** A run from the first step, when the repo has a factory that may do more than notify. True when it made one. */
     async function startRun(fields: Omit<Run, NewRunState>) {
       const f = await factoryAt(fields.repoDir);
@@ -252,6 +269,7 @@ export const createFactory =
             remy.log("factory step failed", url, e?.message ?? e);
           }
           syncWaitingList(run);
+          announce(run);
         }
         // A factory agent no run is waiting on has nothing left to do: the PR was merged or closed by hand, or the run
         // went on, or is gone. Its PR isn't on the session (it works detached, or on a branch of its own), so the
@@ -295,6 +313,7 @@ export const createFactory =
     for (const run of Object.values(runs)) {
       if (run.stage === "asking" && run.ask && run.ask.answer === undefined && !fixOfferLapsed(run, Date.now()))
         ask(run, run.ask.question);
+      // Not announced here: extensions loaded after this one have no handlers yet. The first tick announces every run.
       syncWaitingList(run);
     }
   };

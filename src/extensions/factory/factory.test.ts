@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DEFAULTS } from "../../config/config";
 import { ExtensionHost } from "../../extension-host/host";
 import type { Config } from "../../sdk/config";
-import type { SessionRef } from "../../sdk/extension";
+import type { FactoryRun, Remy, SessionRef } from "../../sdk/extension";
 import { PLUGIN_ROOT } from "../../shared/paths";
 import { createFactory, endedOnUsageLimit, isReady, spawnHitUsageLimit } from "./factory";
 import { formatRuns } from "./format";
@@ -113,6 +113,7 @@ async function hostWith(
   sessions: SessionRef[],
   world: Partial<Env> = { pr: async () => undefined },
   stateDir = join(dir, `state-${Math.random()}`),
+  early?: (remy: Remy) => void,
 ) {
   const hidden: string[] = [];
   const posts: string[] = [];
@@ -129,6 +130,8 @@ async function hostWith(
     log: (...a) => void logs.push(a.join(" ")),
     stateDir,
   });
+  // An extension loaded before the factory hears everything the factory says while it loads.
+  if (early) await h.load("early", "test", early);
   // By default offline: the PR can't be looked up, so the run stays at its first step.
   await h.load("builtin:factory", "test", createFactory(world));
   return { h, hidden, posts, logs };
@@ -155,6 +158,115 @@ test("a ready PR in a listed repo starts a run; an unlisted repo's or a notify-l
   const notify = await hostWith({ ...config, autonomy: "notify" }, sessions);
   await notify.h.emit("tick", { at: 1 });
   expect(notify.h.waitingEntries()).toEqual([]);
+});
+
+test("a run tells other extensions where it is with factory.run, once each time it moves", async () => {
+  const root = repo("api-announce", GOOD);
+  const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api-announce"] } };
+  const { h } = await hostWith(config, [ref({ cwd: root })]);
+  const seen: FactoryRun[] = [];
+  await h.load("listener", "test", (remy) => remy.on("factory.run", ({ run }) => void seen.push(run)));
+  await h.emit("tick", { at: 1 });
+  await h.emit("tick", { at: 2 });
+  await Bun.sleep(0);
+  expect(seen).toEqual([
+    {
+      pr: pr.url,
+      number: 7,
+      title: "Fix login",
+      repo: "acme-corp/api",
+      session: "basil",
+      workspace: "work",
+      state: "running",
+      step: "review",
+      merged: false,
+      reason: undefined,
+    },
+  ]);
+});
+
+const STEPS = `import { action, agent, defineFactory } from "remy/factory";
+export default defineFactory({ autonomy: "merge", steps: [agent("review", { skill: "/remy:review" }), agent("verify", { skill: "/remy:verify" }), action("merge"), agent("confirm", { skill: "/remy:verify" })] });
+`;
+
+test("factory.run is raised again when a run changes step or gains a merge, and an asking run is held", async () => {
+  const root = repo("api-announce-moves", STEPS);
+  const asking = { ...savedRun(root, 8, "asking"), ask: { purpose: "approve" as const, question: "go on?" } };
+  const working = { ...savedRun(root, 7, "agent"), agent: { name: "basil-agent", startedAt: Date.now() } };
+  const reports: Report[] = [];
+  let merged: Partial<PrDetail> | undefined;
+  const { h } = await hostWithRuns(
+    [working, asking],
+    { extensions: { repos: ["api-announce-moves"] } },
+    {
+      reports: () => reports,
+      pr: async (url) => (url === asking.pr ? (merged as PrDetail | undefined) : undefined),
+      canStartAgent: () => false,
+      agentStatus: async () => "busy",
+      close: async () => {},
+      notify: async () => {},
+    },
+  );
+  const seen: string[] = [];
+  await h.load("listener", "test", (remy) =>
+    remy.on("factory.run", ({ run }) => void seen.push(`#${run.number} ${run.state} ${run.step} ${run.merged}`)),
+  );
+  const tick = async (at: number) => {
+    await h.emit("tick", { at });
+    await Bun.sleep(0);
+  };
+  await tick(1);
+  await tick(2);
+  expect(seen).toEqual(["#7 running review false", "#8 held review false"]);
+  // The agent passes review: another step, the same state.
+  reports.push({ pr: working.pr, at: Date.now() + 1, step: "review", verdict: "pass" });
+  await tick(3);
+  expect(seen.slice(2)).toEqual(["#7 running verify false"]);
+  // The person merges by hand while the run waits: the same run, now merged.
+  merged = { state: "MERGED", mergeSha: "abc1234" };
+  await tick(4);
+  expect(seen.slice(3)).toEqual(["#8 running confirm true"]);
+});
+
+test("factory.run is raised again when a run gains a merge on a step of the same name and state", async () => {
+  // Autonomy stops at verify, so the run asks before each merge step: held on a step called "merge" before and after.
+  const root = repo(
+    "api-announce-merge",
+    STEPS.replace(/steps: \[.*\] \}\)/, 'steps: [action("merge"), action("merge")] })'),
+  );
+  const asking = { ...savedRun(root, 9, "asking"), ask: { purpose: "approve" as const, question: "merge?" } };
+  let merged: Partial<PrDetail> | undefined;
+  const { h } = await hostWithRuns(
+    [asking],
+    { autonomy: "verify", extensions: { repos: ["api-announce-merge"] } },
+    { pr: async () => merged as PrDetail | undefined, ask: () => {} },
+  );
+  const seen: string[] = [];
+  await h.load("listener", "test", (remy) =>
+    remy.on("factory.run", ({ run }) => void seen.push(`${run.state} ${run.step} ${run.merged}`)),
+  );
+  await h.emit("tick", { at: 1 });
+  merged = { state: "MERGED", mergeSha: "abc1234" };
+  await h.emit("tick", { at: 2 });
+  await Bun.sleep(0);
+  expect(seen).toEqual(["held merge false", "held merge true"]);
+});
+
+test("a run saved before a restart isn't announced while the factory loads; the first tick announces it, once", async () => {
+  const root = repo("api-announce-load", GOOD);
+  const held = savedRun(root, 7, "held", "basil-agent");
+  const early: FactoryRun[] = [];
+  const { h } = await hostWithRuns([held], { extensions: { repos: ["api-announce-load"] } }, {}, (remy) =>
+    remy.on("factory.run", ({ run }) => void early.push(run)),
+  );
+  const late: FactoryRun[] = [];
+  await h.load("listener", "test", (remy) => remy.on("factory.run", ({ run }) => void late.push(run)));
+  await Bun.sleep(0);
+  expect([early, late]).toEqual([[], []]);
+  await h.emit("tick", { at: 1 });
+  await Bun.sleep(0);
+  expect(early.map((r) => r.pr)).toEqual([held.pr]);
+  expect(late.map((r) => r.pr)).toEqual([held.pr]);
 });
 
 test("formatRuns", () => {
@@ -216,7 +328,12 @@ const savedRun = (root: string, number: number, stage: Run["stage"], agent?: str
 });
 
 /** The factory with `runs` on disk from before, as after a daemon restart. */
-async function hostWithRuns(runs: Run[], over: Partial<Config> = {}, world: Partial<Env> = {}) {
+async function hostWithRuns(
+  runs: Run[],
+  over: Partial<Config> = {},
+  world: Partial<Env> = {},
+  early?: (remy: Remy) => void,
+) {
   const stateDir = join(dir, `state-${Math.random()}`);
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(
@@ -224,7 +341,7 @@ async function hostWithRuns(runs: Run[], over: Partial<Config> = {}, world: Part
     JSON.stringify({ runs: Object.fromEntries(runs.map((r) => [r.pr, r])) }),
   );
   const config: Config = { ...DEFAULTS, repoRoots: [dir], autonomy: "merge", extensions: { repos: ["api"] }, ...over };
-  const { h, posts, logs } = await hostWith(config, [], world, stateDir);
+  const { h, posts, logs } = await hostWith(config, [], world, stateDir, early);
   const saved = () =>
     JSON.parse(readFileSync(join(stateDir, "builtin_factory.json"), "utf8")).runs as Record<string, Run>;
   return { h, saved, posts, logs };

@@ -87,9 +87,33 @@ export type Events = {
   };
   /** Every `tickSeconds`, after Remy looked at the sessions again. */
   tick: { at: number };
+  /** The factory's run of a PR started, moved to another step, waits for you, or ended. Raised by the factory. */
+  "factory.run": { run: FactoryRun };
 };
 
 export type EventName = keyof Events;
+
+/** The events an extension may raise with `emit`; the daemon's own (`pr.merged`, `message`, `tick`…) are its alone. */
+export type ExtensionEventName = "factory.run";
+
+/** A PR's factory run as other extensions see it, in the `factory.run` event. */
+export type FactoryRun = {
+  pr: string;
+  number: number;
+  title: string;
+  repo: string;
+  /** The author's session (or "repo#number" for a PR started with `remy factory start`), and its workspace. */
+  session: string;
+  workspace: string;
+  /** "running": its steps go on; "held": it waits for you; "done": the run is over. */
+  state: "running" | "held" | "done";
+  /** The step it is on, or ended on. */
+  step?: string;
+  /** The PR is merged. */
+  merged: boolean;
+  /** Why it waits, or how it ended, e.g. "through the pipeline" or "the PR was closed". */
+  reason?: string;
+};
 
 export type PostOptions = {
   /** Workspace to post in; else the session's, else the first. */
@@ -146,6 +170,11 @@ export interface Remy {
   /** The extension's name: "builtin:<name>", the file name, or the package name. */
   readonly name: string;
   on<E extends EventName>(event: E, handler: (e: Events[E]) => void | Promise<void>): void;
+  /**
+   * Raise an event an extension may raise (see `ExtensionEventName`) for every extension's handlers, as the factory raises `factory.run`. Resolves once they are done
+   * or have had 10 s each, so a handler that must not wait on others doesn't await it.
+   */
+  emit<E extends ExtensionEventName>(event: E, payload: Events[E]): Promise<void>;
   /** Post to the user. Returns the message id. */
   post(text: string, opts?: PostOptions): Promise<string>;
   /**
@@ -192,6 +221,8 @@ export interface Remy {
   sessions(): SessionRef[];
   /** The repos in `extensions.repos` that were found: whose own code (`.remy/`) you trust to run in your daemon. */
   trustedRepos(): TrustedRepo[];
+  /** A workspace's token for a service, as `remy setup` stored it (env, keychain or file); undefined when there is none. */
+  token(workspace: string, kind: "linear"): string | undefined;
   /** Your ~/.remy/config.json, as the daemon loaded it. */
   readonly config: Readonly<Config>;
   log(...a: unknown[]): void;

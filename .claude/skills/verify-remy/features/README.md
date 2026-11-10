@@ -23,4 +23,4 @@ What a user does with Remy, one file per feature, each with how to drive it thro
 - [Pickers](./pickers.md): an agent's multiple-choice picker is posted in its thread and answered from chat, or in the terminal.
 - [Channel tasks](./channel-tasks.md): a mention of the bot in a channel thread becomes a task, answered in that thread.
 
-Not mapped yet: the factory (it needs a GitHub repo with PRs), the change digest, Telegram, and permission prompts (pickers are mapped).
+Not mapped yet: the factory (it needs a GitHub repo with PRs), Linear tracking (it needs a Linear workspace and API key), the change digest, Telegram, and permission prompts (pickers are mapped).

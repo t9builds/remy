@@ -6,8 +6,8 @@ import type { Config, MessengerKind, Workspace } from "../sdk/config";
 import { ensureDir, readJson, writeJson } from "../shared/json-file";
 import { PATHS } from "../shared/paths";
 
-/** Slack bot token (xoxb-), Slack app-level token (xapp-), Telegram bot token. */
-export type TokenKind = "slack-bot" | "slack-app" | "telegram-bot";
+/** Slack bot token (xoxb-), Slack app-level token (xapp-), Telegram bot token, Linear personal API key (lin_api_). */
+export type TokenKind = "slack-bot" | "slack-app" | "telegram-bot" | "linear";
 
 const MESSENGERS: MessengerKind[] = ["slack", "telegram"];
 export const messengerLabel = (k: MessengerKind) => (k === "slack" ? "Slack" : "Telegram");
@@ -119,7 +119,7 @@ export function workspaceFor(where: { cwd?: string; repo?: string }, config: Con
 
 const keychainService = (workspace: string, kind: TokenKind) => `remy-${kind}-token:${workspace}`;
 
-/** Env `REMY_SLACK_BOT_TOKEN_<WS>`, `REMY_SLACK_APP_TOKEN_<WS>` or `REMY_TELEGRAM_BOT_TOKEN_<WS>`, then the keychain, then a file. */
+/** Env `REMY_SLACK_BOT_TOKEN_<WS>`, `REMY_SLACK_APP_TOKEN_<WS>`, `REMY_TELEGRAM_BOT_TOKEN_<WS>` or `REMY_LINEAR_TOKEN_<WS>`, then the keychain, then a file. */
 export function readToken(workspace: string, kind: TokenKind): string | undefined {
   const envName = `REMY_${kind.toUpperCase().replace("-", "_")}_TOKEN_${workspace.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
   if (process.env[envName]) return process.env[envName];
@@ -139,6 +139,7 @@ export const TOKEN_FORMAT: Record<TokenKind, { pattern: RegExp; example: string 
   "slack-bot": { pattern: /^xoxb-[\w-]+$/, example: "xoxb-…" },
   "slack-app": { pattern: /^xapp-[\w-]+$/, example: "xapp-…" },
   "telegram-bot": { pattern: /^\d+:[\w-]{30,}$/, example: "123456789:AA…" },
+  linear: { pattern: /^lin_api_\w+$/, example: "lin_api_…" },
 };
 
 /** Store a token. macOS: keychain, handed over on stdin so it never shows in the process list. Elsewhere: a 0600 file in ~/.remy. */

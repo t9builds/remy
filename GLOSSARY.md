@@ -53,6 +53,10 @@ _Avoid_: approval, review
 A module that reacts to Remy's events and acts through its API.
 _Avoid_: plugin (that is Claude Code's own packaging), add-on
 
+**Linear issue**:
+The issue in the team's Linear that stands for one of your PRs. Remy finds it, or creates it assigned to you, and moves it forward through the PR's phases: working, review, merged, done, or closed (canceled only if Remy created the issue) ([ADR-0017](docs/adr/0017-prs-tracked-in-linear.md)).
+_Avoid_: ticket, task (a task is what an agent is started with); issue, on its own (see **Finding**)
+
 ## Factory
 
 **Factory**:

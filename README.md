@@ -123,7 +123,7 @@ Telegram works the same way, in your chat with your bot. Telegram has no threads
 | `src/sessions/waiting-list.ts` | Ranks what waits on you from that snapshot; the daemon keeps it as one message per workspace (`~/.remy/queue.json`) |
 | `remy daemon` (`src/daemon/`) | The long-running process. Reads your messages in each workspace, tails session events, keeps the waiting list, posts the merged/ended notices itself (`src/shared/notices.ts`), runs extensions and relays the coordinator's permission prompts. Holds what it would push while the coordinator is down |
 | `src/sdk/` | What extensions and a repo's `.remy/factory.ts` import: the extension API (`extension.ts`) and the pipeline helpers (`factory.ts`, imported as `remy/factory`) |
-| `src/extension-host/` and `src/extensions/` | The host that runs extensions in the daemon, and the built-in ones: closing merged agents, Slack-thread tasks, agents' updates in their threads, `/queue`, and the factory (`src/extensions/factory/`: the run state machine, and gh / Cloud Build / shell) |
+| `src/extension-host/` and `src/extensions/` | The host that runs extensions in the daemon, and the built-in ones: closing merged agents, Slack-thread tasks, agents' updates in their threads, `/queue`, the factory (`src/extensions/factory/`: the run state machine, and gh / Cloud Build / shell), and PRs tracked in Linear (`src/extensions/linear/`) |
 | `remy` channel (`src/channel.ts`) | Runs inside the coordinator session only. A thin client of the daemon over `~/.remy/daemon.sock` (`src/link/`): pushes the daemon's events into the session and gives Claude `post` / `update` |
 | `src/messengers/` | The Slack or Telegram bridge for each workspace, or both; each implements `Messenger` (`messenger.ts`) |
 | `src/messengers/slack/` | Slack: your DM with the bot (polling or Socket Mode), plus your mentions of the bot and your 🐭 reactions in the channels it's in |
@@ -328,6 +328,8 @@ Each workspace:
 | `telegram.userId` | Your Telegram user ID, set by pairing in `remy setup`; only this user can talk to your remy |
 | `both` | With Slack and Telegram: `mirror` (default), `pings` or `follow` |
 | `main` | The app that gets everything with `pings`, and the one `follow` starts with: `slack` (default) or `telegram` |
+| `linear.team` | Track this workspace's PRs in [Linear](#linear): the key of the team new issues go to, e.g. `ENG` |
+| `linear.states` | The Linear state for each phase of a PR, by name; see [Linear](#linear) |
 
 Leave out both `repos` and `paths` for the catch-all workspace. Configs from before 0.6, with flat `slackUserId` / `messenger` fields, are read as before.
 
@@ -349,11 +351,11 @@ Leave out both `repos` and `paths` for the catch-all workspace. Configs from bef
 
 Each workspace with Telegram needs a bot of its own (`remy doctor` flags two sharing one), so the example above uses two bots.
 
-A path covers the folder and everything inside it, not sibling folders that share its prefix, so prefer `repos` when worktrees sit next to the main checkout. Tokens can also come from `REMY_SLACK_BOT_TOKEN_<WORKSPACE>`, `REMY_SLACK_APP_TOKEN_<WORKSPACE>` and `REMY_TELEGRAM_BOT_TOKEN_<WORKSPACE>`.
+A path covers the folder and everything inside it, not sibling folders that share its prefix, so prefer `repos` when worktrees sit next to the main checkout. Tokens can also come from `REMY_SLACK_BOT_TOKEN_<WORKSPACE>`, `REMY_SLACK_APP_TOKEN_<WORKSPACE>`, `REMY_TELEGRAM_BOT_TOKEN_<WORKSPACE>` and `REMY_LINEAR_TOKEN_<WORKSPACE>`.
 
 ## Extensions
 
-Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `agent-updates` posts in each agent's thread what it said at the end of every turn, rendered as Markdown, and the PR it opened, `queue` answers `/queue`, and `factory` runs [pipelines](#factory). Turn one off with `extensions.disabled` and write your own instead.
+Everything Remy does beyond relaying messages, tracking sessions and keeping the waiting list is an extension: a TypeScript module that reacts to Remy's events and acts through its API. Remy's own behaviors are built-in extensions written against the same API (`src/extensions/`): `merged-cleanup` closes agents whose PR merged, `slack-tasks` hands tasks from Slack threads to the coordinator, `agent-updates` posts in each agent's thread what it said at the end of every turn, rendered as Markdown, and the PR it opened, `queue` answers `/queue`, `factory` runs [pipelines](#factory), and `linear` tracks your PRs in [Linear](#linear). Turn one off with `extensions.disabled` and write your own instead.
 
 ```ts
 // ~/.remy/extensions/red-ci.ts
@@ -371,6 +373,7 @@ export default (remy: Remy) => {
 |---|---|
 | `session.started`, `session.asks`, `session.stopped`, `session.ended` | A session appeared, waits for you (a question, or blocked on input), ended its turn (with its last message, and the question if it ended on one), is gone |
 | `pr.opened`, `pr.ready`, `pr.ci`, `pr.merged` | A session's PR opened, left draft, finished CI (pass or fail), merged |
+| `factory.run` | The factory's run of a PR started, moved to another step, waits for you, merged or ended: its `state` (`running`, `held`, `done`), `step` and `merged` |
 | `message` | You wrote in a workspace, or started a task from a Slack thread |
 | `tick` | Every `tickSeconds`, after Remy looked at the sessions again |
 
@@ -383,6 +386,8 @@ export default (remy: Remy) => {
 | `coordinator.tell(text)` | Hand something to the coordinator for a turn |
 | `registerCommand(name, { description, run })` | Answer `/name` in any workspace, without the coordinator |
 | `state.get` / `state.set` | A small JSON store of the extension's own (`~/.remy/state/`) |
+| `emit(event, payload)` | Raise an event for every extension, as the factory raises `factory.run` |
+| `token(workspace, "linear")` | A workspace's token for a service, as `remy setup` stored it |
 | `sessions()`, `trustedRepos()`, `log(…)` | Sessions as last seen; the repos in `extensions.repos` that were found; write to the daemon's log |
 
 Extensions load from three places:
@@ -465,6 +470,28 @@ How far Remy goes on its own is the lower of the repo's `autonomy` and yours in 
 A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a failure the fixer couldn't fix, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
 
 The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. For a PR no session of yours is on, such as one pushed by hand, `remy factory start <pr>` (a URL, number or branch) starts its run. Start it again after new commits if it was held. Sessions sharing a [GitButler](https://gitbutler.com) workspace each get the PR of the branch they named, so one session's PR never runs as another's. Step agents, fixers and resolvers count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` (including `fixer` and `conflicts`) and shows the autonomy that applies and how conflicts are resolved.
+
+## Linear
+
+Give a workspace `linear` settings (`remy setup` asks, along with a [personal API key](https://linear.app/settings/account/security)) and every PR a session of yours opens there gets a Linear issue:
+
+1. Remy uses the issue that already has the PR attached, for example by Linear's GitHub integration. If there is none, it uses an issue the branch, title or body names (`ENG-123`, as in Linear's branch names `tom/eng-123-fix-login`). If neither exists, it creates an issue in `linear.team`, titled after the PR, described by the agent's task, and assigned to you.
+2. Remy attaches the PR to the issue, assigns the issue to you if nobody has it, and posts its link in the session's thread.
+3. The issue moves forward as the PR goes:
+
+| Phase | When | Default state |
+|---|---|---|
+| `working` | The PR is a draft | In Progress |
+| `review` | The PR is ready, or in the [factory](#factory) | In Review |
+| `merged` | Merged, with factory steps still to go (a deploy, a check on production) | none: it stays in review |
+| `done` | Merged, and the factory's run, if any, is through | Done |
+| `closed` | Closed without a merge | Canceled, for an issue Remy created; one it found stays where it is |
+
+```json
+{ "name": "work", "repos": ["acme-corp/*"], "linear": { "team": "ENG", "states": { "merged": "Deploying" } } }
+```
+
+`linear.states` names your team's states per phase; `""` leaves the issue where it is in that phase. Remy never moves an issue back, nor one someone completed or canceled. A found issue may be shared by several PRs, or continued by another, so a PR closed unmerged cancels only an issue Remy created. Factory agents' PRs and PRs started with `remy factory start` don't get an issue. See [ADR-0017](docs/adr/0017-prs-tracked-in-linear.md).
 
 ## Limits
 

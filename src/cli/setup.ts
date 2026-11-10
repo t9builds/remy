@@ -26,6 +26,7 @@ import { createMessenger, describeMessengers, quietSink } from "../messengers/wo
 import type {
   BothMode,
   Config,
+  LinearSettings,
   MessengerKind,
   Routing,
   SlackSettings,
@@ -192,6 +193,7 @@ async function setupWorkspace(c: Config, name: string) {
   const ws: Workspace = { ...routing, ...together };
   if (kinds.includes("slack")) ws.slack = await setupSlack(name, existing?.slack);
   if (kinds.includes("telegram")) ws.telegram = await setupTelegram(name, existing?.telegram);
+  ws.linear = await setupLinear(name, existing?.linear);
   c.workspaces = existing ? c.workspaces.map((w) => (w === existing ? ws : w)) : [...c.workspaces, ws];
   saveConfig(c);
 
@@ -403,6 +405,38 @@ async function setupTelegram(name: string, existing?: TelegramSettings): Promise
   )
     userId = await pairTelegram(tg, username, name);
   return { userId };
+}
+
+/** Optional: track this workspace's PRs in Linear (extensions/linear/). Keeps the settings it had beyond the team. */
+async function setupLinear(name: string, existing?: LinearSettings): Promise<LinearSettings | undefined> {
+  const on = await answer(
+    p.confirm({
+      message: `Track your PRs in Linear? ${pc.dim("(an issue per PR, assigned to you, moved along as it ships)")}`,
+      initialValue: !!existing,
+    }),
+  );
+  if (!on) return undefined;
+  const team = await answer(
+    p.text({
+      message: "Key of the Linear team new issues go to",
+      placeholder: "ENG",
+      initialValue: existing?.team ?? "",
+      validate: (v) => (/^[A-Za-z][A-Za-z0-9]{0,6}$/.test(v?.trim() ?? "") ? undefined : "A team key, like ENG"),
+    }),
+  );
+  if (!readToken(name, "linear"))
+    p.note(`Linear → Settings → Security & access → ${pc.bold("Personal API keys")} → New key (lin_api_…)`, "Linear");
+  await askToken(name, "linear", "Linear API key", async (key) => {
+    const res = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: key },
+      body: JSON.stringify({ query: "{ viewer { name } }" }),
+    });
+    const j = (await res.json().catch(() => ({}))) as { data?: { viewer?: { name: string } } };
+    if (!j.data?.viewer) throw new Error("Linear doesn't accept this key");
+    return `Connected to Linear as ${j.data.viewer.name}`;
+  });
+  return { ...existing, team: team.trim().toUpperCase() };
 }
 
 /** Learn the user's Telegram ID from the first message they send the bot. */
