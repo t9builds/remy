@@ -66,6 +66,7 @@ async function pickupHost(opts: {
   stateDir?: string;
   sessions?: SessionRef[];
   world?: Partial<PickupWorld>;
+  workspaces?: Config["workspaces"];
 }) {
   const stateDir = opts.stateDir ?? join(dir, `state-${Math.random()}`);
   const config: Config = {
@@ -73,7 +74,7 @@ async function pickupHost(opts: {
     repoRoots: [dir],
     autonomy: "merge",
     extensions: { repos: opts.repos ?? ["api"] },
-    workspaces: [{ name: "work", ...(opts.autoPickup && { autoPickup: opts.autoPickup }) }],
+    workspaces: opts.workspaces ?? [{ name: "work", ...(opts.autoPickup && { autoPickup: opts.autoPickup }) }],
   };
   const logs: string[] = [];
   const reports: Report[] = [];
@@ -278,4 +279,68 @@ test("`remy factory` says when auto-pickup last looked, whether it failed, and w
   expect(text).toStartWith("Auto-pickup: paused by ~/.remy/autopickup-disabled; last looked ");
   expect(text).toContain("failed: HTTP 502.");
   expect(text).toContain(`  started ${open().url} at `);
+});
+
+test("a poll still running isn't overlapped by the next tick", async () => {
+  checkout("api");
+  let release!: () => void;
+  const hung = new Promise<OpenPr[]>((r) => (release = () => r([])));
+  let calls = 0;
+  const p = await pickupHost({ autoPickup: {}, prs: {}, world: { openPrs: () => (calls++, hung) } });
+  const first = p.tick(); // the host gives up waiting on it after 10 s; here it just stays pending
+  while (!calls) await Bun.sleep(5);
+  await p.tick(10);
+  expect(calls).toBe(1);
+  release();
+  await first;
+  await p.tick(10);
+  expect(calls).toBe(2);
+});
+
+test("each workspace polls on its own interval, at least a minute apart; a failing repo is said once", async () => {
+  checkout("api");
+  checkout("web");
+  let calls: string[] = [];
+  const p = await pickupHost({
+    prs: {},
+    repos: ["api", "web"],
+    workspaces: [
+      { name: "work", autoPickup: { repos: [API], pollIntervalMinutes: 0 } },
+      { name: "home", autoPickup: { repos: ["acme-corp/web"], pollIntervalMinutes: 60 } },
+    ],
+    world: {
+      openPrs: async (repo) => {
+        calls.push(repo);
+        if (repo === API) throw new Error("gh pr list -R acme-corp/api: HTTP 404");
+        return [];
+      },
+    },
+  });
+  await p.tick();
+  expect(calls.sort()).toEqual([API, "acme-corp/web"]);
+  calls = [];
+  await p.tick(); // the same minute: 0 counts as 1
+  await p.tick(1);
+  await p.tick(1);
+  expect(calls).toEqual([API, API]);
+  expect(p.logs.filter((l) => l.includes("HTTP 404"))).toHaveLength(1);
+});
+
+test("a picked-up PR is forgotten once it can't be inside the window; a broken watcher file doesn't stop the factory", async () => {
+  checkout("api");
+  const stateDir = join(dir, `state-${Math.random()}`);
+  mkdirSync(stateDir, { recursive: true });
+  const old = Date.now() - 25 * HOUR;
+  writeFileSync(join(stateDir, "builtin_factory.json"), JSON.stringify({ pickedUp: { a: old, b: Date.now() - HOUR } }));
+  const p = await pickupHost({ autoPickup: {}, prs: {}, stateDir });
+  await p.tick();
+  expect(Object.keys(p.saved().pickedUp)).toEqual(["b"]);
+
+  const broken = await pickupHost({
+    autoPickup: {},
+    prs: { [API]: [recent()] },
+    world: { watcherPicked: () => ({ enrolled: "x" }) as unknown as string[] },
+  });
+  await broken.tick();
+  expect(broken.reports).toHaveLength(1);
 });

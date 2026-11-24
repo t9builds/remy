@@ -44,8 +44,13 @@ export type FactoryView = {
   blocker(root: string): Promise<string | undefined>;
 };
 
-/** What `remy factory` shows about auto-pickup, kept in the factory's state. */
-export type PickupStatus = { polledAt?: number; error?: string; started: { pr: string; at: number }[] };
+/** What `remy factory` shows about auto-pickup, kept in the factory's state. `polled`: each workspace's last poll. */
+export type PickupStatus = {
+  polledAt?: number;
+  polled?: Record<string, number>;
+  error?: string;
+  started: { pr: string; at: number }[];
+};
 
 type Settings = Required<Pick<AutoPickupSettings, "maxAgeHours" | "skipDrafts" | "pollIntervalMinutes">> &
   Pick<AutoPickupSettings, "authors" | "repos">;
@@ -53,12 +58,11 @@ type Settings = Required<Pick<AutoPickupSettings, "maxAgeHours" | "skipDrafts" |
 const HOUR = 3_600_000;
 const KILL_SWITCH = "kill switch";
 
-export const settingsOf = (s: AutoPickupSettings): Settings => ({
-  maxAgeHours: 24,
-  skipDrafts: true,
-  pollIntervalMinutes: 5,
-  ...s,
-});
+export const settingsOf = (s: AutoPickupSettings): Settings => {
+  const out = { maxAgeHours: 24, skipDrafts: true, pollIntervalMinutes: 5, ...s };
+  // At least a minute apart, whatever the config says: no polling every tick.
+  return { ...out, pollIntervalMinutes: Math.max(1, out.pollIntervalMinutes) };
+};
 
 /** The workspaces auto-pickup runs for: those with an `autoPickup` block that isn't turned off. */
 export const pickupWorkspaces = (workspaces: Workspace[]) =>
@@ -79,10 +83,10 @@ export function autoPickup(remy: Remy, world: PickupWorld, factory: FactoryView)
   const workspaces = pickupWorkspaces(remy.config.workspaces);
   if (!workspaces.length) return;
   const settings = new Map(workspaces.map((w) => [w.name, settingsOf(w.autoPickup!)] as const));
-  const interval = Math.min(...[...settings.values()].map((s) => s.pollIntervalMinutes)) * 60_000;
   const longest = Math.max(...[...settings.values()].map((s) => s.maxAgeHours)) * HOUR;
   const picked = remy.state.get<Record<string, number> | null>("pickedUp", null) ?? fromWatcher();
   const status = remy.state.get<PickupStatus>("autoPickup", { started: [] });
+  status.polled ??= {};
   // What was logged once in this daemon run: a skip that holds every poll is said once, not every five minutes.
   const said = new Set<string>();
   const once = (key: string, text: string) => {
@@ -95,7 +99,13 @@ export function autoPickup(remy: Remy, world: PickupWorld, factory: FactoryView)
 
   /** The external watcher's PRs, on first run, so switching over doesn't start them again. */
   function fromWatcher() {
-    const urls = world.watcherPicked();
+    let urls: string[] = [];
+    try {
+      const listed: unknown = world.watcherPicked();
+      urls = Array.isArray(listed) ? listed.filter((u): u is string => typeof u === "string") : [];
+    } catch (e: any) {
+      remy.log("auto-pickup: the external watcher's state file can't be read:", e?.message ?? e);
+    }
     if (urls.length)
       remy.log(`auto-pickup: took ${urls.length} PRs the external watcher started; they won't start again`);
     const seeded = Object.fromEntries(urls.map((u) => [u, world.now()]));
@@ -113,6 +123,7 @@ export function autoPickup(remy: Remy, world: PickupWorld, factory: FactoryView)
   async function reposOf(s: Settings) {
     const found = remy.trustedRepos().flatMap(({ root }) => {
       const repo = world.github(root);
+      if (!repo) once(`no github ${root}`, `auto-pickup skips ${root}: its origin isn't on github.com`);
       return repo ? [{ repo, root }] : [];
     });
     for (const want of s.repos ?? [])
@@ -163,25 +174,34 @@ export function autoPickup(remy: Remy, world: PickupWorld, factory: FactoryView)
     const authors = await authorsOf(s);
     for (const r of await reposOf(s))
       for (const author of authors) {
+        const key = `failed ${r.repo} ${author}`;
         try {
           for (const pr of await world.openPrs(r.repo, author)) consider(pr, r, workspace, s, now);
+          said.delete(key);
         } catch (e: any) {
+          // Said once until it works again: a repo gh can't read would otherwise fill the log every poll.
           status.error = String(e?.message ?? e);
-          remy.log(`auto-pickup: ${status.error}; the next poll tries again`);
+          once(key, `auto-pickup: ${status.error}; tried again each poll`);
         }
       }
   }
 
-  async function poll() {
-    const now = world.now();
-    // Set before looking, so a failed poll also waits a whole interval: no tight retries.
+  /** The workspaces whose own `pollIntervalMinutes` has passed since their last poll. */
+  const due = (now: number) =>
+    [...settings].filter(([w, s]) => now - (status.polled![w] ?? 0) >= s.pollIntervalMinutes * 60_000);
+
+  async function poll(now: number) {
     status.polledAt = now;
     status.error = undefined;
-    try {
-      for (const [workspace, s] of settings) await pollWorkspace(workspace, s, now);
-    } catch (e: any) {
-      status.error = String(e?.message ?? e);
-      remy.log(`auto-pickup: ${status.error}; the next poll tries again`);
+    for (const [workspace, s] of due(now)) {
+      // Set before looking, so a failed poll also waits a whole interval: no tight retries.
+      status.polled![workspace] = now;
+      try {
+        await pollWorkspace(workspace, s, now);
+      } catch (e: any) {
+        status.error = String(e?.message ?? e);
+        remy.log(`auto-pickup: ${status.error}; the next poll tries again`);
+      }
     }
     // A PR is opened before it's picked up, so one picked up longer ago than the window can't come back into it.
     for (const [url, at] of Object.entries(picked)) if (now - at >= longest) delete picked[url];
@@ -192,10 +212,11 @@ export function autoPickup(remy: Remy, world: PickupWorld, factory: FactoryView)
   remy.on("tick", async () => {
     if (world.disabled()) return once(KILL_SWITCH, "auto-pickup paused: ~/.remy/autopickup-disabled exists");
     said.delete(KILL_SWITCH);
-    if (polling || world.now() - (status.polledAt ?? 0) < interval) return;
+    const now = world.now();
+    if (polling || !due(now).length) return;
     polling = true;
     try {
-      await poll();
+      await poll(now);
     } finally {
       polling = false;
     }

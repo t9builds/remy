@@ -175,23 +175,6 @@ var require_src = __commonJS(function(exports, module) {
   module.exports = { cursor, scroll, erase, beep };
 });
 
-// src/sdk/factory.ts
-var exports_factory = {};
-__export(exports_factory, {
-  FIXER: () => FIXER,
-  LEVELS: () => LEVELS,
-  RESOLVER: () => RESOLVER,
-  action: () => action,
-  agent: () => agent,
-  atLeast: () => atLeast,
-  defineFactory: () => defineFactory,
-  gate: () => gate,
-  levelOf: () => levelOf,
-  lowerLevel: () => lowerLevel,
-  validate: () => validate,
-  wait: () => wait
-});
-
 // src/cli/args.ts
 import { parseArgs } from "util";
 function parse(args, options) {
@@ -716,6 +699,21 @@ import { existsSync as existsSync7, statSync as statSync5 } from "fs";
 import { join as join6 } from "path";
 
 // src/sdk/factory.ts
+var exports_factory = {};
+__export(exports_factory, {
+  FIXER: () => FIXER,
+  LEVELS: () => LEVELS,
+  RESOLVER: () => RESOLVER,
+  action: () => action,
+  agent: () => agent,
+  atLeast: () => atLeast,
+  defineFactory: () => defineFactory,
+  gate: () => gate,
+  levelOf: () => levelOf,
+  lowerLevel: () => lowerLevel,
+  validate: () => validate,
+  wait: () => wait
+});
 var LEVELS = ["notify", "verify", "merge", "deploy-dev", "deploy-prod"];
 var lowerLevel = (a, b) => LEVELS.indexOf(a) <= LEVELS.indexOf(b) ? a : b;
 var atLeast = (have, need) => LEVELS.indexOf(have) >= LEVELS.indexOf(need);
@@ -821,12 +819,10 @@ function validate(f) {
 // src/extensions/factory/auto-pickup.ts
 var HOUR = 3600000;
 var KILL_SWITCH = "kill switch";
-var settingsOf = (s) => ({
-  maxAgeHours: 24,
-  skipDrafts: true,
-  pollIntervalMinutes: 5,
-  ...s
-});
+var settingsOf = (s) => {
+  const out = { maxAgeHours: 24, skipDrafts: true, pollIntervalMinutes: 5, ...s };
+  return { ...out, pollIntervalMinutes: Math.max(1, out.pollIntervalMinutes) };
+};
 var pickupWorkspaces = (workspaces) => workspaces.filter((w) => w.autoPickup && w.autoPickup.enabled !== false);
 function skipReason(pr, now, s, known) {
   if (Date.parse(pr.createdAt) <= now - s.maxAgeHours * HOUR)
@@ -843,10 +839,10 @@ function autoPickup(remy, world, factory) {
   if (!workspaces.length)
     return;
   const settings = new Map(workspaces.map((w) => [w.name, settingsOf(w.autoPickup)]));
-  const interval = Math.min(...[...settings.values()].map((s) => s.pollIntervalMinutes)) * 60000;
   const longest = Math.max(...[...settings.values()].map((s) => s.maxAgeHours)) * HOUR;
   const picked = remy.state.get("pickedUp", null) ?? fromWatcher();
   const status = remy.state.get("autoPickup", { started: [] });
+  status.polled ??= {};
   const said = new Set;
   const once = (key, text) => {
     if (said.has(key))
@@ -857,7 +853,13 @@ function autoPickup(remy, world, factory) {
   let login;
   let polling = false;
   function fromWatcher() {
-    const urls = world.watcherPicked();
+    let urls = [];
+    try {
+      const listed = world.watcherPicked();
+      urls = Array.isArray(listed) ? listed.filter((u) => typeof u === "string") : [];
+    } catch (e) {
+      remy.log("auto-pickup: the external watcher's state file can't be read:", e?.message ?? e);
+    }
     if (urls.length)
       remy.log(`auto-pickup: took ${urls.length} PRs the external watcher started; they won't start again`);
     const seeded = Object.fromEntries(urls.map((u) => [u, world.now()]));
@@ -873,6 +875,8 @@ function autoPickup(remy, world, factory) {
   async function reposOf(s) {
     const found = remy.trustedRepos().flatMap(({ root }) => {
       const repo = world.github(root);
+      if (!repo)
+        once(`no github ${root}`, `auto-pickup skips ${root}: its origin isn't on github.com`);
       return repo ? [{ repo, root }] : [];
     });
     for (const want of s.repos ?? [])
@@ -919,25 +923,29 @@ function autoPickup(remy, world, factory) {
     const authors = await authorsOf(s);
     for (const r of await reposOf(s))
       for (const author of authors) {
+        const key = `failed ${r.repo} ${author}`;
         try {
           for (const pr of await world.openPrs(r.repo, author))
             consider(pr, r, workspace, s, now);
+          said.delete(key);
         } catch (e) {
           status.error = String(e?.message ?? e);
-          remy.log(`auto-pickup: ${status.error}; the next poll tries again`);
+          once(key, `auto-pickup: ${status.error}; tried again each poll`);
         }
       }
   }
-  async function poll() {
-    const now = world.now();
+  const due = (now) => [...settings].filter(([w, s]) => now - (status.polled[w] ?? 0) >= s.pollIntervalMinutes * 60000);
+  async function poll(now) {
     status.polledAt = now;
     status.error = undefined;
-    try {
-      for (const [workspace, s] of settings)
+    for (const [workspace, s] of due(now)) {
+      status.polled[workspace] = now;
+      try {
         await pollWorkspace(workspace, s, now);
-    } catch (e) {
-      status.error = String(e?.message ?? e);
-      remy.log(`auto-pickup: ${status.error}; the next poll tries again`);
+      } catch (e) {
+        status.error = String(e?.message ?? e);
+        remy.log(`auto-pickup: ${status.error}; the next poll tries again`);
+      }
     }
     for (const [url, at] of Object.entries(picked))
       if (now - at >= longest)
@@ -949,11 +957,12 @@ function autoPickup(remy, world, factory) {
     if (world.disabled())
       return once(KILL_SWITCH, "auto-pickup paused: ~/.remy/autopickup-disabled exists");
     said.delete(KILL_SWITCH);
-    if (polling || world.now() - (status.polledAt ?? 0) < interval)
+    const now = world.now();
+    if (polling || !due(now).length)
       return;
     polling = true;
     try {
-      await poll();
+      await poll(now);
     } finally {
       polling = false;
     }
