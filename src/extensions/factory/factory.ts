@@ -6,14 +6,16 @@
  * machine's PRs) and for each PR you named with `remy factory start` (ADR-0013), moves every run on (pipeline.ts),
  * and keeps the waiting list in step: a run in progress keeps its session off the list, a held one is a judgment call
  * on it. A start report is taken once: the `starts` state remembers it after its run is dropped. Autonomy is the lower of the repo's and yours (ADR-0006). Step agents count against `maxFactoryAgents`, and
- * a usage limit pauses new ones for a while.
+ * a usage limit pauses new ones for a while. A workspace with `autoPickup` also has your own new PRs started without
+ * a session or `remy factory start` (auto-pickup.ts, ADR-0018).
  */
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Remy, SessionRef } from "../../sdk/extension";
 import { type Factory, lowerLevel } from "../../sdk/factory";
+import { autoPickup, type PickupWorld } from "./auto-pickup";
 import { formatRuns } from "./format";
-import { deploy, deployed, mergePr, prDetail, readReports, repoRootOf } from "./live";
+import { deploy, deployed, livePickup, mergePr, prDetail, readReports, repoRootOf } from "./live";
 import { type Loaded, loadFactory } from "./load";
 import { advance, type Env, fixOfferLapsed, isActive, type Run, YES } from "./pipeline";
 
@@ -54,9 +56,9 @@ const isOrphan = (s: SessionRef, current: Set<string>) => s.role === "factory" &
 
 export default (remy: Remy) => createFactory()(remy);
 
-/** The factory extension; `world` replaces parts of the real gh/gcloud/claude world, for tests. */
+/** The factory extension; `world` and `pickup` replace parts of the real gh/gcloud/claude world, for tests. */
 export const createFactory =
-  (world: Partial<Env> = {}) =>
+  (world: Partial<Env> = {}, pickup: Partial<PickupWorld> = {}) =>
   (remy: Remy) => {
     const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo] as const));
     const loaded = new Map<string, Loaded>();
@@ -298,6 +300,19 @@ export const createFactory =
       save();
       remy.log("usage limit; factory agents paused until", new Date(backoffUntil).toISOString());
     });
+
+    autoPickup(
+      remy,
+      { ...livePickup, ...pickup },
+      {
+        knows: (url) => !!runs[url] || !!starts[url],
+        blocker: async (root) => {
+          const f = await factoryAt(root);
+          if (!f) return loaded.get(root)?.error ?? "no .remy/factory.ts";
+          return autonomy(f) === "notify" ? "autonomy is notify, so the factory only reports" : undefined;
+        },
+      },
+    );
 
     remy.registerCommand("factory", {
       description: "Where each PR stands in its factory pipeline",

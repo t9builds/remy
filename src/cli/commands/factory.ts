@@ -2,10 +2,12 @@
  * `remy factory` and `remy report`: the factory's commands. They read and write the factory's files directly, so they
  * work while the daemon is down, and say so when `extensions.disabled` turns the factory off.
  */
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, workspaceFor } from "../../config/config";
 import { resolveRepo, trustedRepos } from "../../config/repos";
-import { formatRuns } from "../../extensions/factory/format";
+import { type PickupStatus, pickupWorkspaces } from "../../extensions/factory/auto-pickup";
+import { formatPickup, formatRuns } from "../../extensions/factory/format";
 import { appendReport, headOf, repoRootOf } from "../../extensions/factory/live";
 import { type Loaded, loadFactory } from "../../extensions/factory/load";
 import { isActive, type Run } from "../../extensions/factory/pipeline";
@@ -22,6 +24,10 @@ const disabledNote = (what: string) =>
     ? pc.yellow(`! The factory is disabled (extensions.disabled in ${PATHS.config}), so ${what}.`)
     : undefined;
 
+/** Auto-pickup's status, when a workspace turns it on (ADR-0018). */
+const pickupNote = (s: PickupStatus | undefined) =>
+  pickupWorkspaces(loadConfig().workspaces).length ? formatPickup(s, existsSync(PATHS.autoPickupDisabled)) : undefined;
+
 const say = (...lines: (string | undefined)[]) => console.log(lines.filter(Boolean).join("\n"));
 
 /** How a PR that conflicts with its base is handled, as `remy factory check` shows it (ADR-0015). */
@@ -35,7 +41,8 @@ export function conflictsLine(f: Factory) {
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: debt from before the limit (complexity 20); don't add to it
 export async function factory(args: string[]) {
   const { values, positionals } = parse(args, { json: { type: "boolean" } });
-  const runs = readJson<{ runs?: Record<string, Run> }>(PATHS.factory, {}).runs ?? {};
+  const state = readJson<{ runs?: Record<string, Run>; autoPickup?: PickupStatus }>(PATHS.factory, {});
+  const runs = state.runs ?? {};
   if (positionals[0] === "check") {
     const c = loadConfig();
     const root = repoRootOf(positionals[1] ? resolveRepo(positionals[1], c.repoRoots) : process.cwd());
@@ -66,7 +73,7 @@ export async function factory(args: string[]) {
   }
   if (positionals[0] === "start") return start(positionals[1], runs);
   if (values.json) return console.log(JSON.stringify(runs, null, 2));
-  say(formatRuns(Object.values(runs)), disabledNote("these PRs stay where they are"));
+  say(formatRuns(Object.values(runs)), pickupNote(state.autoPickup), disabledNote("these PRs stay where they are"));
 }
 
 /**

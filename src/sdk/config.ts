@@ -66,12 +66,35 @@ export type LinearSettings = {
   states?: Partial<Record<LinearPhase, string>>;
 };
 
+/**
+ * Start the factory on your own new PRs without `remy factory start` (extensions/factory/auto-pickup.ts, ADR-0018):
+ * every poll, each open PR you authored in the last `maxAgeHours`, in a factory repo of `extensions.repos`, gets a
+ * run that reports to this workspace. The block turns it on; `enabled: false` or a ~/.remy/autopickup-disabled file
+ * turns it off.
+ */
+export type AutoPickupSettings = {
+  /** Default true: the block's presence turns auto-pickup on. */
+  enabled?: boolean;
+  /** GitHub logins whose PRs are picked up. Default: the login `gh` is signed in as. */
+  authors?: string[];
+  /** GitHub repos to watch, as "owner/name", each in `extensions.repos`. Default: every repo there with a `.remy/factory.ts`. */
+  repos?: string[];
+  /** Only PRs opened less than this many hours ago are picked up, so older ones never start on their own. Default 24. */
+  maxAgeHours?: number;
+  /** Leave drafts until they're marked ready (inside the window). Default true. */
+  skipDrafts?: boolean;
+  /** Minutes between looks at GitHub. Default 5. */
+  pollIntervalMinutes?: number;
+};
+
 /** Where remy talks to you about a set of sessions: Slack, Telegram, or both. */
 export type Workspace = Routing & {
   slack?: SlackSettings;
   telegram?: TelegramSettings;
   /** Track this workspace's PRs in Linear. */
   linear?: LinearSettings;
+  /** Start the factory on your own new PRs on its own, reporting here. */
+  autoPickup?: AutoPickupSettings;
   /** How Slack and Telegram work together when both are set. Default "mirror". */
   both?: BothMode;
   /** The app that gets everything with "pings", and that "follow" starts with. Default "slack". */

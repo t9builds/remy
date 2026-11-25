@@ -33,6 +33,10 @@ export const PATHS = {
   reports: join(REMY_DIR, "reports.jsonl"),
   /** Where each PR stands in its factory pipeline; written only by the daemon's factory extension. */
   factory: join(REMY_DIR, "state", "builtin_factory.json"),
+  /** While this file exists, the factory's auto-pickup doesn't look for new PRs; the name the external watcher used. */
+  autoPickupDisabled: join(REMY_DIR, "autopickup-disabled"),
+  /** The external auto-pickup watcher's record of the PRs it started, imported once. */
+  autoPickupWatcher: join(REMY_DIR, "autopickup-state.json"),
   /** One folder per Slack task: task.json plus files downloaded from the thread. */
   taskDir: (id: string) => join(REMY_DIR, "tasks", id),
   slackState: (workspace: string) => join(REMY_DIR, `slack-state.${workspace}.json`),

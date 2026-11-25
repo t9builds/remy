@@ -330,6 +330,7 @@ Each workspace:
 | `main` | The app that gets everything with `pings`, and the one `follow` starts with: `slack` (default) or `telegram` |
 | `linear.team` | Track this workspace's PRs in [Linear](#linear): the key of the team new issues go to, e.g. `ENG` |
 | `linear.states` | The Linear state for each phase of a PR, by name; see [Linear](#linear) |
+| `autoPickup` | Start the factory on your own new PRs without asking; see [Auto-pickup](#auto-pickup) |
 
 Leave out both `repos` and `paths` for the catch-all workspace. Configs from before 0.6, with flat `slackUserId` / `messenger` fields, are read as before.
 
@@ -470,6 +471,29 @@ How far Remy goes on its own is the lower of the repo's `autonomy` and yours in 
 A step above your level is asked for: reply `yes` in its thread and Remy does it, or merge the PR yourself and the run carries on after the merge. A held run, such as a gate that stops it, a failure the fixer couldn't fix, or an agent that stopped without reporting, is on the waiting list with its reason. Decide, then `remy factory retry <pr>` runs the step again. New commits restart a held run.
 
 The factory runs only in repos listed in `extensions.repos`, and only on PRs of sessions on your machine, so two teammates' Remys never act on each other's changes. For a PR no session of yours is on, such as one pushed by hand, `remy factory start <pr>` (a URL, number or branch) starts its run. Start it again after new commits if it was held. Sessions sharing a [GitButler](https://gitbutler.com) workspace each get the PR of the branch they named, so one session's PR never runs as another's. Step agents, fixers and resolvers count against `maxFactoryAgents`, and new ones pause for half an hour when Claude Code reports a usage limit. `remy factory` (or `/factory` in the chat) shows where each PR stands. `remy factory check` validates a repo's `factory.ts` (including `fixer` and `conflicts`) and shows the autonomy that applies and how conflicts are resolved.
+
+### Auto-pickup
+
+To have the factory take every new PR of yours without `remy factory start`, give the workspace runs should report to an `autoPickup` block. `{}` uses the defaults:
+
+```json
+{ "name": "work", "repos": ["acme-corp/*"], "autoPickup": {} }
+```
+
+Every `pollIntervalMinutes`, the daemon lists each author's open PRs in the factory repos with `gh pr list`, and starts each one opened less than `maxAgeHours` ago, the same way `remy factory start` does. No message is posted and nothing is asked. A PR the factory knows already, running or finished, isn't started again, nor one auto-pickup started before, also after a restart. Older PRs are never started on their own, so turning it on doesn't sweep up your backlog.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` turns it off and keeps the settings |
+| `authors` | the login `gh` is signed in as | GitHub logins whose PRs are picked up |
+| `repos` | every repo in `extensions.repos` with a `.remy/factory.ts` | GitHub repos to watch, as `owner/name`; each must be in `extensions.repos` |
+| `maxAgeHours` | `24` | Only PRs opened less than this long ago; the window rolls with each poll |
+| `skipDrafts` | `true` | A draft is picked up once it's marked ready, if still inside the window; `false` starts drafts too, and the gate holds them until ready |
+| `pollIntervalMinutes` | `5` | Minutes between looks at GitHub |
+
+A PR that a session of yours has is left to the session's own run, which starts when the PR is ready. A repo whose factory is missing, doesn't load or is at `notify` is skipped (logged once), and looked at again each poll. A failed `gh` is logged and tried at the next poll. While `~/.remy/autopickup-disabled` exists, auto-pickup doesn't poll. `remy factory` shows when it last looked and what it started, and `~/.remy/daemon.log` has each start and skip. See [ADR-0018](docs/adr/0018-factory-auto-pickup.md).
+
+Coming from an external watcher script that ran `remy factory start` on a timer: on its first run, auto-pickup takes the PR URLs listed in `~/.remy/autopickup-state.json` (`{"enrolled": [...]}`) as already started. Stop the watcher before you restart the daemon with `autoPickup` set, so the two don't both start the same PR.
 
 ## Linear
 

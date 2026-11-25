@@ -67,6 +67,10 @@ _Avoid_: pipeline runner, CI
 A repo's ordered list of steps, defined in code next to the code it ships.
 _Avoid_: workflow, recipe
 
+**Auto-pickup**:
+The factory starting your own new PRs on its own, found by polling GitHub, as if you had run `remy factory start` on each.
+_Avoid_: autostart, watcher, auto-enroll
+
 **Step**:
 One stage of a pipeline: an agent step, a wait, a gate or an action.
 _Avoid_: stage, job, task

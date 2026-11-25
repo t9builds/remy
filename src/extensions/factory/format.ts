@@ -1,5 +1,6 @@
 /** Where each PR stands in its pipeline, as `/factory` and `remy factory` show it. */
 import type { Factory } from "../../sdk/factory";
+import type { PickupStatus } from "./auto-pickup";
 import type { Run } from "./pipeline";
 
 const STAGE: Record<Run["stage"], string> = {
@@ -25,4 +26,17 @@ export function formatRuns(runs: Run[], factoryOf: (r: Run) => Factory | undefin
       return `#${r.number} ${r.repo} · ${STAGE[r.stage]}${at ? ` · ${at}` : ""}${r.reason ? ` · ${r.reason}` : ""} · ${r.pr}`;
     })
     .join("\n");
+}
+
+const clock = (at: number) => new Date(at).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+
+/** Auto-pickup's lines under `remy factory`: when it last looked, whether that failed, and what it started lately. */
+export function formatPickup(s: PickupStatus | undefined, paused: boolean) {
+  const last = s?.polledAt
+    ? `last looked ${clock(s.polledAt)}${s.error ? ` and failed: ${s.error}` : ""}`
+    : "no look yet";
+  return [
+    `Auto-pickup: ${paused ? "paused by ~/.remy/autopickup-disabled; " : ""}${last}.`,
+    ...(s?.started ?? []).map((x) => `  started ${x.pr} at ${clock(x.at)}`),
+  ].join("\n");
 }

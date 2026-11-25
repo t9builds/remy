@@ -15547,6 +15547,8 @@ var PATHS = {
   held: join(REMY_DIR, "held.json"),
   reports: join(REMY_DIR, "reports.jsonl"),
   factory: join(REMY_DIR, "state", "builtin_factory.json"),
+  autoPickupDisabled: join(REMY_DIR, "autopickup-disabled"),
+  autoPickupWatcher: join(REMY_DIR, "autopickup-state.json"),
   taskDir: (id) => join(REMY_DIR, "tasks", id),
   slackState: (workspace) => join(REMY_DIR, `slack-state.${workspace}.json`),
   telegramState: (workspace) => join(REMY_DIR, `telegram-state.${workspace}.json`),

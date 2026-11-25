@@ -222,6 +222,8 @@ var PATHS = {
   held: join(REMY_DIR, "held.json"),
   reports: join(REMY_DIR, "reports.jsonl"),
   factory: join(REMY_DIR, "state", "builtin_factory.json"),
+  autoPickupDisabled: join(REMY_DIR, "autopickup-disabled"),
+  autoPickupWatcher: join(REMY_DIR, "autopickup-state.json"),
   taskDir: (id) => join(REMY_DIR, "tasks", id),
   slackState: (workspace) => join(REMY_DIR, `slack-state.${workspace}.json`),
   telegramState: (workspace) => join(REMY_DIR, `telegram-state.${workspace}.json`),
@@ -693,7 +695,7 @@ ${pr.url}`, {
 }
 
 // src/extensions/factory/factory.ts
-import { existsSync as existsSync6, statSync as statSync5 } from "fs";
+import { existsSync as existsSync7, statSync as statSync5 } from "fs";
 import { join as join6 } from "path";
 
 // src/sdk/factory.ts
@@ -814,6 +816,159 @@ function validate(f) {
   return errors;
 }
 
+// src/extensions/factory/auto-pickup.ts
+var HOUR = 3600000;
+var KILL_SWITCH = "kill switch";
+var settingsOf = (s) => {
+  const out = { maxAgeHours: 24, skipDrafts: true, pollIntervalMinutes: 5, ...s };
+  return { ...out, pollIntervalMinutes: Math.max(1, out.pollIntervalMinutes) };
+};
+var pickupWorkspaces = (workspaces) => workspaces.filter((w) => w.autoPickup && w.autoPickup.enabled !== false);
+function skipReason(pr, now, s, known) {
+  if (Date.parse(pr.createdAt) <= now - s.maxAgeHours * HOUR)
+    return `opened more than ${s.maxAgeHours}h ago`;
+  if (known)
+    return "already in the factory";
+  if (pr.isDraft && s.skipDrafts)
+    return "a draft; picked up once it's ready";
+  return;
+}
+var sameRepo = (a, b) => a.toLowerCase() === b.toLowerCase();
+function autoPickup(remy, world, factory) {
+  const workspaces = pickupWorkspaces(remy.config.workspaces);
+  if (!workspaces.length)
+    return;
+  const settings = new Map(workspaces.map((w) => [w.name, settingsOf(w.autoPickup)]));
+  const longest = Math.max(...[...settings.values()].map((s) => s.maxAgeHours)) * HOUR;
+  const picked = remy.state.get("pickedUp", null) ?? fromWatcher();
+  const status = remy.state.get("autoPickup", { started: [] });
+  status.polled ??= {};
+  const said = new Set;
+  const once = (key, text) => {
+    if (said.has(key))
+      return;
+    said.add(key);
+    remy.log(text);
+  };
+  let login;
+  let polling = false;
+  function fromWatcher() {
+    let urls = [];
+    try {
+      const listed = world.watcherPicked();
+      urls = Array.isArray(listed) ? listed.filter((u) => typeof u === "string") : [];
+    } catch (e) {
+      remy.log("auto-pickup: the external watcher's state file can't be read:", e?.message ?? e);
+    }
+    if (urls.length)
+      remy.log(`auto-pickup: took ${urls.length} PRs the external watcher started; they won't start again`);
+    const seeded = Object.fromEntries(urls.map((u) => [u, world.now()]));
+    remy.state.set("pickedUp", seeded);
+    return seeded;
+  }
+  async function authorsOf(s) {
+    if (s.authors?.length)
+      return s.authors;
+    login ??= await world.login();
+    return [login];
+  }
+  async function reposOf(s) {
+    const found = remy.trustedRepos().flatMap(({ root }) => {
+      const repo = world.github(root);
+      if (!repo)
+        once(`no github ${root}`, `auto-pickup skips ${root}: its origin isn't on github.com`);
+      return repo ? [{ repo, root }] : [];
+    });
+    for (const want of s.repos ?? [])
+      if (!found.some((f) => sameRepo(f.repo, want)))
+        once(`untrusted ${want}`, `auto-pickup skips ${want}: it isn't in extensions.repos`);
+    const chosen = s.repos ? found.filter((f) => s.repos.some((w) => sameRepo(w, f.repo))) : found;
+    const usable = [];
+    for (const r of chosen) {
+      const blocked = await factory.blocker(r.root);
+      if (!blocked)
+        usable.push(r);
+      else
+        once(`blocked ${r.root} ${blocked}`, `auto-pickup skips ${r.repo}: ${blocked}; looks again each poll`);
+    }
+    return usable;
+  }
+  function consider(pr, r, workspace, s, now) {
+    const known = !!picked[pr.url] || factory.knows(pr.url);
+    const why = skipReason(pr, now, s, known);
+    if (known) {
+      if (!picked[pr.url] && why === "already in the factory") {
+        picked[pr.url] = now;
+        remy.log(`auto-pickup skips ${pr.url}: already in the factory`);
+      }
+      return;
+    }
+    if (why)
+      return why.startsWith("opened") ? undefined : once(`${pr.url} ${why}`, `auto-pickup skips ${pr.url}: ${why}`);
+    if (remy.sessions().some((x) => !x.role && x.pr?.url === pr.url))
+      return once(`${pr.url} session`, `auto-pickup skips ${pr.url}: a session of yours has it; the factory starts it when ready`);
+    world.enroll({
+      pr: pr.url,
+      step: "",
+      kind: "start",
+      head: pr.headRefOid,
+      start: { number: pr.number, title: pr.title, repo: r.repo, repoDir: r.root, branch: pr.headRefName, workspace }
+    });
+    picked[pr.url] = now;
+    remy.state.set("pickedUp", picked);
+    status.started = [{ pr: pr.url, at: now }, ...status.started].slice(0, 10);
+    remy.log(`auto-pickup started ${pr.url}`);
+  }
+  async function pollWorkspace(workspace, s, now) {
+    const authors = await authorsOf(s);
+    for (const r of await reposOf(s))
+      for (const author of authors) {
+        const key = `failed ${r.repo} ${author}`;
+        try {
+          for (const pr of await world.openPrs(r.repo, author))
+            consider(pr, r, workspace, s, now);
+          said.delete(key);
+        } catch (e) {
+          status.error = String(e?.message ?? e);
+          once(key, `auto-pickup: ${status.error}; tried again each poll`);
+        }
+      }
+  }
+  const due = (now) => [...settings].filter(([w, s]) => now - (status.polled[w] ?? 0) >= s.pollIntervalMinutes * 60000);
+  async function poll(now) {
+    status.polledAt = now;
+    status.error = undefined;
+    for (const [workspace, s] of due(now)) {
+      status.polled[workspace] = now;
+      try {
+        await pollWorkspace(workspace, s, now);
+      } catch (e) {
+        status.error = String(e?.message ?? e);
+        remy.log(`auto-pickup: ${status.error}; the next poll tries again`);
+      }
+    }
+    for (const [url, at] of Object.entries(picked))
+      if (now - at >= longest)
+        delete picked[url];
+    remy.state.set("pickedUp", picked);
+    remy.state.set("autoPickup", status);
+  }
+  remy.on("tick", async () => {
+    if (world.disabled())
+      return once(KILL_SWITCH, "auto-pickup paused: ~/.remy/autopickup-disabled exists");
+    said.delete(KILL_SWITCH);
+    const now = world.now();
+    if (polling || !due(now).length)
+      return;
+    polling = true;
+    try {
+      await poll(now);
+    } finally {
+      polling = false;
+    }
+  });
+}
+
 // src/extensions/factory/format.ts
 var STAGE = {
   running: "next",
@@ -837,9 +992,18 @@ function formatRuns(runs, factoryOf = () => {
   }).join(`
 `);
 }
+var clock = (at) => new Date(at).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+function formatPickup(s, paused) {
+  const last = s?.polledAt ? `last looked ${clock(s.polledAt)}${s.error ? ` and failed: ${s.error}` : ""}` : "no look yet";
+  return [
+    `Auto-pickup: ${paused ? "paused by ~/.remy/autopickup-disabled; " : ""}${last}.`,
+    ...(s?.started ?? []).map((x) => `  started ${x.pr} at ${clock(x.at)}`)
+  ].join(`
+`);
+}
 
 // src/extensions/factory/live.ts
-import { appendFileSync, readFileSync as readFileSync3 } from "fs";
+import { appendFileSync, existsSync as existsSync5, readFileSync as readFileSync3 } from "fs";
 import { dirname as dirname2 } from "path";
 
 // src/shared/ci.ts
@@ -861,8 +1025,9 @@ function ciOf(rollup) {
 }
 
 // src/extensions/factory/live.ts
-async function run(cmd, cwd) {
-  const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
+var GITHUB_ORIGIN = /github\.com[:/](.+?)(\.git)?$/;
+async function run(cmd, cwd, timeout) {
+  const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "pipe", timeout });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { ok: code === 0, out: out.trim(), err: err.trim() };
 }
@@ -986,9 +1151,37 @@ async function headOf(url) {
   const r = await run(["gh", "pr", "view", url, "--json", "headRefOid", "-q", ".headRefOid"]);
   return r.ok ? r.out : undefined;
 }
+var GH_TIMEOUT = 120000;
+async function ghLogin() {
+  const r = await run(["gh", "api", "user", "--jq", ".login"], undefined, GH_TIMEOUT);
+  if (!r.ok || !r.out)
+    throw new Error(`gh api user: ${r.err.slice(0, 200) || "no login"}`);
+  return r.out;
+}
+async function openPrs(repo, author) {
+  const fields = "url,number,title,createdAt,isDraft,headRefName,headRefOid";
+  const cmd = ["gh", "pr", "list", "-R", repo, "--author", author, "--state", "open", "--limit", "100"];
+  const r = await run([...cmd, "--json", fields], undefined, GH_TIMEOUT);
+  if (!r.ok)
+    throw new Error(`gh pr list -R ${repo}: ${r.err.slice(0, 200)}`);
+  return JSON.parse(r.out || "[]");
+}
+function githubOf(root) {
+  const r = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd: root, stdout: "pipe", stderr: "ignore" });
+  return r.exitCode === 0 ? r.stdout.toString().trim().match(GITHUB_ORIGIN)?.[1] : undefined;
+}
+var livePickup = {
+  now: Date.now,
+  login: ghLogin,
+  openPrs,
+  github: githubOf,
+  disabled: () => existsSync5(PATHS.autoPickupDisabled),
+  watcherPicked: () => readJson(PATHS.autoPickupWatcher, {}).enrolled ?? [],
+  enroll: appendReport
+};
 
 // src/extensions/factory/load.ts
-import { existsSync as existsSync5, statSync as statSync4 } from "fs";
+import { existsSync as existsSync6, statSync as statSync4 } from "fs";
 import { join as join5 } from "path";
 var registered = false;
 function registerModule() {
@@ -1002,7 +1195,7 @@ function registerModule() {
 }
 async function loadFactory(root) {
   const path = join5(root, ".remy", "factory.ts");
-  if (!existsSync5(path))
+  if (!existsSync6(path))
     return { mtime: 0 };
   const mtime = statSync4(path).mtimeMs;
   registerModule();
@@ -1659,7 +1852,7 @@ var KEEP_MS = 7 * 24 * 3600000;
 var isReady = (s) => !s.role && !!s.pr?.head && s.pr.state === "OPEN" && !s.pr.draft && s.pr.ci !== "fail" && s.pr.review !== "CHANGES_REQUESTED" && s.status !== "busy";
 var isOrphan = (s, current) => s.role === "factory" && !current.has(s.name);
 var factory_default = (remy) => createFactory()(remy);
-var createFactory = (world = {}) => (remy) => {
+var createFactory = (world = {}, pickup = {}) => (remy) => {
   const trusted = new Map(remy.trustedRepos().map((r) => [r.root, r.repo]));
   const loaded = new Map;
   const runs = remy.state.get("runs", {});
@@ -1675,7 +1868,7 @@ var createFactory = (world = {}) => (remy) => {
     if (!trusted.has(root))
       return;
     const path = join6(root, ".remy", "factory.ts");
-    const mtime = existsSync6(path) ? statSync5(path).mtimeMs : 0;
+    const mtime = existsSync7(path) ? statSync5(path).mtimeMs : 0;
     let l = loaded.get(root);
     if (!l || l.mtime !== mtime) {
       l = mtime ? await loadFactory(root) : { mtime: 0 };
@@ -1870,6 +2063,15 @@ var createFactory = (world = {}) => (remy) => {
       run.stage = "running";
     save();
     remy.log("usage limit; factory agents paused until", new Date(backoffUntil).toISOString());
+  });
+  autoPickup(remy, { ...livePickup, ...pickup }, {
+    knows: (url) => !!runs[url] || !!starts[url],
+    blocker: async (root) => {
+      const f = await factoryAt(root);
+      if (!f)
+        return loaded.get(root)?.error ?? "no .remy/factory.ts";
+      return autonomy(f) === "notify" ? "autonomy is notify, so the factory only reports" : undefined;
+    }
   });
   remy.registerCommand("factory", {
     description: "Where each PR stands in its factory pipeline",
@@ -2387,7 +2589,7 @@ var send = (socket, m) => {
 };
 
 // src/link/server.ts
-import { chmodSync, existsSync as existsSync7, unlinkSync } from "fs";
+import { chmodSync, existsSync as existsSync8, unlinkSync } from "fs";
 import { createConnection, createServer } from "net";
 function answers(path, timeoutMs = 1000) {
   return new Promise((resolve) => {
@@ -2424,7 +2626,7 @@ class LinkServer {
     this.handlers.held?.(this.held);
   }
   async listen() {
-    if (existsSync7(this.path)) {
+    if (existsSync8(this.path)) {
       if (await answers(this.path))
         throw new Error(`a remy daemon is already running (${this.path})`);
       unlinkSync(this.path);
@@ -2836,7 +3038,7 @@ function requestText(text, botUserId) {
   return text.replace(new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g"), "").replace(/[^\S\n]+/g, " ").replace(/ ?\n\s*/g, `
 `).trim().replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
-function clock(ts) {
+function clock2(ts) {
   const d = new Date(Number(ts) * 1000);
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
@@ -2889,7 +3091,7 @@ function formatTranscript(messages, names, opts) {
     const body = cleanText(messageText(m), names).split(`
 `).join(`
     `);
-    const lines = [`[${clock(m.ts)}] ${who}: ${body}`];
+    const lines = [`[${clock2(m.ts)}] ${who}: ${body}`];
     for (const f of opts.files?.get(m.ts) ?? [])
       lines.push(`    (attachment: ${f})`);
     if (m.ts === opts.triggerTs)
@@ -4510,7 +4712,7 @@ function formatMerged(spawned) {
 }
 
 // src/sessions/spawn.ts
-import { existsSync as existsSync8 } from "fs";
+import { existsSync as existsSync9 } from "fs";
 import { basename as basename2, join as join9 } from "path";
 var SESSION_ENV = new Set([
   "REMY_ROLE",
@@ -4546,7 +4748,7 @@ async function spawnAgent(opts) {
     name = `${slug(opts.name)}-${i}`;
   let label = slug(`${basename2(cwd)}-${opts.task.split(/\s+/).slice(0, 4).join(" ")}`);
   const base = label;
-  for (let i = 2;existsSync8(join9(cwd, ".claude", "worktrees", label)); i++)
+  for (let i = 2;existsSync9(join9(cwd, ".claude", "worktrees", label)); i++)
     label = `${base}-${i}`;
   const prompt = opts.prompt ?? config.spawnTemplate.replaceAll("{task}", opts.taskText ?? opts.task);
   const worktree = opts.worktree ?? config.spawnWorktree;
@@ -5604,8 +5806,10 @@ async function daemon(args) {
 }
 
 // src/cli/commands/factory.ts
+import { existsSync as existsSync10 } from "fs";
 import { join as join11 } from "path";
 var disabledNote = (what) => loadConfig().extensions?.disabled?.includes("factory") ? import_picocolors.default.yellow(`! The factory is disabled (extensions.disabled in ${PATHS.config}), so ${what}.`) : undefined;
+var pickupNote = (s) => pickupWorkspaces(loadConfig().workspaces).length ? formatPickup(s, existsSync10(PATHS.autoPickupDisabled)) : undefined;
 var say = (...lines) => console.log(lines.filter(Boolean).join(`
 `));
 function conflictsLine(f) {
@@ -5617,7 +5821,8 @@ function conflictsLine(f) {
 }
 async function factory(args) {
   const { values, positionals } = parse(args, { json: { type: "boolean" } });
-  const runs = readJson(PATHS.factory, {}).runs ?? {};
+  const state = readJson(PATHS.factory, {});
+  const runs = state.runs ?? {};
   if (positionals[0] === "check") {
     const c = loadConfig();
     const root = repoRootOf(positionals[1] ? resolveRepo(positionals[1], c.repoRoots) : process.cwd());
@@ -5646,7 +5851,7 @@ autonomy: ${lowerLevel(f.autonomy ?? "notify", c.autonomy)} (repo ${f.autonomy ?
     return start2(positionals[1], runs);
   if (values.json)
     return console.log(JSON.stringify(runs, null, 2));
-  say(formatRuns(Object.values(runs)), disabledNote("these PRs stay where they are"));
+  say(formatRuns(Object.values(runs)), pickupNote(state.autoPickup), disabledNote("these PRs stay where they are"));
 }
 async function start2(want, runs) {
   if (!want)
@@ -5721,7 +5926,7 @@ async function post(args) {
 }
 
 // src/sessions/resume.ts
-import { existsSync as existsSync9 } from "fs";
+import { existsSync as existsSync11 } from "fs";
 import { homedir as homedir3 } from "os";
 var STUCK_MS = 60 * 60000;
 var resumeCommand = (sessionId, prompt) => ["claude", "--bg", "--resume", sessionId, prompt];
@@ -5765,7 +5970,7 @@ var realToResumeWorld = {
   spawned: () => readJson(PATHS.spawned, {}),
   agents: () => listAgents(true),
   latest: latestEvents2,
-  exists: existsSync9,
+  exists: existsSync11,
   lookup: async (cwd) => {
     const { branch, repo } = await gitInfo(cwd);
     return { repo, pr: branch && !NO_PR_BRANCHES.has(branch) ? await prInfo(cwd, branch) : undefined };
@@ -5832,7 +6037,7 @@ async function resumeSession(name, why = "the user asked for it", world = {}) {
       await w.sleep(500);
     }
   }
-  const cwd = existsSync9(row.cwd) ? row.cwd : homedir3();
+  const cwd = existsSync11(row.cwd) ? row.cwd : homedir3();
   const r = run(resumeCommand(row.sessionId, resumePrompt(why)), { cwd, env: resumeEnv() });
   if (!r.ok)
     throw new Error(`claude --bg --resume failed: ${r.out}`);
@@ -6125,11 +6330,11 @@ async function changes() {
 }
 
 // src/cli/commands/trace.ts
-import { existsSync as existsSync11 } from "fs";
+import { existsSync as existsSync13 } from "fs";
 import { join as join14 } from "path";
 
 // src/sessions/transcript.ts
-import { existsSync as existsSync10, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
+import { existsSync as existsSync12, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "fs";
 import { homedir as homedir5 } from "os";
 import { join as join13 } from "path";
 var projectDirOf = (cwd, claudeDir = claudeHome()) => join13(claudeDir, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
@@ -6173,7 +6378,7 @@ function readLines2(path) {
   }
 }
 function readTranscript(path) {
-  if (!existsSync10(path))
+  if (!existsSync12(path))
     return;
   const dir = join13(path.replace(/\.jsonl$/, ""), "subagents");
   let subagents = [];
@@ -6397,10 +6602,10 @@ function duration(ms) {
   return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 var pad = (x) => String(x).padStart(2, "0");
-var clock2 = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+var clock3 = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 var time = (ms) => {
   const d = new Date(ms);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock2(d).slice(0, 5)}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock3(d).slice(0, 5)}`;
 };
 var counts = (c, errors = {}) => Object.entries(c).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}${errors[k] ? import_picocolors.default.red(` (${errors[k]} failed)`) : ""}`).join(" \xB7 ");
 function verdictLine(r) {
@@ -6433,7 +6638,7 @@ function formatTrace(t, opts = {}) {
         out.push(`  subagent tools ${counts(s.subagentTools, s.subagentErrors)}`);
       if (opts.calls)
         for (const c of s.calls)
-          out.push(import_picocolors.default.dim(`    ${c.at ? clock2(new Date(c.at)) : ""} `) + `${c.agent ? import_picocolors.default.dim(`[${c.agent}] `) : ""}${c.error ? import_picocolors.default.red(c.tool) : c.tool} ${import_picocolors.default.dim(c.input)}`);
+          out.push(import_picocolors.default.dim(`    ${c.at ? clock3(new Date(c.at)) : ""} `) + `${c.agent ? import_picocolors.default.dim(`[${c.agent}] `) : ""}${c.error ? import_picocolors.default.red(c.tool) : c.tool} ${import_picocolors.default.dim(c.input)}`);
     }
     for (const r of a.reports)
       out.push(`  ${verdictLine(r)}`);
@@ -6457,7 +6662,7 @@ async function trace(args) {
     spawned: readJson(PATHS.spawned, {}),
     events: readEvents(),
     transcript: (id, cwd, known) => {
-      const path = known && existsSync11(known) ? known : findTranscript(id, cwd);
+      const path = known && existsSync13(known) ? known : findTranscript(id, cwd);
       return { path, summary: path ? readTranscript(path) : undefined };
     }
   });

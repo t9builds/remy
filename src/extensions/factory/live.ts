@@ -1,15 +1,24 @@
-/** The real world for pipeline.ts: gh for PRs and merges, Cloud Build or a shell command for deploys, the reports file. */
-import { appendFileSync, readFileSync } from "node:fs";
+/**
+ * The real world for pipeline.ts and auto-pickup.ts: gh for PRs and merges, Cloud Build or a shell command for deploys,
+ * the reports file.
+ */
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Environment } from "../../sdk/factory";
 import { ciOf } from "../../shared/ci";
-import { ensureDir } from "../../shared/json-file";
+import { ensureDir, readJson } from "../../shared/json-file";
 import { PATHS } from "../../shared/paths";
+import type { OpenPr, PickupWorld } from "./auto-pickup";
 import type { Build, PrDetail, Report } from "./pipeline";
 
-/** `out` is stdout, which JSON is read from; `err` is stderr, where gh and gcloud say what went wrong. */
-async function run(cmd: string[], cwd?: string) {
-  const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
+const GITHUB_ORIGIN = /github\.com[:/](.+?)(\.git)?$/;
+
+/**
+ * `out` is stdout, which JSON is read from; `err` is stderr, where gh and gcloud say what went wrong. `timeout` (ms)
+ * kills a command that hangs.
+ */
+async function run(cmd: string[], cwd?: string, timeout?: number) {
+  const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "pipe", timeout });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { ok: code === 0, out: out.trim(), err: err.trim() };
 }
@@ -143,3 +152,37 @@ export async function headOf(url: string) {
   const r = await run(["gh", "pr", "view", url, "--json", "headRefOid", "-q", ".headRefOid"]);
   return r.ok ? r.out : undefined;
 }
+
+const GH_TIMEOUT = 120_000;
+
+/** The login `gh` is signed in as. */
+async function ghLogin() {
+  const r = await run(["gh", "api", "user", "--jq", ".login"], undefined, GH_TIMEOUT);
+  if (!r.ok || !r.out) throw new Error(`gh api user: ${r.err.slice(0, 200) || "no login"}`);
+  return r.out;
+}
+
+/** `author`'s open PRs in `repo` (owner/name), newest first, as `gh pr list` gives them. */
+async function openPrs(repo: string, author: string): Promise<OpenPr[]> {
+  const fields = "url,number,title,createdAt,isDraft,headRefName,headRefOid";
+  const cmd = ["gh", "pr", "list", "-R", repo, "--author", author, "--state", "open", "--limit", "100"];
+  const r = await run([...cmd, "--json", fields], undefined, GH_TIMEOUT);
+  if (!r.ok) throw new Error(`gh pr list -R ${repo}: ${r.err.slice(0, 200)}`);
+  return JSON.parse(r.out || "[]");
+}
+
+/** The GitHub owner/name of a checkout's origin, if it has one on github.com. */
+function githubOf(root: string) {
+  const r = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd: root, stdout: "pipe", stderr: "ignore" });
+  return r.exitCode === 0 ? r.stdout.toString().trim().match(GITHUB_ORIGIN)?.[1] : undefined;
+}
+
+export const livePickup: PickupWorld = {
+  now: Date.now,
+  login: ghLogin,
+  openPrs,
+  github: githubOf,
+  disabled: () => existsSync(PATHS.autoPickupDisabled),
+  watcherPicked: () => readJson<{ enrolled?: string[] }>(PATHS.autoPickupWatcher, {}).enrolled ?? [],
+  enroll: appendReport,
+};
