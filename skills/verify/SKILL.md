@@ -16,7 +16,8 @@ You check the running system, not the code. The factory prompt says where: an en
    - read-only database access, through your skills, when the change writes data
 3. **Exercise it.** The main path, and one or two edge cases the change is about. Before merge, launch an isolated instance from this checkout (the verification skill says how), never the user's own running one. Capture what you did and what you saw.
 4. **Leave it as you found it.** Clean up what you started. Change data only as far as exercising the change needs, and on production stay read-only unless the factory prompt says otherwise. Never change or push code or open PRs, even when the factory prompt offers a push or `fixed`.
-5. **Report**, as the very last step, only `pass` or `fail` (never `fixed`):
+5. **Post the evidence on the PR**, every run, so a person can check the verdict without asking for it. Follow the verification skill's publish step; it may push to an evidence branch, which is not code. Without one, add one PR comment (`gh pr comment`): each check with its verdict, what you did and what you saw, as the commands with their output, the requests with their responses, the log lines. Redact tokens and passwords.
+6. **Report**, as the very last step, only `pass` or `fail` (never `fixed`):
    - `pass`: the change works and you saw no new errors. The summary says what you checked.
    - `fail`: it doesn't work, something broke, or you couldn't run it. The summary says what you saw, so a fix can start from it. A problem you find is a `fail`; you don't fix it.
 
